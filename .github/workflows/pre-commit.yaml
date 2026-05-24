@@ -2,18 +2,42 @@ name: pre-commit
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - uses: pre-commit/action@v3.0.1
+          python-version: "3.13"
+
+      - name: Run pre-commit (auto-fix)
+        uses: pre-commit/action@v3.0.1
+        continue-on-error: true
+
+      - name: Commit auto-fixes
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No fixes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "style: auto-fix pre-commit issues"
+          git push
+
+      - name: Verify clean after fixes
+        run: |
+          pip install pre-commit
+          pre-commit run --all-files
