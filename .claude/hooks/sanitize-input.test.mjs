@@ -138,7 +138,7 @@ describe("sanitize-input hook", () => {
     const r = h(await runHook(makeInput("Bash", {
       command: "rm" + String.fromCodePoint(0x200B) + " -rf /"
     })));
-    assert.match(r.additionalContext, /stripped/i);
+    assert.match(r.additionalContext, /sanitized/i);
     assert.doesNotMatch(r.additionalContext, /semantic prompt injection/);
   });
 
@@ -159,5 +159,37 @@ describe("sanitize-input hook", () => {
 
   it("100KB clean input has no output", async () => {
     assert.equal(await runHook(makeInput("Bash", { command: "x".repeat(100000) })), null);
+  });
+
+  it("normalizes Cyrillic confusable in file path", async () => {
+    const r = h(await runHook(makeInput("Read", {
+      file_path: "/etc/p" + String.fromCodePoint(0x0430) + "sswd"
+    })));
+    assert.equal(r.permissionDecision, "allow");
+    assert.equal(r.updatedInput.file_path, "/etc/passwd");
+    assert.match(r.additionalContext, /Confusable/);
+    assert.match(r.additionalContext, /Cyrillic/);
+  });
+
+  it("normalizes multiple confusables in Bash command", async () => {
+    const r = h(await runHook(makeInput("Bash", {
+      command: "c" + String.fromCodePoint(0x0430) + "t /tmp/x"
+    })));
+    assert.equal(r.permissionDecision, "allow");
+    assert.equal(r.updatedInput.command, "cat /tmp/x");
+  });
+
+  it("handles combined invisible + confusable", async () => {
+    const r = h(await runHook(makeInput("Bash", {
+      command: "echo" + String.fromCodePoint(0x200B) + " h" + String.fromCodePoint(0x0435) + "llo"
+    })));
+    assert.equal(r.permissionDecision, "allow");
+    assert.equal(r.updatedInput.command, "echo hello");
+    assert.match(r.additionalContext, /ZERO WIDTH SPACE/);
+    assert.match(r.additionalContext, /Confusable/);
+  });
+
+  it("does not flag clean Latin text as confusable", async () => {
+    assert.equal(await runHook(makeInput("Bash", { command: "echo hello" })), null);
   });
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { detect } from "out-of-character";
 import stripAnsi from "strip-ansi";
+import { canonicalise, scan } from "namespace-guard";
 
 // \p{Cf/Zs/Zl/Zp} auto-update with Node's ICU data — no manual codepoint maintenance.
 const CATEGORY_CHECKS = [
@@ -55,11 +56,25 @@ function analyzeText(text) {
     }
   }
 
-  const cleaned = stripAnsi(text).replace(STRIP_RE, "");
+  let cleaned = stripAnsi(text).replace(STRIP_RE, "");
+
+  // Confusable/homoglyph detection (namespace-guard)
+  const scanResult = scan(cleaned);
+  if (scanResult.hasConfusables) {
+    for (const f of scanResult.findings) {
+      findings.push(
+        "Confusable: " + f.script + " " + JSON.stringify(f.char) +
+        " (" + f.codepoint + ") looks like Latin " + JSON.stringify(f.latinEquivalent) +
+        " (score: " + f.visualScore + ")"
+      );
+    }
+    cleaned = canonicalise(cleaned);
+  }
   return {
     findings: [...new Set(findings)],
     cleaned,
     hasLongRun: (RUN_RE.lastIndex = 0, RUN_RE.test(text)),
+    hasConfusables: scanResult.hasConfusables,
   };
 }
 
@@ -73,13 +88,16 @@ const FIELD_MAP = {
 function processInput(toolName, toolInput) {
   const allFindings = [];
   let hasLongRun = false;
+  let hasConfusables = false;
   const keys = FIELD_MAP[toolName];
 
   function walk(obj, path) {
     if (typeof obj === "string") {
-      const { findings, cleaned, hasLongRun: longRun } = analyzeText(obj);
+      const result = analyzeText(obj);
+      const { findings, cleaned, hasLongRun: longRun } = result;
       if (findings.length > 0) allFindings.push({ field: path, findings });
       if (longRun) hasLongRun = true;
+      if (result.hasConfusables) hasConfusables = true;
       return cleaned;
     }
     if (Array.isArray(obj)) return obj.map((v, i) => walk(v, path + "[" + i + "]"));
@@ -98,7 +116,7 @@ function processInput(toolName, toolInput) {
   }
 
   const updatedInput = walk(toolInput, "");
-  return { allFindings, updatedInput, hasLongRun };
+  return { allFindings, updatedInput, hasLongRun, hasConfusables };
 }
 
 async function main() {
@@ -117,7 +135,7 @@ async function main() {
   const { tool_name: toolName, tool_input: toolInput } = input;
   if (!toolName || !toolInput) process.exit(0);
 
-  const { allFindings, updatedInput, hasLongRun } = processInput(toolName, toolInput);
+  const { allFindings, updatedInput, hasLongRun, hasConfusables } = processInput(toolName, toolInput);
   if (allFindings.length === 0) process.exit(0);
 
   const summary = allFindings
@@ -130,8 +148,9 @@ async function main() {
       permissionDecision: "allow",
       updatedInput,
       additionalContext:
-        "WARNING: Invisible/suspicious Unicode was stripped from this tool call. " +
-        "Stripped characters:\n" + summary + "\n" +
+        "WARNING: Suspicious Unicode was sanitized from this tool call" +
+        (hasConfusables ? " (confusable characters normalized to Latin equivalents)" : "") +
+        ". Findings:\n" + summary + "\n" +
         "The tool will proceed with sanitized input." +
         (hasLongRun
           ? " A long run of invisible characters was detected, which strongly suggests " +
