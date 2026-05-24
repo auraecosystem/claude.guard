@@ -134,12 +134,23 @@ describe("sanitize-input hook", () => {
     assert.equal(r.updatedInput.text, "haszw");
   });
 
-  it("warns about injection in additionalContext", async () => {
+  it("short run: warns about stripping but not semantic injection", async () => {
     const r = h(await runHook(makeInput("Bash", {
       command: "rm" + String.fromCodePoint(0x200B) + " -rf /"
     })));
-    assert.match(r.additionalContext, /prompt injection/);
+    assert.match(r.additionalContext, /stripped/i);
+    assert.doesNotMatch(r.additionalContext, /semantic prompt injection/);
+  });
+
+  it("long run (10+): warns about semantic injection", async () => {
+    const payload = String.fromCodePoint(0xE0001) + Array.from({ length: 15 },
+      (_, i) => String.fromCodePoint(0xE0041 + i)).join("");
+    const r = h(await runHook(makeInput("Bash", {
+      command: "echo " + payload + "hello"
+    })));
     assert.match(r.additionalContext, /semantic prompt injection/);
+    assert.match(r.additionalContext, /deliberate injection payload/);
+    assert.equal(r.updatedInput.command, "echo hello");
   });
 
   it("handles empty/malformed input", async () => {
