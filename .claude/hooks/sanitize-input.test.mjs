@@ -107,7 +107,7 @@ describe("sanitize-input hook", () => {
     assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
     assert.match(
       result.hookSpecificOutput.permissionDecisionReason,
-      /Bidi control/,
+      /Format character/,
     );
   });
 
@@ -134,7 +134,7 @@ describe("sanitize-input hook", () => {
     assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
     assert.match(
       result.hookSpecificOutput.permissionDecisionReason,
-      /Tag character/,
+      /Format character/,
     );
   });
 
@@ -146,7 +146,7 @@ describe("sanitize-input hook", () => {
     assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
     assert.match(
       result.hookSpecificOutput.permissionDecisionReason,
-      /Annotation\/object char/,
+      /Format character/,
     );
   });
 
@@ -197,7 +197,7 @@ describe("sanitize-input hook", () => {
     assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
     assert.match(
       result.hookSpecificOutput.permissionDecisionReason,
-      new RegExp("Annotation.object char"),
+      /Object replacement/,
     );
   });
 
