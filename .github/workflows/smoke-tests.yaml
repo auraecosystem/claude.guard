@@ -1,1 +1,31 @@
-@-
+name: smoke tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run hook smoke tests
+        run: bash tests/test-claude-hooks.bash
+
+      - name: Run wrapper smoke tests
+        run: pytest -q tests/test_claude_wrapper.py
+
+      - name: Run Venice resolver + variant smoke tests
+        run: pytest -q tests/test_claude_variants.py
