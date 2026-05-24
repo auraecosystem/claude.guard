@@ -5,12 +5,11 @@ on:
     branches: [main]
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -21,15 +20,17 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run pre-commit (auto-fix)
+      - name: Run pre-commit
+        id: check
         uses: pre-commit/action@v3.0.1
-        continue-on-error: true
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
 
-      - name: Commit auto-fixes
+      - name: Commit auto-fixes (PRs only)
+        if: github.event_name == 'pull_request' && steps.check.outcome == 'failure'
         run: |
           if git diff --quiet && git diff --cached --quiet; then
-            echo "No fixes to commit."
-            exit 0
+            echo "Pre-commit failed but no auto-fixable changes."
+            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -38,6 +39,7 @@ jobs:
           git push
 
       - name: Verify clean after fixes
+        if: github.event_name == 'pull_request' && steps.check.outcome == 'failure'
         run: |
           pip install pre-commit
           pre-commit run --all-files
