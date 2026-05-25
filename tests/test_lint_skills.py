@@ -77,6 +77,34 @@ def test_ignores_files_outside_skills(tmp_path: Path, copy_script) -> None:
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(
+    "body, should_fail",
+    [
+        # Short description, but a subsequent field has many periods — must still fail.
+        (
+            "---\nname: x\ndescription: Too short\ntags: a.b.c.d.e\n---\n# body\n",
+            True,
+        ),
+        # Description is the last field — period count must still be correct.
+        (
+            "---\nname: x\ndescription: Two sentences here. Activate when needed.\n---\n# body\n",
+            False,
+        ),
+    ],
+    ids=["period-contamination", "description-last-field"],
+)
+def test_description_extraction_edge_cases(
+    tmp_path: Path, copy_script, body: str, should_fail: bool
+) -> None:
+    skill = write_skill(tmp_path, "edge", body)
+    result = run_lint(tmp_path, copy_script, skill)
+    if should_fail:
+        assert result.returncode == 1
+        assert "description too short" in result.stderr
+    else:
+        assert result.returncode == 0
+
+
 def test_warns_when_examples_missing(tmp_path: Path, copy_script) -> None:
     body = (
         "---\n"
