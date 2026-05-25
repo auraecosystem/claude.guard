@@ -45,6 +45,25 @@ Every tool call passes through sanitization hooks:
 - **Input**: normalizes [confusable/homoglyph characters](https://arxiv.org/abs/2508.14070) so deny rules can’t be bypassed with Cyrillic lookalikes
 - **Output**: strips invisible Unicode (format chars, variation selectors) and ANSI escapes that could carry [hidden payloads](https://arxiv.org/abs/2603.00164)
 
+## Credential scrubbing
+
+The container entrypoint strips env vars matching `*token*`, `*secret*`, `*key*`, `*password*`, `*credential*`, `*auth*`, `*api*` from every new shell. Allowlisted names (`NODE_OPTIONS`, `CLAUDE_CONFIG_DIR`, etc.) are preserved. Even if a secret leaks into the container environment, Claude’s shells never see it.
+
+## Pre-push gate
+
+Before every `git push` or `gh pr create`, the pre-push hook runs your project’s build, lint, typecheck, and tests. Auto-detects Node (pnpm) and Python (ruff). Skips scripts that aren’t configured—no false failures on a fresh template.
+
+## PR self-critique
+
+The `/pr-creation` skill doesn’t just format a PR. It launches a critique sub-agent against the full diff, iterating until a pass finds nothing to fix:
+
+1. **Compress**—delete dead code, unused imports, WHAT-comments, premature abstractions
+2. **Collapse**—parametrize near-identical tests, extract duplicated logic into helpers
+3. **Correct**—bugs, edge cases, swallowed errors, injection sinks
+4. Commit fixes, re-critique the fixes, repeat until clean
+
+Capped at 3 passes. The PR description is written after the loop, so it reflects the final state.
+
 ## Install
 
 ```bash
