@@ -89,7 +89,7 @@ services:
       dockerfile: .devcontainer/Dockerfile.monitor
     volumes:
       - monitor-socket:/var/run/monitor
-    network_mode: none
+    network_mode: "service:firewall"
     cap_drop:
       - ALL
     read_only: true
@@ -101,6 +101,9 @@ services:
     cpus: 1
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      firewall:
+        condition: service_healthy
 
 networks:
   sandbox:

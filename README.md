@@ -2,6 +2,32 @@
 
 Run Claude Code inside a hardware-isolated VM with an AI monitor watching every tool call. Type `claude` and it just works.
 
+## Install
+
+```bash
+git clone https://github.com/alexander-turner/secure-claude-code-defaults.git \
+    ~/.local/share/secure-claude-code-defaults
+cd ~/.local/share/secure-claude-code-defaults
+bash setup.bash
+```
+
+`setup.bash` symlinks configs into `~/.claude/`, installs Kata Containers (Linux), registers the runtime with Docker, and puts the `claude` wrapper on your PATH.
+
+On macOS (no KVM), set `CONTAINER_RUNTIME=runc` in `.devcontainer/.env` to fall back to container isolation without the VM layer.
+
+### Monitor provider
+
+The monitor auto-detects from available API keys:
+
+| Key                    | Provider      | Default model    |
+| ---------------------- | ------------- | ---------------- |
+| `ANTHROPIC_API_KEY`    | Anthropic     | claude-haiku-4-5 |
+| `VENICE_INFERENCE_KEY` | Venice (E2EE) | qwen3-coder-480b |
+
+### Without the devcontainer
+
+Set `CLAUDE_NO_SANDBOX=1` to run on the host. You still get the monitor (via permission hooks), deny list, pre-push checks, and sanitization—but no VM boundary. Don’t use `--dangerously-skip-permissions` in this mode.
+
 ## What happens when you type `claude`
 
 The `bin/claude` wrapper handles the full lifecycle:
@@ -32,7 +58,7 @@ The app runs inside a [Firecracker microVM](https://firecracker-microvm.github.
 2. Escape the internal Docker network (no NAT masquerade, no internet route)
 3. Bypass the proxy allowlist (squid with SSL bump, GET/HEAD-only for read-only domains)
 
-As of May 2026, [frontier models](https://arxiv.org/abs/2603.02277) score 100% on container escape from misconfigurations but 0% on novel kernel exploits (i.e. through the hypervisor boundary).
+As of May 2026, [frontier models](https://arxiv.org/abs/2603.02277) score 100% on container escape from misconfigurations but 0% on novel kernel exploits (i.e. through the hypervisor boundary).
 
 ## Venice routing (optional)
 
@@ -64,28 +90,9 @@ The `/pr-creation` skill doesn’t just format a PR. It launches a critique 
 
 Capped at 3 passes. The PR description is written after the loop, so it reflects the final state.
 
-## Install
+## Environment variables
 
-```bash
-git clone https://github.com/alexander-turner/secure-claude-code-defaults.git \
-    ~/.local/share/secure-claude-code-defaults
-cd ~/.local/share/secure-claude-code-defaults
-bash setup.bash
-```
-
-`setup.bash` symlinks configs into `~/.claude/`, installs Kata Containers (Linux), registers the runtime with Docker, and puts the `claude` wrapper on your PATH.
-
-On macOS (no KVM), set `CONTAINER_RUNTIME=runc` in `.devcontainer/.env` to fall back to container isolation without the VM layer.
-
-### Monitor provider
-
-The monitor auto-detects from available API keys:
-
-| Key                    | Provider      | Default model    |
-| ---------------------- | ------------- | ---------------- |
-| `ANTHROPIC_API_KEY`    | Anthropic     | claude-haiku-4-5 |
-| `VENICE_INFERENCE_KEY` | Venice (E2EE) | qwen3-coder-480b |
-
-### Without the devcontainer
-
-Set `CLAUDE_NO_SANDBOX=1` to run on the host. You still get the monitor (via permission hooks), deny list, pre-push checks, and sanitization—but no VM boundary. Don’t use `--dangerously-skip-permissions` in this mode.
+| Variable                 | Effect                                                                                                                                                                                                                     |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_SELF_EDIT=1`     | Skips root-owning `.claude/` in the devcontainer so the agent can modify its own settings and hooks. Use when iterating on the template itself under direct supervision. User-level config (`~/.claude/`) is still locked. |
+| `DNS_REFRESH_INTERVAL=N` | Seconds between DNS re-resolution in the firewall container (default: 300). Set lower if your allowed domains rotate IPs frequently.                                                                                       |

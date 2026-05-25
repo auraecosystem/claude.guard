@@ -10,6 +10,7 @@ declare -A DOMAIN_ACCESS=(
     ["github.com"]="rw"
     ["api.github.com"]="rw"
     ["api.anthropic.com"]="rw"
+    ["api.venice.ai"]="rw"
     # Package registries — GET only for installs
     ["registry.npmjs.org"]="ro"
     ["pypi.org"]="ro"
@@ -242,9 +243,10 @@ acl readonly_domains dstdomain "/etc/squid/readonly-domains.txt"
 acl safe_methods method GET HEAD OPTIONS
 acl CONNECT method CONNECT
 
-# Allow CONNECT tunnels (required for ssl_bump to establish the TLS
-# intercept). CONNECT itself carries no payload — method enforcement
-# happens on the inner HTTP request after bumping.
+# Allow CONNECT tunnels for all domains. Read-only domains get ssl_bump
+# (method inspection); rw domains get spliced (tunneled without inspection).
+# All traffic routes through squid (no_proxy only exempts localhost), so
+# blocking CONNECT for rw domains would break their HTTPS entirely.
 http_access allow CONNECT
 
 # Deny non-GET/HEAD to read-only domains (applies to inner requests
@@ -276,3 +278,57 @@ chown root:proxy "$SQUID_CONF" "$RO_DOMAINS"
 squid -k parse 2>/dev/null && echo "squid config valid"
 squid
 echo "squid started — $(wc -l <"$RO_DOMAINS") read-only domains"
+
+# === Background DNS refresh ===
+# CDNs rotate IPs. Re-resolve allowed domains every REFRESH_INTERVAL
+# seconds and update the ipset + dnsmasq so connections don't break
+# after the initial IPs go stale.
+REFRESH_INTERVAL="${DNS_REFRESH_INTERVAL:-300}"
+
+DOCKER_DNS=$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf.docker)
+
+if [[ -z "$DOCKER_DNS" ]]; then
+    echo "WARNING: No nameserver in resolv.conf.docker — DNS refresh disabled"
+else
+
+close_dns_window() {
+    iptables -D OUTPUT -p udp --dport 53 -d "$DOCKER_DNS" -j ACCEPT 2>/dev/null || true
+    iptables -D INPUT -p udp --sport 53 -s "$DOCKER_DNS" -j ACCEPT 2>/dev/null || true
+}
+
+refresh_dns() {
+    set +e
+    trap close_dns_window EXIT
+    while true; do
+        sleep "$REFRESH_INTERVAL"
+        iptables -I OUTPUT 1 -p udp --dport 53 -d "$DOCKER_DNS" -j ACCEPT
+        iptables -I INPUT 1 -p udp --sport 53 -s "$DOCKER_DNS" -j ACCEPT
+
+        local changed=0
+        for domain in "${!DOMAIN_ACCESS[@]}"; do
+            local ips
+            ips=$(dig +short +timeout=3 @"$DOCKER_DNS" A "$domain" 2>/dev/null) || continue
+            [[ -z "$ips" ]] && continue
+            while read -r ip; do
+                [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || continue
+                if ! ipset test allowed-domains "$ip" 2>/dev/null; then
+                    ipset add allowed-domains "$ip" 2>/dev/null || true
+                    echo "address=/$domain/$ip" >>"$DNSMASQ_CONF"
+                    changed=1
+                fi
+            done <<< "$ips"
+        done
+
+        close_dns_window
+
+        if (( changed )); then
+            killall dnsmasq 2>/dev/null || true
+            sleep 1
+            dnsmasq || echo "WARNING: dnsmasq restart failed" >&2
+        fi
+    done
+}
+refresh_dns &
+echo "DNS refresh loop started (every ${REFRESH_INTERVAL}s)"
+
+fi

@@ -23,7 +23,7 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
 
-        env = {**os.environ, "MONITOR_POLICY_FILE": POLICY_PATH}
+        env = {**os.environ, "MONITOR_POLICY": POLICY_PATH}
 
         try:
             result = subprocess.run(
