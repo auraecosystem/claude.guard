@@ -38,6 +38,7 @@ services:
       args:
         TZ: ${TZ:-America/Los_Angeles}
         GIT_DELTA_VERSION: "0.18.2"
+    runtime: ${CONTAINER_RUNTIME:-kata-fc}
     networks:
       sandbox: {}
     dns:

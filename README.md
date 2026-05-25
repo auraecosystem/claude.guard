@@ -39,41 +39,9 @@ The app container can only reach the internet through the firewall’s squid pr
 
 ### VM isolation (Kata Containers)
 
-For adversarial frontier models or `--dangerously-skip-permissions` usage, add hardware VM isolation via [Kata Containers](https://katacontainers.io/) with the Firecracker hypervisor:
+The devcontainer runs the app inside a Firecracker microVM via [Kata Containers](https://katacontainers.io/) by default. The agent’s code executes in a dedicated guest kernel—an attacker must escape both the VM (hypervisor boundary) and the internal network (no internet route) to exfiltrate data.
 
-```bash
-# Start with Kata VM isolation
-docker compose -f .devcontainer/docker-compose.yml \
-               -f .devcontainer/docker-compose.kata.yml up
-
-# Or set in .env
-echo "COMPOSE_FILE=docker-compose.yml:docker-compose.kata.yml" > .devcontainer/.env
-```
-
-This runs the app container inside a Firecracker microVM (<125ms boot, <5MiB overhead). An attacker must escape both the VM (hypervisor boundary) and the internal network (no internet route) to exfiltrate data. See `.devcontainer/docker-compose.kata.yml`.
-
-**Prerequisites:** Install Kata Containers and register the `kata-fc` runtime with Docker:
-
-```bash
-# Install Kata (Ubuntu/Debian)
-sudo apt-get install kata-containers
-
-# Register with Docker daemon
-cat <<EOF | sudo tee /etc/docker/daemon.json
-{
-  "runtimes": {
-    "kata-fc": {
-      "path": "/usr/bin/kata-runtime",
-      "runtimeArgs": ["--config", "/etc/kata-containers/configuration-fc.toml"]
-    }
-  }
-}
-EOF
-sudo systemctl restart docker
-
-# Verify — should show a different kernel than the host
-docker run --runtime=kata-fc --rm alpine uname -r
-```
+`setup.bash` installs Kata and registers the `kata-fc` runtime with Docker automatically. On macOS (no KVM), set `CONTAINER_RUNTIME=runc` in `.devcontainer/.env` to fall back to standard container isolation.
 
 ## Install
 

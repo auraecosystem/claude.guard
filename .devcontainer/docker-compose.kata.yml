@@ -1,3 +1,0 @@
-services:
-  app:
-    runtime: kata-fc
