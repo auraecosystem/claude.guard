@@ -6,8 +6,8 @@ if ! command -v jq &>/dev/null; then
   exit 0
 fi
 
-read -r model context_used context_max cost duration < <(
-  jq -r '[.model // "?", .contextTokens // 0, .maxContextTokens // 1, .totalCost // 0, .durationMs // 0] | @tsv'
+IFS=$'\t' read -r model context_used context_max cost duration < <(
+  jq -r '[.model.display_name // .model.id // "?", .context_window.total_input_tokens // 0, .context_window.context_window_size // 1, .cost.total_cost_usd // 0, .cost.total_duration_ms // 0] | @tsv'
 )
 
 model="${model#venice,}"
