@@ -170,7 +170,6 @@ async function sanitizeHtml(text) {
 
 // ─── Layer 3: Markdown/URL exfiltration detection ────────────────────────────
 
-const MARKDOWN_IMG_LINK = /!?\[([^\]]*)\]\(([^)]+)\)/g;
 const EXFIL_INDICATORS = [
   /[?&](?:data|d|payload|exfil|leak|steal|secret|token|key|env|password|pwd|cookie|session|auth)=/i,
   /[?&][^=]+=(?:[A-Za-z0-9+/]{40,}|[A-Fa-f0-9]{32,})/,
@@ -180,41 +179,54 @@ const EXFIL_INDICATORS = [
 
 const LONG_QUERY_THRESHOLD = 200;
 
-function detectExfilUrls(text) {
-  const threats = [];
-  MARKDOWN_IMG_LINK.lastIndex = 0;
-  let match;
-  while ((match = MARKDOWN_IMG_LINK.exec(text)) !== null) {
-    const [full, , url] = match;
-    const isImage = full.startsWith("!");
-
-    if (EXFIL_INDICATORS.some((p) => p.test(url))) {
-      threats.push({ full, url, isImage, reason: "suspicious query parameter" });
-      continue;
-    }
-
-    const qIdx = url.indexOf("?");
-    if (qIdx !== -1 && url.length - qIdx > LONG_QUERY_THRESHOLD) {
-      threats.push({ full, url, isImage, reason: "unusually long query string" });
-    }
-  }
-  return threats;
+function checkExfilUrl(url) {
+  if (EXFIL_INDICATORS.some((p) => p.test(url)))
+    return "suspicious query parameter";
+  const qIdx = url.indexOf("?");
+  if (qIdx !== -1 && url.length - qIdx > LONG_QUERY_THRESHOLD)
+    return "unusually long query string";
+  return null;
 }
 
-function neutralizeExfilUrls(text, threats) {
-  let result = text;
-  for (const { full, url, isImage } of threats) {
-    let base;
-    try {
-      const u = new URL(url);
-      base = u.origin + u.pathname;
-    } catch {
-      base = url.split("?")[0];
-    }
-    const tag = isImage ? "!" : "";
-    result = result.replace(full, `${tag}[BLOCKED: data-exfil URL](${base})`);
+function stripQuery(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname;
+  } catch {
+    return url.split("?")[0];
   }
-  return result;
+}
+
+const MARKDOWN_IMG_LINK = /!?\[([^\]]*)\]\(([^)]+)\)/g;
+const MARKDOWN_REF_DEF = /^\[([^\]]*)\]:\s+(\S+)/gm;
+const HTML_EXFIL_ATTR = /<(img|a)\b[^>]*?\s(?:src|href)\s*=\s*["']([^"']+)["'][^>]*>/gi;
+
+function detectAndNeutralizeExfil(text) {
+  const threats = [];
+
+  let result = text.replace(MARKDOWN_IMG_LINK, (full, _alt, url) => {
+    const reason = checkExfilUrl(url);
+    if (!reason) return full;
+    const isImage = full.startsWith("!");
+    threats.push({ isImage, reason });
+    return `${isImage ? "!" : ""}[BLOCKED: data-exfil URL](${stripQuery(url)})`;
+  });
+
+  result = result.replace(MARKDOWN_REF_DEF, (full, id, url) => {
+    const reason = checkExfilUrl(url);
+    if (!reason) return full;
+    threats.push({ isImage: false, reason });
+    return `[${id}]: ${stripQuery(url)}`;
+  });
+
+  result = result.replace(HTML_EXFIL_ATTR, (full, tag, url) => {
+    const reason = checkExfilUrl(url);
+    if (!reason) return full;
+    threats.push({ isImage: tag.toLowerCase() === "img", reason });
+    return full.replace(url, stripQuery(url));
+  });
+
+  return threats.length > 0 ? { text: result, threats } : null;
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -261,13 +273,15 @@ try {
   }
 
   // Layer 3
-  const threats = detectExfilUrls(cleaned);
-  if (threats.length > 0) {
-    cleaned = neutralizeExfilUrls(cleaned, threats);
+  const exfil = detectAndNeutralizeExfil(cleaned);
+  if (exfil) {
+    cleaned = exfil.text;
     modified = true;
     const reasons = [
       ...new Set(
-        threats.map((t) => `${t.isImage ? "image" : "link"}: ${t.reason}`),
+        exfil.threats.map(
+          (t) => `${t.isImage ? "image" : "link"}: ${t.reason}`,
+        ),
       ),
     ];
     warnings.push(`Data-exfil URLs neutralized: ${reasons.join("; ")}`);

