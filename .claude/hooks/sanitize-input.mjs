@@ -1,30 +1,44 @@
 #!/usr/bin/env node
-// PreToolUse: normalize confusable/homoglyph characters in tool inputs.
-// Protects deny rules in settings.json from cross-script bypass
-// (CVE-2025-54794, Claude Code #29489).
+/**
+ * PreToolUse hook: normalize confusable/homoglyph characters in tool inputs.
+ *
+ * Protects deny rules in settings.json from cross-script bypass — e.g.
+ * Cyrillic “a” (U+0430) in a file path passing a deny rule that matches
+ * Latin “a” (U+0061). Uses namespace-guard’s vision-weighted confusable
+ * map (1,397 pairs across 230 fonts, including 793 beyond TR39).
+ *
+ * See: CVE-2025-54794, Claude Code #29489, Codex #13095.
+ */
 import { canonicalise, scan } from "namespace-guard";
+import { readHookInput, writeHookOutput } from "./hook-io.mjs";
 
+// Only normalize fields that feed into permission/deny rule matching.
+// File content (Write.content, Edit.old_string/new_string) is excluded
+// to avoid false positives on legitimate non-Latin text.
 const FIELD_MAP = {
-  Bash: ["command", "description"],
-  Edit: ["file_path", "old_string", "new_string"],
-  Write: ["file_path", "content"],
+  Bash: ["command"],
+  Edit: ["file_path"],
+  Write: ["file_path"],
   Read: ["file_path"],
 };
 
+/**
+ * Walk tool input, canonicalise any confusable strings, and collect findings.
+ * For known tools, only FIELD_MAP fields are walked; unknown tools walk all.
+ */
 function processInput(toolName, toolInput) {
-  const allFindings = [];
+  const findings = [];
   const keys = FIELD_MAP[toolName];
 
   function walk(obj, path) {
     if (typeof obj === "string") {
-      const scanResult = scan(obj);
-      if (!scanResult.hasConfusables) return obj;
-      for (const f of scanResult.findings) {
-        allFindings.push({
-          field: path,
-          detail: f.script + " " + JSON.stringify(f.char) +
-            " (" + f.codepoint + ") -> Latin " + JSON.stringify(f.latinEquivalent),
-        });
+      const { hasConfusables, findings: hits } = scan(obj);
+      if (!hasConfusables) return obj;
+      for (const f of hits) {
+        findings.push(
+          "  " + path + ": " + f.script + " " + JSON.stringify(f.char) +
+          " (" + f.codepoint + ") -> Latin " + JSON.stringify(f.latinEquivalent),
+        );
       }
       return canonicalise(obj);
     }
@@ -33,7 +47,10 @@ function processInput(toolName, toolInput) {
     if (obj && typeof obj === "object") {
       const out = {};
       for (const [k, v] of Object.entries(obj)) {
-        if (keys && !keys.includes(k)) { out[k] = v; continue; }
+        if (keys && !keys.includes(k)) {
+          out[k] = v;
+          continue;
+        }
         out[k] = walk(v, path ? path + "." + k : k);
       }
       return out;
@@ -42,42 +59,27 @@ function processInput(toolName, toolInput) {
   }
 
   const updatedInput = walk(toolInput, "");
-  return { allFindings, updatedInput };
+  return { findings, updatedInput };
 }
 
-async function main() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  const raw = Buffer.concat(chunks).toString();
-  if (!raw) process.exit(0);
+const input = await readHookInput();
+if (!input) process.exit(0);
 
-  let input;
-  try { input = JSON.parse(raw); } catch { process.exit(0); }
+const { tool_name: toolName, tool_input: toolInput } = input;
+if (!toolName || !toolInput) process.exit(0);
 
-  const { tool_name: toolName, tool_input: toolInput } = input;
-  if (!toolName || !toolInput) process.exit(0);
+const { findings, updatedInput } = processInput(toolName, toolInput);
+if (findings.length === 0) process.exit(0);
 
-  const { allFindings, updatedInput } = processInput(toolName, toolInput);
-  if (allFindings.length === 0) process.exit(0);
-
-  const summary = allFindings
-    .map(({ field, detail }) => "  " + field + ": " + detail)
-    .join("\n");
-
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "allow",
-      updatedInput,
-      additionalContext:
-        "WARNING: Confusable characters were normalized to Latin equivalents " +
-        "in this tool call. This may indicate a homoglyph attack attempting to " +
-        "bypass permission rules.\n" + summary,
-    },
-  }));
-}
-
-main().catch((err) => {
-  process.stderr.write("sanitize-input hook error: " + err.message + "\n");
-  process.exit(0);
+writeHookOutput({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "allow",
+    updatedInput,
+    additionalContext: [
+      "WARNING: Confusable characters normalized to Latin equivalents.",
+      "This may indicate a homoglyph attack to bypass permission rules.",
+      ...findings,
+    ].join("\n"),
+  },
 });

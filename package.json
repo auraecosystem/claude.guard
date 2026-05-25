@@ -50,7 +50,6 @@
   },
   "dependencies": {
     "namespace-guard": "^0.20.0",
-    "out-of-character": "^2.2.0",
     "strip-ansi": "^7.2.0"
   }
 }
