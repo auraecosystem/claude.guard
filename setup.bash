@@ -14,7 +14,10 @@ IS_INTEL_MAC=false
 if $IS_MAC && [[ "$(uname -m)" == "x86_64" ]]; then
   IS_INTEL_MAC=true
 fi
-grep -qi microsoft /proc/version 2>/dev/null && { status "WSL2 detected — use CONTAINER_RUNTIME=runc (no Kata). Everything else works natively."; export CONTAINER_RUNTIME=runc; }
+grep -qi microsoft /proc/version 2>/dev/null && {
+  status "WSL2 detected — use CONTAINER_RUNTIME=runc (no Kata). Everything else works natively."
+  export CONTAINER_RUNTIME=runc
+}
 HOOKS_ONLY=false
 for arg in "$@"; do
   [[ "$arg" == "--hooks-only" ]] && HOOKS_ONLY=true
@@ -51,8 +54,8 @@ if [[ ! -f "$HOME/.claude/CLAUDE.md" ]]; then
   status "Created $HOME/.claude/CLAUDE.md (security instructions)"
 else
   if ! grep -qF "Never bypass, disable, or work around security hooks" "$HOME/.claude/CLAUDE.md"; then
-    printf '\n' >> "$HOME/.claude/CLAUDE.md"
-    cat "$SCRIPT_DIR/user-config/CLAUDE.md" >> "$HOME/.claude/CLAUDE.md"
+    printf '\n' >>"$HOME/.claude/CLAUDE.md"
+    cat "$SCRIPT_DIR/user-config/CLAUDE.md" >>"$HOME/.claude/CLAUDE.md"
     status "Appended security instructions to $HOME/.claude/CLAUDE.md"
   else
     status "$HOME/.claude/CLAUDE.md already contains security instructions"
