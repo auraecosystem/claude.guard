@@ -14,10 +14,6 @@ IS_INTEL_MAC=false
 if $IS_MAC && [[ "$(uname -m)" == "x86_64" ]]; then
   IS_INTEL_MAC=true
 fi
-grep -qi microsoft /proc/version 2>/dev/null && {
-  status "WSL2 detected — use CONTAINER_RUNTIME=runc (no Kata). Everything else works natively."
-  export CONTAINER_RUNTIME=runc
-}
 HOOKS_ONLY=false
 for arg in "$@"; do
   [[ "$arg" == "--hooks-only" ]] && HOOKS_ONLY=true
@@ -27,6 +23,11 @@ command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 status() { printf ':: %s\n' "$1"; }
 warn() { printf '!! %s\n' "$1" >&2; }
+
+grep -qi microsoft /proc/version 2>/dev/null && {
+  status "WSL2 detected — use CONTAINER_RUNTIME=runc (no Kata). Everything else works natively."
+  export CONTAINER_RUNTIME=runc
+}
 
 safe_symlink() {
   local src="$1" dst="$2" label="$3"
