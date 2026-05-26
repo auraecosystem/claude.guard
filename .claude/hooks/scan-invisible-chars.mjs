@@ -162,7 +162,7 @@ if (isDirectRun) {
     .flatMap(({ file, findings }) =>
       findings.map(
         (f) =>
-          `${file}:${f.line} — ${f.charCount} invisible chars (${f.method}) → ${JSON.stringify(f.decoded)}`,
+          `${file}:${f.line}: ${f.charCount} invisible chars (${f.method}) -> ${JSON.stringify(f.decoded)}`,
       ),
     )
     .join("\n");
