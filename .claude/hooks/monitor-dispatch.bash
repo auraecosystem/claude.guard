@@ -17,12 +17,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Claude Code web / managed sandbox: no monitor infrastructure exists.
-# Require at least two of three signals to avoid false positives.
-_sandbox_signals=0
-[[ "${IS_SANDBOX:-}" == "yes" ]] && ((_sandbox_signals++)) || true
-[[ "${CLAUDE_CODE_ENTRYPOINT:-}" == "remote" ]] && ((_sandbox_signals++)) || true
-[[ "${CLAUDE_CODE_REMOTE:-}" == "true" ]] && ((_sandbox_signals++)) || true
-if ((_sandbox_signals >= 2)); then
+if [[ "${IS_SANDBOX:-}" == "yes" ]]; then
   exit 0
 fi
 
