@@ -11,11 +11,11 @@ cd ~/.local/share/secure-claude-code-defaults
 bash setup.bash
 ```
 
-`setup.bash` **merges** security settings into your existing `~/.claude/settings.json` (preserving your theme, editor mode, plugins, and custom allow rules), installs Kata Containers, and puts the `claude` wrapper on your PATH. Intel Macs auto-select `CONTAINER_RUNTIME=runc` (no Kata, still gets firewall + root-owned config + credential scrubbing + audit log). Use `bash setup.bash --hooks-only` to install just the security hooks and deny rules without Docker.
+`setup.bash` merges security settings into your existing `~/.claude/settings.json`, installs Kata Containers, and puts the `claude` wrapper on your PATH. Intel Macs auto-select `CONTAINER_RUNTIME=runc` (no Kata, still gets firewall + root-owned config + credential scrubbing + audit log). Use `bash setup.bash --hooks-only` to install just the security hooks and deny rules without Docker.
 
 ## Threat models
 
-Six things can go wrong when an AI agent has shell access. For each one, we list the **hard boundaries** (VM, firewall, file permissions) that a model cannot talk its way past, then the **best-effort filters** (sanitization hooks, pattern matching) that raise the bar but are bypassable by a sufficiently creative adversary. _Filters are a convenience layer and we do not rely on them._
+At least six things can go wrong when an AI agent has shell access. For each one, we list the **hard boundaries** (VM, firewall, file permissions) that a model cannot talk its way past, then the **best-effort filters** (sanitization hooks, pattern matching) that raise the bar but are bypassable by a sufficiently creative adversary. _Filters are a convenience layer and we do not rely on them._
 
 ### 1. The agent breaks out and damages your machine
 
@@ -142,11 +142,9 @@ Works outside git repos too—the wrapper detects the absence and mounts `$PWD` 
 
 All three pass extra args through to the real `claude` binary.
 
-### Without the devcontainer
+### Without the VM
 
-Set `CLAUDE_NO_SANDBOX=1` to run on the host. You still get the deny list, pre-push checks, sanitization, and audit log. If `ANTHROPIC_API_KEY` or `VENICE_INFERENCE_KEY` is set, the AI monitor runs directly as a hook (no sidecar needed). Without a VM boundary, don't use `--dangerously-skip-permissions` in this mode.
-
-The wrapper auto-detects IDE/CI contexts (`VSCODE_PID`, `JETBRAINS_IDE`, `CLAUDE_CODE_ACTION`) and passes through to the real binary. Set `CLAUDE_PASSTHROUGH=1` to force this.
+Set `CLAUDE_NO_SANDBOX=1` to avoid using the VM. Don't use `--dangerously-skip-permissions` in this mode. You still get the deny list, pre-push checks, sanitization, and audit log. If `ANTHROPIC_API_KEY` or `VENICE_INFERENCE_KEY` is set, the AI monitor runs directly as a hook. 
 
 ### Monitor provider
 
@@ -158,6 +156,8 @@ The monitor auto-detects from available API keys:
 | `VENICE_INFERENCE_KEY` | Venice (E2EE) | qwen3-coder-480b         |
 
 ## Environment variables
+
+The wrapper auto-detects IDE/CI contexts (`VSCODE_PID`, `JETBRAINS_IDE`, `CLAUDE_CODE_ACTION`) and passes through to the real binary. Set `CLAUDE_PASSTHROUGH=1` to force this.
 
 ### Wrapper options
 
