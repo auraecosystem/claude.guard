@@ -33,6 +33,7 @@
       "Bash(*xargs*rm*)",
       "Bash(*eval *)",
       "Bash(*bash -c *)",
+      "Bash(*sh -c *)",
       "Bash(su *)",
       "Bash(su -*)",
       "Bash(*curl*|*bash*)",

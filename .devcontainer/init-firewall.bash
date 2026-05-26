@@ -332,7 +332,7 @@ refresh_dns() {
             done <<< "$ips"
         done
 
-        if (( changed )); then
+        if ! cmp -s "$new_conf" "$DNSMASQ_CONF"; then
             cp "$new_conf" "$DNSMASQ_CONF"
             chmod 640 "$DNSMASQ_CONF"
             killall dnsmasq 2>/dev/null || true

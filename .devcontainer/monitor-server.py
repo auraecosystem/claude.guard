@@ -21,7 +21,14 @@ MAX_BODY_SIZE = 64 * 1024
 
 class MonitorHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"decision":"deny","reason":"invalid Content-Length"}')
+            return
         if length > MAX_BODY_SIZE:
             self.send_response(413)
             self.send_header("Content-Type", "application/json")
