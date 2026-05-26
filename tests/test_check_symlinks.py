@@ -1,6 +1,5 @@
 """Tests for .github/scripts/check-symlinks.sh."""
 
-
 import subprocess
 from pathlib import Path
 
