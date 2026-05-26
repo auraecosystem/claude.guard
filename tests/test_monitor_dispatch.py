@@ -1,7 +1,5 @@
 """Tests for .claude/hooks/monitor-dispatch.bash."""
 
-from __future__ import annotations
-
 import json
 import socket
 import subprocess
@@ -40,12 +38,28 @@ def _run(
     )
 
 
-def test_delegates_to_monitor_outside_devcontainer(tmp_path: Path) -> None:
+def test_no_key_denies_outside_devcontainer(tmp_path: Path) -> None:
+    """No API key + no opt-out → deny with generic message."""
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(tmp_path),
+    }
+    script_file = tmp_path / "dispatch.bash"
+    result = _run(DISPATCH.read_text(), env, as_file=script_file)
+    assert result.returncode == 0
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "No API key configured" in output["permissionDecisionReason"]
+
+
+def test_delegates_to_monitor_with_key(tmp_path: Path) -> None:
+    """With an API key, dispatch execs into monitor.py."""
     monitor_py = DISPATCH.parent / "monitor.py"
     (tmp_path / "monitor.py").symlink_to(monitor_py)
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(tmp_path),
+        "ANTHROPIC_API_KEY": "sk-test-fake",
         "MONITOR_SKIP_TOOLS": "",
     }
     script_file = tmp_path / "dispatch.bash"
@@ -53,7 +67,6 @@ def test_delegates_to_monitor_outside_devcontainer(tmp_path: Path) -> None:
     assert result.returncode == 0
     output = json.loads(result.stdout)["hookSpecificOutput"]
     assert output["permissionDecision"] == "ask"
-    assert "No API key" in output["permissionDecisionReason"]
 
 
 def test_denies_when_socket_missing(tmp_path: Path) -> None:
