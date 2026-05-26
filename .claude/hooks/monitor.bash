@@ -56,13 +56,13 @@ if [[ -z "$provider" ]]; then
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     provider="anthropic"
   elif [[ -n "${VENICE_INFERENCE_KEY:-}" ]]; then
-    provider="openai"
+    provider="venice"
   fi
 fi
 
 [[ -z "$api_key" ]] && case "${provider:-}" in
 anthropic) api_key="${ANTHROPIC_API_KEY:-}" ;;
-openai) api_key="${VENICE_INFERENCE_KEY:-}" ;;
+venice) api_key="${VENICE_INFERENCE_KEY:-}" ;;
 esac
 
 if [[ -z "$api_key" ]]; then
@@ -82,7 +82,7 @@ anthropic)
   api_url="${api_url:-https://api.anthropic.com/v1/messages}"
   model="${model:-claude-haiku-4-5-20251001}"
   ;;
-openai)
+venice)
   api_url="${api_url:-https://api.venice.ai/api/v1/chat/completions}"
   model="${model:-qwen3-coder-480b-a35b-instruct-turbo}"
   ;;
@@ -135,7 +135,7 @@ timeout="${MONITOR_TIMEOUT:-10}"
 policy_file="${MONITOR_POLICY:-/etc/claude-monitor/policy.txt}"
 system_prompt=""
 if [[ -f "$policy_file" ]]; then
-  system_prompt=$(sudo cat "$policy_file" 2>/dev/null) || true
+  system_prompt=$(cat "$policy_file" 2>/dev/null) || true
 fi
 if [[ -z "$system_prompt" ]]; then
   # Minimal fallback with no specific patterns — if the real policy
@@ -213,7 +213,7 @@ if [[ "$hook_decision" == "ask" ]]; then
       topic) ntfy_topic="$val" ;;
       url) ntfy_url="$val" ;;
       esac
-    done < <(sudo cat "$ntfy_conf" 2>/dev/null)
+    done < <(cat "$ntfy_conf" 2>/dev/null)
     if [[ -n "$ntfy_topic" ]]; then
       curl -fsS --max-time 5 \
         -H "Title: Claude Monitor" \
