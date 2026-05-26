@@ -221,7 +221,7 @@ else
 
     if ! colima ssh -- test -e /dev/kvm 2>/dev/null; then
       warn "Cannot proceed with Kata — /dev/kvm unavailable"
-    elif docker info 2>/dev/null | grep -q "kata-fc"; then
+    elif colima ssh -- docker info 2>/dev/null | grep -q "kata-fc"; then
       status "Kata Containers (kata-fc) already registered with Docker"
       kata_ok=true
     else
@@ -263,21 +263,17 @@ f=/etc/docker/daemon.json
 [ -f "$f" ] && e=$(cat "$f") || e='{}'
 echo "$e" | jq '.runtimes["kata-fc"] = {"runtimeType":"io.containerd.kata-fc.v2"}' | sudo tee "$f" >/dev/null
 sudo systemctl restart docker
-for _i in $(seq 1 15); do
+for _i in $(seq 1 30); do
   docker info 2>/dev/null | grep -q "kata-fc" && break
   sleep 1
 done
+docker info 2>/dev/null | grep -q "kata-fc" || { echo "!! kata-fc not visible inside VM" >&2; exit 1; }
 INSTALL_KATA
 
-      for _i in $(seq 1 30); do
-        if docker info 2>/dev/null | grep -q "kata-fc"; then
-          status "Registered kata-fc runtime with Docker"
-          kata_ok=true
-          break
-        fi
-        sleep 1
-      done
-      if ! $kata_ok; then
+      if colima ssh -- docker info 2>/dev/null | grep -q "kata-fc"; then
+        status "Registered kata-fc runtime with Docker"
+        kata_ok=true
+      else
         warn "Kata installation completed but kata-fc not registered"
         warn "Run: colima ssh, then check /opt/kata/bin/kata-runtime"
       fi

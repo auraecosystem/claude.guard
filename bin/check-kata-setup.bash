@@ -56,16 +56,11 @@ f=/etc/docker/daemon.json
 [ -f "$f" ] && e=$(cat "$f") || e='{}'
 echo "$e" | jq '.runtimes["kata-fc"] = {"runtimeType":"io.containerd.kata-fc.v2"}' | sudo tee "$f" >/dev/null
 sudo systemctl restart docker
-for _i in $(seq 1 15); do
+for _i in $(seq 1 30); do
   docker info 2>/dev/null | grep -q "kata-fc" && break
   sleep 1
 done
 INSTALL_KATA
-
-    for _i in $(seq 1 30); do
-      docker info 2>/dev/null | grep -q "kata-fc" && break
-      sleep 1
-    done
 
   else
     [ -e /dev/kvm ] || die "/dev/kvm not available — KVM required"
@@ -98,7 +93,7 @@ INSTALL_KATA
     [ -f "$f" ] && e=$(cat "$f") || e='{}'
     echo "$e" | jq '.runtimes["kata-fc"] = {"runtimeType":"io.containerd.kata-fc.v2"}' | sudo tee "$f" >/dev/null
     sudo systemctl restart docker
-    for _i in $(seq 1 15); do
+    for _i in $(seq 1 30); do
       docker info 2>/dev/null | grep -q "kata-fc" && break
       sleep 1
     done
