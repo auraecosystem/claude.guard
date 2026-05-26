@@ -18,7 +18,10 @@ else
 
     if ! colima status >/dev/null 2>&1; then
       status "Starting Colima with nested virtualization..."
-      colima start --vm-type vz --mount-type virtiofs --nested-virtualization \
+      # nestedVirtualization has no CLI flag; must be set via config file
+      mkdir -p ~/.colima/default
+      printf 'nestedVirtualization: true\n' > ~/.colima/default/colima.yaml
+      colima start --vm-type vz --mount-type virtiofs \
         --cpu "${COLIMA_CPUS:-4}" --memory "${COLIMA_MEMORY:-8}" --disk "${COLIMA_DISK:-60}"
     fi
 
