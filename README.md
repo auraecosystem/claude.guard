@@ -11,21 +11,7 @@ cd ~/.local/share/secure-claude-code-defaults
 bash setup.bash
 ```
 
-`setup.bash` **merges** security settings into your existing `~/.claude/settings.json` (preserving your theme, editor mode, plugins, and custom allow rules), installs Kata Containers, registers the `kata-fc` runtime with Docker, and puts the `claude` wrapper on your PATH. On Apple Silicon Macs it starts [Colima](https://github.com/abiosoft/colima) with Apple's Virtualization.framework for nested KVM. **Intel Macs** are auto-detected and use `CONTAINER_RUNTIME=runc`—no Kata, but you still get the network firewall, root-owned config, credential scrubbing, and audit log.
-
-### Hooks-only install
-
-If you don't want the devcontainer wrapper—just the security hooks, deny rules, and sanitization:
-
-```bash
-bash setup.bash --hooks-only
-```
-
-This merges security settings and hooks into `~/.claude/settings.json` without installing wrapper scripts or setting up Kata/Docker. The sanitization hooks (invisible-character scanning, homoglyph normalization, output stripping) run globally in every repo.
-
-### Restoring personal preferences
-
-Setup preserves existing settings, but if you want to manage personal preferences separately (theme, editor mode, plugins, machine-specific allow rules), see [`dotfiles-prompt.md`](dotfiles-prompt.md) for a drop-in Claude command that restores them after setup.
+`setup.bash` **merges** security settings into your existing `~/.claude/settings.json` (preserving your theme, editor mode, plugins, and custom allow rules), installs Kata Containers, and puts the `claude` wrapper on your PATH. Intel Macs auto-select `CONTAINER_RUNTIME=runc` (no Kata, still gets firewall + root-owned config + credential scrubbing + audit log). Use `bash setup.bash --hooks-only` to install just the security hooks and deny rules without Docker.
 
 ## Threat models
 
@@ -160,9 +146,7 @@ All three pass extra args through to the real `claude` binary.
 
 Set `CLAUDE_NO_SANDBOX=1` to run on the host. You still get the deny list, pre-push checks, sanitization, and audit log. If `ANTHROPIC_API_KEY` or `VENICE_INFERENCE_KEY` is set, the AI monitor runs directly as a hook (no sidecar needed). Without a VM boundary, don't use `--dangerously-skip-permissions` in this mode.
 
-### IDE and CI passthrough
-
-The wrapper auto-detects non-interactive contexts (VS Code, JetBrains, GitHub Actions, `claude-code-action`) and passes through directly to the real `claude` binary without launching a devcontainer. Set `CLAUDE_PASSTHROUGH=1` to force this behavior in other contexts.
+The wrapper auto-detects IDE/CI contexts (`VSCODE_PID`, `JETBRAINS_IDE`, `CLAUDE_CODE_ACTION`) and passes through to the real binary. Set `CLAUDE_PASSTHROUGH=1` to force this.
 
 ### Monitor provider
 
