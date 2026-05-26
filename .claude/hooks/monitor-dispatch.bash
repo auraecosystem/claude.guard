@@ -2,8 +2,7 @@
 # Dispatch wrapper for the monitor hook.
 #
 # Priority order:
-#   1. Sandbox / Claude Code web — exit immediately (no sidecar, no
-#      monitor API keys, and a local monitor could be tampered with).
+#   1. Sandbox / Claude Code web — exit immediately. Up to A\.
 #   2. Devcontainer sidecar (full process/filesystem isolation).
 #   3. Host — delegate to monitor.py (has API keys via envchain).
 #
