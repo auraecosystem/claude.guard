@@ -1,6 +1,5 @@
 """Tests for .claude/hooks/monitor.py failure modes."""
 
-
 import json
 import subprocess
 import time
