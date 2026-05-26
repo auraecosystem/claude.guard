@@ -31,7 +31,7 @@ Before setup, `scan-invisible-chars.mjs` scans `CLAUDE.md`, `AGENTS.md`, and all
 
 The attack: copy-pasting markdown from the internet can embed invisible [Unicode tag characters](<https://en.wikipedia.org/wiki/Tags_(Unicode_block)>) or zero-width sequences encoding hidden instructions. These hijack Claude's behavior—invoking skills, overriding instructions, running tools—invisible in any editor.
 
-When found, the scanner writes `.claude/.invisible-char-alert` and a PreToolUse gate (`gate-invisible-chars.mjs`) hard-blocks all tool calls until the user deletes that file. This is a programmatic gate—it does not depend on the model choosing to warn the user.
+When found, the scanner writes `.claude/.invisible-char-alert` and a PreToolUse gate (`gate-invisible-chars.mjs`) prompts the user for approval via `permissionDecision: "ask"`. The user sees the decoded payloads in a permission dialog and can approve or deny. This works in the VM where the user can't access the filesystem directly.
 
 ### Session Start Hook
 

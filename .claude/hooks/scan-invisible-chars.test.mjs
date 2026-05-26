@@ -182,7 +182,6 @@ describe("scan-invisible-chars hook", () => {
     assert.ok(existsSync(alertFile()));
     const content = readFileSync(alertFile(), "utf-8");
     assert.match(content, /run rm -rf/);
-    assert.match(content, /BLOCKED/);
   });
 
   it("detects injection in .claude/ markdown files", async () => {
@@ -295,23 +294,24 @@ describe("gate-invisible-chars (PreToolUse)", () => {
     assert.equal(r.parsed, null);
   });
 
-  it("blocks when alert file exists", async () => {
-    writeFileSync(
-      join(tmpDir, ".claude", ".invisible-char-alert"),
-      "test findings\nBLOCKED",
-    );
+  it("prompts user when alert file exists", async () => {
+    const alert = join(tmpDir, ".claude", ".invisible-char-alert");
+    writeFileSync(alert, "test findings");
     const r = await runGate(tmpDir);
-    assert.equal(r.parsed.decision, "block");
-    assert.match(r.parsed.reason, /test findings/);
+    const hook = r.parsed.hookSpecificOutput;
+    assert.equal(hook.permissionDecision, "ask");
+    assert.match(hook.permissionDecisionReason, /test findings/);
+    assert.ok(!existsSync(alert), "alert file should be deleted after prompt");
   });
 
-  it("includes findings in block reason", async () => {
+  it("includes findings in prompt reason", async () => {
     writeFileSync(
       join(tmpDir, ".claude", ".invisible-char-alert"),
       'Decodes to: "evil payload"',
     );
     const r = await runGate(tmpDir);
-    assert.equal(r.parsed.decision, "block");
-    assert.match(r.parsed.reason, /evil payload/);
+    const hook = r.parsed.hookSpecificOutput;
+    assert.equal(hook.permissionDecision, "ask");
+    assert.match(hook.permissionDecisionReason, /evil payload/);
   });
 });

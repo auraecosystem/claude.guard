@@ -110,9 +110,8 @@ function formatReport(allFindings) {
     "(skill invocation, tool use, instruction override). This commonly",
     "happens when copy-pasting content from the internet.",
     "",
-    "Unlike files read during a session (protected by PostToolUse",
-    "sanitization), CLAUDE.md, AGENTS.md, and .claude/ skill files are",
-    "loaded directly as context and reach the model unsanitized.",
+    "These files are loaded directly as context, bypassing PostToolUse",
+    "sanitization, so the invisible characters reach the model raw.",
     "",
   ];
 
@@ -127,10 +126,6 @@ function formatReport(allFindings) {
     lines.push("");
   }
 
-  lines.push("All tool calls are BLOCKED until this is resolved.");
-  lines.push(
-    "To proceed: clean the affected files, or delete .claude/.invisible-char-alert",
-  );
   lines.push(BAR);
   return lines.join("\n");
 }
@@ -173,9 +168,9 @@ if (isDirectRun) {
   }
 
   const report = formatReport(allFindings);
-
-  // Write alert file so the PreToolUse gate blocks until user dismisses
-  writeFileSync(ALERT_FILE, report + "\n");
-
   process.stderr.write(report + "\n");
+
+  // Write alert file; the PreToolUse gate will prompt the user via
+  // permissionDecision: "ask" on every tool call until they approve.
+  writeFileSync(ALERT_FILE, report + "\n");
 }
