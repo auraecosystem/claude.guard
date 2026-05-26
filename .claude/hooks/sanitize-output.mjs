@@ -230,7 +230,11 @@ function detectAndNeutralizeExfil(text) {
   // parens, reference links, etc. correctly — no hand-rolled regex).
   const tree = mdParser.parse(text);
   visit(tree, (node) => {
-    if (node.type !== "link" && node.type !== "image" && node.type !== "definition")
+    if (
+      node.type !== "link" &&
+      node.type !== "image" &&
+      node.type !== "definition"
+    )
       return;
     const reason = checkExfilUrl(node.url);
     if (!reason) return;
@@ -244,9 +248,21 @@ function detectAndNeutralizeExfil(text) {
     }
   });
 
-  let result = threats.length > 0
-    ? String(unified().use(remarkParse).use(remarkGfm).use(remarkStringify, { bullet: "-", emphasis: "*", strong: "*", rule: "-" }).stringify(tree)).trimEnd()
-    : text;
+  let result =
+    threats.length > 0
+      ? String(
+          unified()
+            .use(remarkParse)
+            .use(remarkGfm)
+            .use(remarkStringify, {
+              bullet: "-",
+              emphasis: "*",
+              strong: "*",
+              rule: "-",
+            })
+            .stringify(tree),
+        ).trimEnd()
+      : text;
 
   // HTML img/a tags (not parsed by remark as AST nodes)
   result = result.replace(HTML_EXFIL_ATTR, (full, tag, url) => {
