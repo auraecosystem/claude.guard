@@ -11,7 +11,21 @@ cd ~/.local/share/secure-claude-code-defaults
 bash setup.bash
 ```
 
-`setup.bash` symlinks configs into `~/.claude/`, installs Kata Containers, registers the `kata-fc` runtime with Docker, and puts the `claude` wrapper on your PATH. On macOS it starts [Colima](https://github.com/abiosoft/colima) with Apple's Virtualization.framework for nested KVM. Setup fails if Kata can't be registered—pass `CONTAINER_RUNTIME=runc` to explicitly opt out of VM isolation (necessary on Intel Macs).
+`setup.bash` **merges** security settings into your existing `~/.claude/settings.json` (preserving your theme, editor mode, plugins, and custom allow rules), installs Kata Containers, registers the `kata-fc` runtime with Docker, and puts the `claude` wrapper on your PATH. On Apple Silicon Macs it starts [Colima](https://github.com/abiosoft/colima) with Apple's Virtualization.framework for nested KVM. **Intel Macs** are auto-detected and use `CONTAINER_RUNTIME=runc`—no Kata, but you still get the network firewall, root-owned config, credential scrubbing, and audit log.
+
+### Hooks-only install
+
+If you don't want the devcontainer wrapper—just the security hooks, deny rules, and sanitization:
+
+```bash
+bash setup.bash --hooks-only
+```
+
+This merges security settings and hooks into `~/.claude/settings.json` without installing wrapper scripts or setting up Kata/Docker. The sanitization hooks (invisible-character scanning, homoglyph normalization, output stripping) run globally in every repo.
+
+### Restoring personal preferences
+
+Setup preserves existing settings, but if you want to manage personal preferences separately (theme, editor mode, plugins, machine-specific allow rules), see [`dotfiles-prompt.md`](dotfiles-prompt.md) for a drop-in Claude command that restores them after setup.
 
 ## Threat models
 
@@ -146,6 +160,10 @@ All three pass extra args through to the real `claude` binary.
 
 Set `CLAUDE_NO_SANDBOX=1` to run on the host. You still get the deny list, pre-push checks, sanitization, and audit log. If `ANTHROPIC_API_KEY` or `VENICE_INFERENCE_KEY` is set, the AI monitor runs directly as a hook (no sidecar needed). Without a VM boundary, don't use `--dangerously-skip-permissions` in this mode.
 
+### IDE and CI passthrough
+
+The wrapper auto-detects non-interactive contexts (VS Code, JetBrains, GitHub Actions, `claude-code-action`) and passes through directly to the real `claude` binary without launching a devcontainer. Set `CLAUDE_PASSTHROUGH=1` to force this behavior in other contexts.
+
 ### Monitor provider
 
 The monitor auto-detects from available API keys:
@@ -159,12 +177,13 @@ The monitor auto-detects from available API keys:
 
 ### Wrapper options
 
-| Variable                         | Effect                                                                  |
-| -------------------------------- | ----------------------------------------------------------------------- |
-| `CLAUDE_NO_SANDBOX=1`            | Skip the devcontainer—run on host (worktree still applies if enabled)   |
-| `CLAUDE_WORKTREE=1`              | Create a per-session git worktree so your working copy is untouched     |
-| `CLAUDE_WORKSPACE=<dir>`         | Override workspace root—mount a broader directory tree in the container |
-| `CLAUDE_WORKTREE_SYNC_TIMEOUT=N` | Seconds to wait for bind-mount sync (default: 30)                       |
+| Variable                         | Effect                                                                                        |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| `CLAUDE_NO_SANDBOX=1`            | Skip the devcontainer—run on host (worktree still applies if enabled)                         |
+| `CLAUDE_PASSTHROUGH=1`           | Skip wrapper entirely—exec real `claude` binary (for scripts/CI that invoke `claude` on PATH) |
+| `CLAUDE_WORKTREE=1`              | Create a per-session git worktree so your working copy is untouched                           |
+| `CLAUDE_WORKSPACE=<dir>`         | Override workspace root—mount a broader directory tree in the container                       |
+| `CLAUDE_WORKTREE_SYNC_TIMEOUT=N` | Seconds to wait for bind-mount sync (default: 30)                                             |
 
 ### Privacy routing (`claude-private`)
 

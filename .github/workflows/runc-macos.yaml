@@ -1,0 +1,124 @@
+name: runc on macOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "setup.bash"
+      - "bin/claude"
+      - "bin/merge-user-settings.sh"
+      - ".devcontainer/**"
+      - ".github/workflows/runc-macos.yaml"
+  pull_request:
+    paths:
+      - "setup.bash"
+      - "bin/claude"
+      - "bin/merge-user-settings.sh"
+      - ".devcontainer/**"
+      - ".github/workflows/runc-macos.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  merge-script:
+    name: merge-user-settings.sh on macOS
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: command -v jq || brew install jq
+
+      - name: Merge into fresh config
+        run: |
+          bash bin/merge-user-settings.sh "$(pwd)"
+          echo "--- Merged settings ---"
+          jq . "$HOME/.claude/settings.json"
+          jq -e '.env.SCCD_DIR' "$HOME/.claude/settings.json"
+          jq -e '.permissions.deny | length > 0' "$HOME/.claude/settings.json"
+          jq -e '.sandbox.enabled' "$HOME/.claude/settings.json"
+          jq -e '.hooks.PreToolUse | length > 0' "$HOME/.claude/settings.json"
+          jq -e '.hooks.PostToolUse | length > 0' "$HOME/.claude/settings.json"
+          jq -e '.hooks.SessionStart | length > 0' "$HOME/.claude/settings.json"
+
+      - name: Verify idempotency
+        run: |
+          cp "$HOME/.claude/settings.json" /tmp/first-merge.json
+          bash bin/merge-user-settings.sh "$(pwd)"
+          diff <(jq -S . /tmp/first-merge.json) <(jq -S . "$HOME/.claude/settings.json")
+          echo "Merge is idempotent"
+
+      - name: Verify user preferences survive merge
+        run: |
+          jq '.theme = "light" | .editorMode = "emacs" | .enabledPlugins = {"my-plugin": true}' \
+            "$HOME/.claude/settings.json" > /tmp/with-prefs.json
+          cp /tmp/with-prefs.json "$HOME/.claude/settings.json"
+          bash bin/merge-user-settings.sh "$(pwd)"
+          jq -e '.theme == "light"' "$HOME/.claude/settings.json"
+          jq -e '.editorMode == "emacs"' "$HOME/.claude/settings.json"
+          jq -e '.enabledPlugins["my-plugin"] == true' "$HOME/.claude/settings.json"
+          echo "User preferences preserved"
+
+      - name: Verify user deny rules survive merge
+        run: |
+          jq '.permissions.deny += ["Bash(my-custom-deny)"]' \
+            "$HOME/.claude/settings.json" > /tmp/with-deny.json
+          cp /tmp/with-deny.json "$HOME/.claude/settings.json"
+          bash bin/merge-user-settings.sh "$(pwd)"
+          jq -e '.permissions.deny | any(. == "Bash(my-custom-deny)")' "$HOME/.claude/settings.json"
+          echo "User deny rules preserved"
+
+      - name: Test --hooks-only setup path
+        run: |
+          rm -f "$HOME/.claude/settings.json"
+          bash setup.bash --hooks-only
+          test -f "$HOME/.claude/settings.json"
+          jq -e '.env.SCCD_DIR' "$HOME/.claude/settings.json"
+          echo "--hooks-only path works"
+
+  runc-devcontainer:
+    name: runc devcontainer on macOS
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Docker via Colima
+        run: |
+          brew install docker docker-compose colima
+          colima start --cpu 2 --memory 4 --disk 20 --vm-type qemu
+
+      - name: Wait for Docker
+        run: |
+          for i in $(seq 1 30); do
+            docker info >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker info || { echo "Docker not available after Colima start"; exit 1; }
+
+      - name: Install devcontainer CLI
+        run: npm install -g @devcontainers/cli
+
+      - name: Verify Intel Mac detection in wrapper
+        run: |
+          # On ARM64 runner, the wrapper should NOT auto-set runc
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            echo "ARM64 runner — Intel detection should not trigger"
+            # Explicitly set runc for this test
+            export CONTAINER_RUNTIME=runc
+          fi
+          echo "CONTAINER_RUNTIME=${CONTAINER_RUNTIME:-kata-fc}"
+
+      - name: Build and start devcontainer with runc
+        env:
+          CONTAINER_RUNTIME: runc
+        run: |
+          devcontainer up --workspace-folder . 2>&1 | tail -20
+
+      - name: Run smoke check
+        env:
+          CONTAINER_RUNTIME: runc
+        run: |
+          devcontainer exec --workspace-folder . bash .devcontainer/smoke-check.bash
