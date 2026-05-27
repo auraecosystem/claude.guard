@@ -1,23 +1,50 @@
 """Tests for .claude/hooks/monitor-dispatch.bash."""
 
 import json
+import shutil
 import socket
 import subprocess
 import threading
 from pathlib import Path
 
-DISPATCH = (
-    Path(__file__).resolve().parents[1] / ".claude" / "hooks" / "monitor-dispatch.bash"
-)
+HOOKS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "hooks"
+DISPATCH = HOOKS_DIR / "monitor-dispatch.bash"
+LIB_CHECKS = HOOKS_DIR / "lib-checks.sh"
 _ENVELOPE = (
     '{"tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"test-123"}'
 )
 
 
+def _install_lib(tmp_path: Path) -> None:
+    """Copy lib-checks.sh next to the test script so source works."""
+    shutil.copy2(LIB_CHECKS, tmp_path / "lib-checks.sh")
+
+
 def _devcontainer_script(tmp_path: Path) -> str:
     hardening = tmp_path / "hardening-complete"
     hardening.touch()
+    _install_lib(tmp_path)
     return DISPATCH.read_text().replace("/run/hardening-complete", str(hardening))
+
+
+def _monitor_stub(tmp_path: Path, reason: str = "stub") -> Path:
+    stub = tmp_path / "monitor.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\nimport sys; sys.stdin.read()\n"
+        f'print(\'{{"hookSpecificOutput":{{"hookEventName":"PreToolUse",'
+        f'"permissionDecision":"allow","permissionDecisionReason":"{reason}"}}}}\')\n'
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _dispatch_with_stub(tmp_path: Path, reason: str = "stub") -> str:
+    _install_lib(tmp_path)
+    stub = _monitor_stub(tmp_path, reason)
+    return DISPATCH.read_text().replace(
+        'exec python3 "$SCRIPT_DIR/monitor.py"',
+        f'exec python3 "{stub}"',
+    )
 
 
 def _run(
@@ -38,65 +65,91 @@ def _run(
     )
 
 
-def test_no_key_denies_outside_devcontainer(tmp_path: Path) -> None:
-    """No API key + no opt-out → deny with generic message."""
-    env = {
+def _base_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
+    return {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(tmp_path),
+        "CLAUDE_PROJECT_DIR": str(tmp_path),
+        **overrides,
     }
+
+
+def _hook_output(result: subprocess.CompletedProcess[str]) -> dict:
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    return json.loads(result.stdout)["hookSpecificOutput"]
+
+
+# --- No key / opt-out ---
+
+
+def test_no_key_asks(tmp_path: Path) -> None:
+    _install_lib(tmp_path)
     script_file = tmp_path / "dispatch.bash"
-    result = _run(DISPATCH.read_text(), env, as_file=script_file)
-    assert result.returncode == 0
-    output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
+    output = _hook_output(
+        _run(DISPATCH.read_text(), _base_env(tmp_path), as_file=script_file)
+    )
+    assert output["permissionDecision"] == "ask"
     assert "No API key configured" in output["permissionDecisionReason"]
 
 
-def test_delegates_to_monitor_with_key(tmp_path: Path) -> None:
-    """With an API key, dispatch execs into monitor.py (not the deny path)."""
-    stub = tmp_path / "monitor.py"
-    stub.write_text(
-        "#!/usr/bin/env python3\nimport sys; sys.stdin.read()\n"
-        'print(\'{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
-        '"permissionDecision":"allow","permissionDecisionReason":"stub"}}\')\n'
-    )
-    stub.chmod(0o755)
-    script = DISPATCH.read_text().replace(
-        'exec python3 "$SCRIPT_DIR/monitor.py"',
-        f'exec python3 "{stub}"',
-    )
-    env = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
-        "HOME": str(tmp_path),
-        "ANTHROPIC_API_KEY": "sk-test-fake",
-    }
+def test_monitor_disabled_passes_through(tmp_path: Path) -> None:
+    _install_lib(tmp_path)
     script_file = tmp_path / "dispatch.bash"
-    result = _run(script, env, as_file=script_file)
+    result = _run(
+        DISPATCH.read_text(),
+        _base_env(tmp_path, MONITOR_DISABLED="1"),
+        as_file=script_file,
+    )
     assert result.returncode == 0
-    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert result.stdout.strip() == ""
+
+
+# --- Key dispatch ---
+
+
+def test_dispatches_with_anthropic_key(tmp_path: Path) -> None:
+    script = _dispatch_with_stub(tmp_path)
+    output = _hook_output(
+        _run(
+            script,
+            _base_env(tmp_path, ANTHROPIC_API_KEY="sk-test"),
+            as_file=tmp_path / "d.bash",
+        )
+    )
     assert output["permissionDecision"] == "allow"
-    assert "stub" in output["permissionDecisionReason"]
 
 
-def test_denies_when_socket_missing(tmp_path: Path) -> None:
+def test_dispatches_with_monitor_api_key(tmp_path: Path) -> None:
+    script = _dispatch_with_stub(tmp_path, reason="monitor-key")
+    output = _hook_output(
+        _run(
+            script,
+            _base_env(tmp_path, MONITOR_API_KEY="sk-test"),
+            as_file=tmp_path / "d.bash",
+        )
+    )
+    assert output["permissionDecision"] == "allow"
+    assert "monitor-key" in output["permissionDecisionReason"]
+
+
+# --- Devcontainer paths ---
+
+
+def test_sidecar_unavailable_asks(tmp_path: Path) -> None:
     script = _devcontainer_script(tmp_path)
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "DEVCONTAINER": "true"}
-
-    result = _run(script, env)
-    assert result.returncode == 0
-    output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
+    env = _base_env(tmp_path, DEVCONTAINER="true")
+    sf = tmp_path / "dispatch.bash"
+    output = _hook_output(_run(script, env, as_file=sf))
+    assert output["permissionDecision"] == "ask"
     assert "Sidecar unavailable" in output["permissionDecisionReason"]
 
-    result2 = _run(script, env)
-    assert result2.returncode == 0
-    output2 = json.loads(result2.stdout)["hookSpecificOutput"]
-    assert output2["permissionDecision"] == "deny", (
-        "second call must also deny, not silently allow"
+    output2 = _hook_output(_run(script, env, as_file=sf))
+    assert output2["permissionDecision"] == "ask", (
+        "second call must also ask, not silently allow"
     )
 
 
-def test_socket_present_but_curl_fails_denies(tmp_path: Path) -> None:
+def test_socket_present_but_curl_fails(tmp_path: Path) -> None:
     sock_path = tmp_path / "monitor.sock"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(sock_path))
@@ -116,16 +169,12 @@ def test_socket_present_but_curl_fails_denies(tmp_path: Path) -> None:
         'SOCKET="/var/run/monitor/monitor.sock"',
         f'SOCKET="{sock_path}"',
     )
-    env = {
-        "PATH": "/usr/bin:/bin:/usr/local/bin",
-        "HOME": str(tmp_path),
-        "DEVCONTAINER": "true",
-    }
-    result = _run(script, env)
+    result = _run(
+        script, _base_env(tmp_path, DEVCONTAINER="true"), as_file=tmp_path / "d.bash"
+    )
     t.join(timeout=5)
     server.close()
 
-    assert result.returncode == 0
-    output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
+    output = _hook_output(result)
+    assert output["permissionDecision"] == "ask"
     assert "Sidecar unavailable" in output["permissionDecisionReason"]
