@@ -157,15 +157,15 @@ Set `CLAUDE_NO_SANDBOX=1` to avoid using the VM. Don't use `--dangerously-skip-p
 
 ### Monitor provider
 
-Set `MONITOR_API_KEY` to supply the monitor with its own key, independent of Claude Code’s auth. This avoids the “auth conflict” warning that occurs when `ANTHROPIC_API_KEY` is set alongside a claude.ai subscription. The monitor auto-detects the provider from available keys (checked in order):
+The monitor needs its own API key. Use `MONITOR_API_KEY` (not `ANTHROPIC_API_KEY`, which conflicts with your claude.ai subscription):
 
-| Key                    | Provider                              | Default model    |
-| ---------------------- | ------------------------------------- | ---------------- |
-| `MONITOR_API_KEY`      | Anthropic (or set `MONITOR_PROVIDER`) | claude-haiku-4-5 |
-| `ANTHROPIC_API_KEY`    | Anthropic                             | claude-haiku-4-5 |
-| `VENICE_INFERENCE_KEY` | Venice (E2EE)                         | qwen3-coder-480b |
+| Key                    | Provider  | Default model    |
+| ---------------------- | --------- | ---------------- |
+| `MONITOR_API_KEY`      | auto      | claude-haiku-4-5 |
+| `ANTHROPIC_API_KEY`    | Anthropic | claude-haiku-4-5 |
+| `VENICE_INFERENCE_KEY` | Venice    | qwen3-coder-480b |
 
-**Host mode (recommended):** Set `MONITOR_API_KEY` + `MONITOR_PROVIDER` instead of `ANTHROPIC_API_KEY` (which Claude Code treats as an API login, conflicting with your claude.ai subscription). Run `setup.bash` — if `envchain` is installed, it writes a retrieval command that tries both `ANTHROPIC_API_KEY` and `VENICE_INFERENCE_KEY` from your namespace, auto-detecting the provider; otherwise it moves the key directly (chmod 600). The wrapper sources `~/.config/claude-monitor/env` at launch.
+`setup.bash` handles migration: if you have `ANTHROPIC_API_KEY` set, it offers to move it to `~/.config/claude-monitor/env` as `MONITOR_API_KEY`. With `envchain` installed, the env file retrieves the key at runtime (no key on disk, auto-rotates); without it, the key is stored directly (chmod 600). The wrapper sources this file at launch. Set `MONITOR_PROVIDER` explicitly if using Venice.
 
 ## Environment variables
 
