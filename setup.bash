@@ -354,8 +354,8 @@ elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
   if [[ -t 0 ]]; then
     echo ""
     warn "ANTHROPIC_API_KEY is set — this causes an auth conflict with claude.ai"
-    status "Recommendation: store the key in a credential manager and set"
-    status "MONITOR_KEY_CMD so the wrapper retrieves it without exposing the key on disk."
+    status "Recommendation: move it to MONITOR_API_KEY via a credential manager"
+    status "so the monitor gets it without Claude Code seeing ANTHROPIC_API_KEY."
     echo ""
     # Detect available credential backends.
     # Prefer referencing the key where it already lives (e.g., an existing
@@ -421,7 +421,7 @@ ENVEOF
 # For better security, install envchain and re-run setup.bash.
 export MONITOR_PROVIDER=anthropic
 ENVEOF
-        printf 'export MONITOR_API_KEY="%s"\n' "${ANTHROPIC_API_KEY}" >>"$HOME/.config/claude-monitor/env"
+        printf "export MONITOR_API_KEY='%s'\\n" "${ANTHROPIC_API_KEY//\'/\'\\\'\'}" >>"$HOME/.config/claude-monitor/env"
         chmod 600 "$HOME/.config/claude-monitor/env"
         status "Written to ~/.config/claude-monitor/env (mode 600)"
         status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the auth conflict."

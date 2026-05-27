@@ -157,13 +157,13 @@ Set `CLAUDE_NO_SANDBOX=1` to avoid using the VM. Don't use `--dangerously-skip-p
 
 Set `MONITOR_API_KEY` to supply the monitor with its own key, independent of Claude Code’s auth. This avoids the “auth conflict” warning that occurs when `ANTHROPIC_API_KEY` is set alongside a claude.ai subscription. The monitor auto-detects the provider from available keys (checked in order):
 
-| Key                    | Provider        | Default monitoring model   |
-| ---------------------- | --------------- | -------------------------- |
-| `MONITOR_API_KEY`      | (auto/explicit) | set `MONITOR_PROVIDER` too |
-| `ANTHROPIC_API_KEY`    | Anthropic       | claude-haiku-4-5           |
-| `VENICE_INFERENCE_KEY` | Venice (E2EE)   | qwen3-coder-480b           |
+| Key                    | Provider                              | Default model    |
+| ---------------------- | ------------------------------------- | ---------------- |
+| `MONITOR_API_KEY`      | Anthropic (or set `MONITOR_PROVIDER`) | claude-haiku-4-5 |
+| `ANTHROPIC_API_KEY`    | Anthropic                             | claude-haiku-4-5 |
+| `VENICE_INFERENCE_KEY` | Venice (E2EE)                         | qwen3-coder-480b |
 
-**Host mode (recommended):** Use `MONITOR_API_KEY` + `MONITOR_PROVIDER=anthropic` so the monitor gets an Anthropic key without setting `ANTHROPIC_API_KEY`, which Claude Code interprets as an API-key login and conflicts with your claude.ai subscription. Store the key in a credential manager (`envchain`, macOS Keychain, `secret-tool`, or `pass`) and configure `~/.config/claude-monitor/env` to retrieve it at runtime — the wrapper sources this file before launching Claude, so the key never touches disk. Run `setup.bash` to auto-detect your credential backend and generate the config.
+**Host mode (recommended):** Set `MONITOR_API_KEY` + `MONITOR_PROVIDER=anthropic` instead of `ANTHROPIC_API_KEY` (which Claude Code treats as an API login, conflicting with your claude.ai subscription). Run `setup.bash` — it detects your credential store (`envchain`, macOS Keychain, `secret-tool`, `pass`) and writes `~/.config/claude-monitor/env` with a retrieval command the wrapper sources at launch. The key stays in your keychain, never on disk.
 
 ## Environment variables
 
