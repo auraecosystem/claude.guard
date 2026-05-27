@@ -8,6 +8,8 @@
  * Layer 4: Redact API keys/secrets via detect-secrets (24 detectors, Python subprocess).
  */
 import { execFileSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import stripAnsi from "strip-ansi";
@@ -324,20 +326,30 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SECRET_HINT =
   /secret|token|password|passwd|bearer|credential|private.key|api.key|AKIA[A-Z0-9]|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|github_pat_|sk_live_|sk_test_|rk_live_|rk_test_|xox[bpas]-|eyJ[A-Za-z0-9]/i;
 
+const DS_UNAVAILABLE_SENTINEL = join(tmpdir(), ".detect-secrets-unavailable");
+
 function redactSecrets(text) {
   if (!SECRET_HINT.test(text)) return null;
-  const result = execFileSync(
-    "python3",
-    [join(__dirname, "redact-secrets.py")],
-    {
-      input: text,
-      encoding: "utf8",
-      timeout: 10000,
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-  );
-  if (!result.trim()) return null;
-  return JSON.parse(result);
+  if (existsSync(DS_UNAVAILABLE_SENTINEL)) return null;
+  try {
+    const result = execFileSync(
+      "python3",
+      [join(__dirname, "redact-secrets.py")],
+      {
+        input: text,
+        encoding: "utf8",
+        timeout: 10000,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    if (!result.trim()) return null;
+    return JSON.parse(result);
+  } catch (err) {
+    try {
+      writeFileSync(DS_UNAVAILABLE_SENTINEL, "", { flag: "wx" });
+    } catch {}
+    throw err;
+  }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────

@@ -71,7 +71,11 @@ try {
     process.exit(0);
   }
 
-  if (!allowedDomains.has(hostname)) {
+  const domainAllowed =
+    allowedDomains.has(hostname) ||
+    [...allowedDomains].some((d) => hostname.endsWith(`.${d}`));
+
+  if (!domainAllowed) {
     deny(
       `WebFetch blocked: "${hostname}" is not in the domain allowlist. ` +
         'Add it to .devcontainer/domain-allowlist.json as "ro".',
