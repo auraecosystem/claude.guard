@@ -353,84 +353,21 @@ elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
   monitor_ok=true
   if [[ -t 0 ]]; then
     echo ""
-    warn "ANTHROPIC_API_KEY is set — this causes an auth conflict with claude.ai"
-    status "Recommendation: move it to MONITOR_API_KEY via a credential manager"
-    status "so the monitor gets it without Claude Code seeing ANTHROPIC_API_KEY."
-    echo ""
-    # Detect available credential backends.
-    # Prefer referencing the key where it already lives (e.g., an existing
-    # envchain namespace) so key rotation propagates automatically.
-    _default_cmd=""
-    if command_exists envchain; then
-      status "Detected: envchain"
-      echo "   If ANTHROPIC_API_KEY is already in an envchain namespace, the"
-      echo "   monitor can retrieve it from there (auto-updates on key rotation)."
-      echo ""
-      read -rp "   envchain namespace containing ANTHROPIC_API_KEY (blank to skip): " _ec_ns
-      if [[ -n "$_ec_ns" ]]; then
-        _default_cmd="envchain $_ec_ns printenv ANTHROPIC_API_KEY"
-      fi
-    fi
-    if [[ -z "$_default_cmd" ]] && $IS_MAC; then
-      status "Detected: macOS Keychain"
-      echo "   Store:    security add-generic-password -s claude-monitor -a api-key -w <YOUR_KEY>"
-      _default_cmd='security find-generic-password -s claude-monitor -a api-key -w'
-    fi
-    if [[ -z "$_default_cmd" ]] && command_exists secret-tool; then
-      status "Detected: secret-tool (GNOME Keyring / KDE Wallet)"
-      echo "   Store:    echo -n '<YOUR_KEY>' | secret-tool store --label='Claude Monitor' service claude-monitor key api-key"
-      _default_cmd='secret-tool lookup service claude-monitor key api-key'
-    fi
-    if [[ -z "$_default_cmd" ]] && command_exists pass; then
-      status "Detected: pass (password-store)"
-      echo "   Store:    echo '<YOUR_KEY>' | pass insert -e claude-monitor/api-key"
-      _default_cmd='pass show claude-monitor/api-key'
-    fi
-    echo ""
-    if [[ -n "$_default_cmd" ]]; then
-      read -rp "   Write retrieval config to ~/.config/claude-monitor/env? (y/N) " choice
-      case "$choice" in
-      y | Y)
-        mkdir -p "$HOME/.config/claude-monitor"
-        cat >"$HOME/.config/claude-monitor/env" <<ENVEOF
-# Sourced by the claude wrapper to provide MONITOR_API_KEY at runtime.
-# The key is retrieved from a credential store — never stored here.
-# Regenerate with: setup.bash
-export MONITOR_PROVIDER=anthropic
-export MONITOR_API_KEY="\$($_default_cmd)"
-ENVEOF
-        chmod 600 "$HOME/.config/claude-monitor/env"
-        status "Written to ~/.config/claude-monitor/env (retrieval command only, no key material)"
-        status "Key will be fetched at runtime via: $_default_cmd"
-        status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the auth conflict."
-        ;;
-      *)
-        status "Skipped. Using ANTHROPIC_API_KEY directly (auth conflict remains)."
-        ;;
-      esac
-    else
-      # No credential manager — write the key directly. Same security as
-      # having it in .bashrc (chmod 600), but resolves the auth conflict.
-      read -rp "   Move ANTHROPIC_API_KEY to ~/.config/claude-monitor/env? (y/N) " choice
-      case "$choice" in
-      y | Y)
-        mkdir -p "$HOME/.config/claude-monitor"
-        cat >"$HOME/.config/claude-monitor/env" <<ENVEOF
-# Sourced by the claude wrapper to provide MONITOR_API_KEY at runtime.
-# No credential manager detected — key stored directly (mode 600).
-# For better security, install envchain and re-run setup.bash.
-export MONITOR_PROVIDER=anthropic
-ENVEOF
-        printf "export MONITOR_API_KEY='%s'\\n" "${ANTHROPIC_API_KEY//\'/\'\\\'\'}" >>"$HOME/.config/claude-monitor/env"
-        chmod 600 "$HOME/.config/claude-monitor/env"
-        status "Written to ~/.config/claude-monitor/env (mode 600)"
-        status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the auth conflict."
-        ;;
-      *)
-        status "Skipped. Using ANTHROPIC_API_KEY directly (auth conflict remains)."
-        ;;
-      esac
-    fi
+    warn "ANTHROPIC_API_KEY is set — this conflicts with claude.ai auth"
+    read -rp "   Move it to ~/.config/claude-monitor/env as MONITOR_API_KEY? (y/N) " choice
+    case "$choice" in
+    y | Y)
+      mkdir -p "$HOME/.config/claude-monitor"
+      printf '# Sourced by the claude wrapper. Edit to use envchain/keychain instead.\nexport MONITOR_PROVIDER=anthropic\n' >"$HOME/.config/claude-monitor/env"
+      printf "export MONITOR_API_KEY='%s'\\n" "${ANTHROPIC_API_KEY//\'/\'\\\'\'}" >>"$HOME/.config/claude-monitor/env"
+      chmod 600 "$HOME/.config/claude-monitor/env"
+      status "Written to ~/.config/claude-monitor/env (mode 600)"
+      status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the conflict."
+      ;;
+    *)
+      status "Skipped — auth conflict remains."
+      ;;
+    esac
   else
     status "Monitor provider: Anthropic (claude-haiku-4-5)"
   fi

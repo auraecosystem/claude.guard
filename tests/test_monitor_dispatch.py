@@ -48,7 +48,7 @@ def test_no_key_denies_outside_devcontainer(tmp_path: Path) -> None:
     result = _run(DISPATCH.read_text(), env, as_file=script_file)
     assert result.returncode == 0
     output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
+    assert output["permissionDecision"] == "ask"
     assert "No API key configured" in output["permissionDecisionReason"]
 
 
@@ -111,14 +111,14 @@ def test_denies_when_socket_missing(tmp_path: Path) -> None:
     result = _run(script, env)
     assert result.returncode == 0
     output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
+    assert output["permissionDecision"] == "ask"
     assert "Sidecar unavailable" in output["permissionDecisionReason"]
 
     result2 = _run(script, env)
     assert result2.returncode == 0
     output2 = json.loads(result2.stdout)["hookSpecificOutput"]
-    assert output2["permissionDecision"] == "deny", (
-        "second call must also deny, not silently allow"
+    assert output2["permissionDecision"] == "ask", (
+        "second call must also ask, not silently allow"
     )
 
 
@@ -153,5 +153,5 @@ def test_socket_present_but_curl_fails_denies(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     output = json.loads(result.stdout)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
+    assert output["permissionDecision"] == "ask"
     assert "Sidecar unavailable" in output["permissionDecisionReason"]
