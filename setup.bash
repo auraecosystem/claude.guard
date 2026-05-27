@@ -386,12 +386,8 @@ elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
       echo "   Store:    echo '<YOUR_KEY>' | pass insert -e claude-monitor/api-key"
       _default_cmd='pass show claude-monitor/api-key'
     fi
-    if [[ -z "$_default_cmd" ]]; then
-      echo "   No credential manager detected. Install envchain, or set"
-      echo "   MONITOR_API_KEY directly in your shell profile."
-    fi
     echo ""
-    if [[ -n "${_default_cmd:-}" ]]; then
+    if [[ -n "$_default_cmd" ]]; then
       read -rp "   Write retrieval config to ~/.config/claude-monitor/env? (y/N) " choice
       case "$choice" in
       y | Y)
@@ -406,6 +402,28 @@ ENVEOF
         chmod 600 "$HOME/.config/claude-monitor/env"
         status "Written to ~/.config/claude-monitor/env (retrieval command only, no key material)"
         status "Key will be fetched at runtime via: $_default_cmd"
+        status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the auth conflict."
+        ;;
+      *)
+        status "Skipped. Using ANTHROPIC_API_KEY directly (auth conflict remains)."
+        ;;
+      esac
+    else
+      # No credential manager — write the key directly. Same security as
+      # having it in .bashrc (chmod 600), but resolves the auth conflict.
+      read -rp "   Move ANTHROPIC_API_KEY to ~/.config/claude-monitor/env? (y/N) " choice
+      case "$choice" in
+      y | Y)
+        mkdir -p "$HOME/.config/claude-monitor"
+        cat >"$HOME/.config/claude-monitor/env" <<ENVEOF
+# Sourced by the claude wrapper to provide MONITOR_API_KEY at runtime.
+# No credential manager detected — key stored directly (mode 600).
+# For better security, install envchain and re-run setup.bash.
+export MONITOR_PROVIDER=anthropic
+ENVEOF
+        printf 'export MONITOR_API_KEY="%s"\n' "${ANTHROPIC_API_KEY}" >>"$HOME/.config/claude-monitor/env"
+        chmod 600 "$HOME/.config/claude-monitor/env"
+        status "Written to ~/.config/claude-monitor/env (mode 600)"
         status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the auth conflict."
         ;;
       *)
