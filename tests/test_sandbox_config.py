@@ -280,6 +280,85 @@ class TestSetupScript:
 # ── Dockerfile invariants ────────────────────────────────────────────
 
 
+# ── --dangerously-skip-firewall mode ────────────────────────────────
+
+
+class TestDangerouslySkipFirewall:
+    """Structural invariants for --dangerously-skip-firewall.
+
+    Wrapper arg parsing/stripping/env-export tests are in test_claude_wrapper.py.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.init_fw = INIT_FIREWALL.read_text()
+        self.entrypoint = ENTRYPOINT.read_text()
+        self.wrapper = (REPO_ROOT / "bin" / "claude").read_text()
+
+    def _skip_section(self) -> str:
+        """The DANGEROUSLY_SKIP_FIREWALL block in init-firewall.bash,
+        ending before the normal firewall setup begins."""
+        start = self.init_fw.index("DANGEROUSLY_SKIP_FIREWALL")
+        end = self.init_fw.index("# === Domain allowlist")
+        section = self.init_fw[start:end]
+        assert section
+        return section
+
+    def test_skip_precedes_iptables(self) -> None:
+        """Early exit must come before any iptables commands to prevent
+        partial firewall state."""
+        skip_pos = self.init_fw.index("DANGEROUSLY_SKIP_FIREWALL")
+        iptables_pos = self.init_fw.index("iptables -F")
+        assert skip_pos < iptables_pos
+
+    def test_skip_starts_forwarding_dnsmasq(self) -> None:
+        """A forwarding dnsmasq must run so the app container (whose DNS
+        points at the firewall container) can still resolve names."""
+        section = self._skip_section()
+        assert "dnsmasq" in section
+        assert "server=" in section
+
+    def test_skip_validates_dns_upstream(self) -> None:
+        section = self._skip_section()
+        assert '-z "$DOCKER_DNS"' in section
+        assert "exit 1" in section
+
+    def test_skip_does_not_start_squid(self) -> None:
+        assert "squid" not in self._skip_section().lower()
+
+    def test_skip_exits_successfully(self) -> None:
+        """The skip block must exit 0 so the compose command touches
+        /tmp/firewall-ready and the healthcheck passes."""
+        assert "exit 0" in self._skip_section()
+
+    def test_entrypoint_proxy_has_skip_and_normal_branches(self) -> None:
+        """Both modes must configure proxy profile scripts — a missing
+        branch breaks either skip mode or normal mode."""
+        assert "NOPROXY_BASH" in self.entrypoint
+        assert "NOPROXY_FISH" in self.entrypoint
+        assert "PROXY_BASH" in self.entrypoint
+        assert "PROXY_FISH_CONF" in self.entrypoint
+
+    def test_wrapper_clears_all_compose_proxy_vars(self, compose: dict) -> None:
+        """Every proxy-related env var in docker-compose.yml must be
+        cleared by the wrapper's noproxy_flags — otherwise requests fail
+        through the missing squid when the firewall is skipped."""
+        env = compose["services"]["app"]["environment"]
+        proxy_vars = {
+            k for k in env if any(p in k.lower() for p in ("proxy", "ca_cert"))
+        }
+        assert proxy_vars, "no proxy vars found in compose — test is stale"
+
+        noproxy_start = self.wrapper.index("noproxy_flags=")
+        noproxy_end = self.wrapper.index("exec docker exec", noproxy_start)
+        noproxy_block = self.wrapper[noproxy_start:noproxy_end]
+
+        for var in proxy_vars:
+            assert f"-e {var}=" in noproxy_block, (
+                f"compose sets {var} but wrapper does not clear it in noproxy_flags"
+            )
+
+
 class TestDockerfile:
     @pytest.fixture(autouse=True)
     def _load(self) -> None:
