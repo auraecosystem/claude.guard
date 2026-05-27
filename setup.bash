@@ -357,26 +357,36 @@ elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     status "Recommendation: store the key in a credential manager and set"
     status "MONITOR_KEY_CMD so the wrapper retrieves it without exposing the key on disk."
     echo ""
-    # Detect available credential backends
+    # Detect available credential backends.
+    # Prefer referencing the key where it already lives (e.g., an existing
+    # envchain namespace) so key rotation propagates automatically.
+    _default_cmd=""
     if command_exists envchain; then
       status "Detected: envchain"
-      echo "   Store:    envchain --set claude-monitor MONITOR_API_KEY"
-      echo "   (paste your API key when prompted)"
-      _default_cmd='envchain claude-monitor printenv MONITOR_API_KEY'
-    elif $IS_MAC; then
+      echo "   If ANTHROPIC_API_KEY is already in an envchain namespace, the"
+      echo "   monitor can retrieve it from there (auto-updates on key rotation)."
+      echo ""
+      read -rp "   envchain namespace containing ANTHROPIC_API_KEY (blank to skip): " _ec_ns
+      if [[ -n "$_ec_ns" ]]; then
+        _default_cmd="envchain $_ec_ns printenv ANTHROPIC_API_KEY"
+      fi
+    fi
+    if [[ -z "$_default_cmd" ]] && $IS_MAC; then
       status "Detected: macOS Keychain"
       echo "   Store:    security add-generic-password -s claude-monitor -a api-key -w <YOUR_KEY>"
       _default_cmd='security find-generic-password -s claude-monitor -a api-key -w'
-    elif command_exists secret-tool; then
+    fi
+    if [[ -z "$_default_cmd" ]] && command_exists secret-tool; then
       status "Detected: secret-tool (GNOME Keyring / KDE Wallet)"
       echo "   Store:    echo -n '<YOUR_KEY>' | secret-tool store --label='Claude Monitor' service claude-monitor key api-key"
       _default_cmd='secret-tool lookup service claude-monitor key api-key'
-    elif command_exists pass; then
+    fi
+    if [[ -z "$_default_cmd" ]] && command_exists pass; then
       status "Detected: pass (password-store)"
       echo "   Store:    echo '<YOUR_KEY>' | pass insert -e claude-monitor/api-key"
       _default_cmd='pass show claude-monitor/api-key'
-    else
-      _default_cmd=""
+    fi
+    if [[ -z "$_default_cmd" ]]; then
       echo "   No credential manager detected. Install envchain, or set"
       echo "   MONITOR_API_KEY directly in your shell profile."
     fi
@@ -395,8 +405,8 @@ export MONITOR_API_KEY="\$($_default_cmd)"
 ENVEOF
         chmod 600 "$HOME/.config/claude-monitor/env"
         status "Written to ~/.config/claude-monitor/env (retrieval command only, no key material)"
-        status "Now store the key in your credential manager (see above)."
-        status "Then remove ANTHROPIC_API_KEY from your shell profile."
+        status "Key will be fetched at runtime via: $_default_cmd"
+        status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the auth conflict."
         ;;
       *)
         status "Skipped. Using ANTHROPIC_API_KEY directly (auth conflict remains)."
