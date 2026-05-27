@@ -1,22 +1,29 @@
 """Tests for .claude/hooks/monitor-dispatch.bash."""
 
 import json
+import shutil
 import socket
 import subprocess
 import threading
 from pathlib import Path
 
-DISPATCH = (
-    Path(__file__).resolve().parents[1] / ".claude" / "hooks" / "monitor-dispatch.bash"
-)
+HOOKS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "hooks"
+DISPATCH = HOOKS_DIR / "monitor-dispatch.bash"
+LIB_CHECKS = HOOKS_DIR / "lib-checks.sh"
 _ENVELOPE = (
     '{"tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"test-123"}'
 )
 
 
+def _install_lib(tmp_path: Path) -> None:
+    """Copy lib-checks.sh next to the test script so source works."""
+    shutil.copy2(LIB_CHECKS, tmp_path / "lib-checks.sh")
+
+
 def _devcontainer_script(tmp_path: Path) -> str:
     hardening = tmp_path / "hardening-complete"
     hardening.touch()
+    _install_lib(tmp_path)
     return DISPATCH.read_text().replace("/run/hardening-complete", str(hardening))
 
 
@@ -40,6 +47,7 @@ def _run(
 
 def test_no_key_denies_outside_devcontainer(tmp_path: Path) -> None:
     """No API key + no opt-out → deny with generic message."""
+    _install_lib(tmp_path)
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(tmp_path),
@@ -54,6 +62,7 @@ def test_no_key_denies_outside_devcontainer(tmp_path: Path) -> None:
 
 def test_delegates_to_monitor_with_key(tmp_path: Path) -> None:
     """With an API key, dispatch execs into monitor.py (not the deny path)."""
+    _install_lib(tmp_path)
     stub = tmp_path / "monitor.py"
     stub.write_text(
         "#!/usr/bin/env python3\nimport sys; sys.stdin.read()\n"
@@ -81,14 +90,15 @@ def test_delegates_to_monitor_with_key(tmp_path: Path) -> None:
 def test_denies_when_socket_missing(tmp_path: Path) -> None:
     script = _devcontainer_script(tmp_path)
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "DEVCONTAINER": "true"}
+    script_file = tmp_path / "dispatch.bash"
 
-    result = _run(script, env)
+    result = _run(script, env, as_file=script_file)
     assert result.returncode == 0
     output = json.loads(result.stdout)["hookSpecificOutput"]
     assert output["permissionDecision"] == "deny"
     assert "Sidecar unavailable" in output["permissionDecisionReason"]
 
-    result2 = _run(script, env)
+    result2 = _run(script, env, as_file=script_file)
     assert result2.returncode == 0
     output2 = json.loads(result2.stdout)["hookSpecificOutput"]
     assert output2["permissionDecision"] == "deny", (
@@ -121,7 +131,8 @@ def test_socket_present_but_curl_fails_denies(tmp_path: Path) -> None:
         "HOME": str(tmp_path),
         "DEVCONTAINER": "true",
     }
-    result = _run(script, env)
+    script_file = tmp_path / "dispatch.bash"
+    result = _run(script, env, as_file=script_file)
     t.join(timeout=5)
     server.close()
 
