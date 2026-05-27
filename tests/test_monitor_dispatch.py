@@ -78,6 +78,32 @@ def test_delegates_to_monitor_with_key(tmp_path: Path) -> None:
     assert "stub" in output["permissionDecisionReason"]
 
 
+def test_delegates_to_monitor_with_monitor_api_key(tmp_path: Path) -> None:
+    """MONITOR_API_KEY alone (no ANTHROPIC_API_KEY) triggers monitor.py."""
+    stub = tmp_path / "monitor.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\nimport sys; sys.stdin.read()\n"
+        'print(\'{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+        '"permissionDecision":"allow","permissionDecisionReason":"monitor-key-stub"}}\')\n'
+    )
+    stub.chmod(0o755)
+    script = DISPATCH.read_text().replace(
+        'exec python3 "$SCRIPT_DIR/monitor.py"',
+        f'exec python3 "{stub}"',
+    )
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(tmp_path),
+        "MONITOR_API_KEY": "sk-test-monitor-only",
+    }
+    script_file = tmp_path / "dispatch.bash"
+    result = _run(script, env, as_file=script_file)
+    assert result.returncode == 0
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "allow"
+    assert "monitor-key-stub" in output["permissionDecisionReason"]
+
+
 def test_denies_when_socket_missing(tmp_path: Path) -> None:
     script = _devcontainer_script(tmp_path)
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "DEVCONTAINER": "true"}

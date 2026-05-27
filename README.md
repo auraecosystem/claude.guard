@@ -151,16 +151,19 @@ All three pass extra args through to the real `claude` binary.
 
 ### Without the VM
 
-Set `CLAUDE_NO_SANDBOX=1` to avoid using the VM. Don't use `--dangerously-skip-permissions` in this mode. You still get the deny list, pre-push checks, sanitization, and audit log. If `ANTHROPIC_API_KEY` or `VENICE_INFERENCE_KEY` is set, the AI monitor runs directly as a hook.
+Set `CLAUDE_NO_SANDBOX=1` to avoid using the VM. Don't use `--dangerously-skip-permissions` in this mode. You still get the deny list, pre-push checks, sanitization, and audit log. If a monitor API key is set (see below), the AI monitor runs directly as a hook.
 
 ### Monitor provider
 
-The monitor auto-detects from available API keys:
+Set `MONITOR_API_KEY` to supply the monitor with its own key, independent of Claude Code’s auth. This avoids the “auth conflict” warning that occurs when `ANTHROPIC_API_KEY` is set alongside a claude.ai subscription. The monitor auto-detects the provider from available keys (checked in order):
 
-| Key                    | Provider      | Default monitoring model |
-| ---------------------- | ------------- | ------------------------ |
-| `ANTHROPIC_API_KEY`    | Anthropic     | claude-haiku-4-5         |
-| `VENICE_INFERENCE_KEY` | Venice (E2EE) | qwen3-coder-480b         |
+| Key                    | Provider        | Default monitoring model   |
+| ---------------------- | --------------- | -------------------------- |
+| `MONITOR_API_KEY`      | (auto/explicit) | set `MONITOR_PROVIDER` too |
+| `ANTHROPIC_API_KEY`    | Anthropic       | claude-haiku-4-5           |
+| `VENICE_INFERENCE_KEY` | Venice (E2EE)   | qwen3-coder-480b           |
+
+**Host mode (recommended):** Use `MONITOR_API_KEY` + `MONITOR_PROVIDER=anthropic` so the monitor gets an Anthropic key without setting `ANTHROPIC_API_KEY`, which Claude Code interprets as an API-key login and conflicts with your claude.ai subscription. Store the key in a credential manager (`envchain`, macOS Keychain, `secret-tool`, or `pass`) and configure `~/.config/claude-monitor/env` to retrieve it at runtime — the wrapper sources this file before launching Claude, so the key never touches disk. Run `setup.bash` to auto-detect your credential backend and generate the config.
 
 ## Environment variables
 

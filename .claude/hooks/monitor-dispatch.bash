@@ -54,4 +54,4 @@ if [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${VENICE_INFERENCE_KEY:-}" || -n "${MON
 fi
 
 # No valid state: not sandbox, not devcontainer, not opted out, no key.
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"[MONITOR] No API key configured. Set ANTHROPIC_API_KEY or VENICE_INFERENCE_KEY to enable monitoring, or set MONITOR_DISABLED=1 to explicitly opt out. See README § Monitor provider."}}\n'
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"[MONITOR] No API key configured. Set MONITOR_API_KEY (preferred) or ANTHROPIC_API_KEY or VENICE_INFERENCE_KEY to enable monitoring, or set MONITOR_DISABLED=1 to explicitly opt out. See README § Monitor provider."}}\n'

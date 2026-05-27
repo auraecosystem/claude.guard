@@ -346,15 +346,73 @@ fi
 status "Checking monitor configuration..."
 
 monitor_ok=false
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  status "Monitor provider: Anthropic (claude-haiku-4-5)"
+if [[ -n "${MONITOR_API_KEY:-}" ]]; then
+  status "Monitor provider: ${MONITOR_PROVIDER:-anthropic} (via MONITOR_API_KEY)"
   monitor_ok=true
+elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  monitor_ok=true
+  if [[ -t 0 ]]; then
+    echo ""
+    warn "ANTHROPIC_API_KEY is set — this causes an auth conflict with claude.ai"
+    status "Recommendation: store the key in a credential manager and set"
+    status "MONITOR_KEY_CMD so the wrapper retrieves it without exposing the key on disk."
+    echo ""
+    # Detect available credential backends
+    if command_exists envchain; then
+      status "Detected: envchain"
+      echo "   Store:    envchain --set claude-monitor MONITOR_API_KEY"
+      echo "   (paste your API key when prompted)"
+      _default_cmd='envchain claude-monitor printenv MONITOR_API_KEY'
+    elif $IS_MAC; then
+      status "Detected: macOS Keychain"
+      echo "   Store:    security add-generic-password -s claude-monitor -a api-key -w <YOUR_KEY>"
+      _default_cmd='security find-generic-password -s claude-monitor -a api-key -w'
+    elif command_exists secret-tool; then
+      status "Detected: secret-tool (GNOME Keyring / KDE Wallet)"
+      echo "   Store:    echo -n '<YOUR_KEY>' | secret-tool store --label='Claude Monitor' service claude-monitor key api-key"
+      _default_cmd='secret-tool lookup service claude-monitor key api-key'
+    elif command_exists pass; then
+      status "Detected: pass (password-store)"
+      echo "   Store:    echo '<YOUR_KEY>' | pass insert -e claude-monitor/api-key"
+      _default_cmd='pass show claude-monitor/api-key'
+    else
+      _default_cmd=""
+      echo "   No credential manager detected. Install envchain, or set"
+      echo "   MONITOR_API_KEY directly in your shell profile."
+    fi
+    echo ""
+    if [[ -n "${_default_cmd:-}" ]]; then
+      read -rp "   Write retrieval config to ~/.config/claude-monitor/env? (y/N) " choice
+      case "$choice" in
+      y | Y)
+        mkdir -p "$HOME/.config/claude-monitor"
+        cat >"$HOME/.config/claude-monitor/env" <<ENVEOF
+# Sourced by the claude wrapper to provide MONITOR_API_KEY at runtime.
+# The key is retrieved from a credential store — never stored here.
+# Regenerate with: setup.bash
+export MONITOR_PROVIDER=anthropic
+export MONITOR_API_KEY="\$($_default_cmd)"
+ENVEOF
+        chmod 600 "$HOME/.config/claude-monitor/env"
+        status "Written to ~/.config/claude-monitor/env (retrieval command only, no key material)"
+        status "Now store the key in your credential manager (see above)."
+        status "Then remove ANTHROPIC_API_KEY from your shell profile."
+        ;;
+      *)
+        status "Skipped. Using ANTHROPIC_API_KEY directly (auth conflict remains)."
+        ;;
+      esac
+    fi
+  else
+    status "Monitor provider: Anthropic (claude-haiku-4-5)"
+  fi
 elif [[ -n "${VENICE_INFERENCE_KEY:-}" ]]; then
   status "Monitor provider: Venice (qwen3-coder-480b)"
   monitor_ok=true
 else
   warn "No API key found for the trusted monitor"
-  warn "Set ANTHROPIC_API_KEY or VENICE_INFERENCE_KEY to enable monitoring"
+  warn "Set MONITOR_API_KEY (preferred) or ANTHROPIC_API_KEY or VENICE_INFERENCE_KEY"
+  warn "Tip: MONITOR_API_KEY avoids auth conflicts with your claude.ai subscription"
   warn "Without a key, tool calls execute unmonitored"
 fi
 
