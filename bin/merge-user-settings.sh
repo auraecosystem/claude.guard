@@ -46,5 +46,5 @@ jq -n --argjson u "$U" --argjson s "$S" --arg d "$DIR" '
       )
     )
 ' >"$OUT"
-chown root:root "$OUT"
+chown 0:0 "$OUT"
 chmod 444 "$OUT"
