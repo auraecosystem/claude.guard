@@ -25,6 +25,7 @@
       }
     }
   },
+  "overrideCommand": true,
   "remoteUser": "node",
   "postCreateCommand": "install-claude.bash",
   "postStartCommand": "sudo /usr/local/bin/entrypoint.bash",
