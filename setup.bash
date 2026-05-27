@@ -346,6 +346,31 @@ fi
 # ── Monitor health check ──────────────────────────────────────────────────
 status "Checking monitor configuration..."
 
+# Write ~/.config/claude-monitor/env with a retrieval command (envchain)
+# or a direct key value as fallback. Returns 0 on success, 1 on skip.
+write_monitor_env() {
+  local key_line
+  if command_exists envchain; then
+    status "Detected: envchain"
+    echo "   If ANTHROPIC_API_KEY is already in an envchain namespace, the"
+    echo "   monitor can retrieve it at runtime (auto-updates on key rotation)."
+    echo ""
+    read -rp "   envchain namespace containing ANTHROPIC_API_KEY (blank to skip): " _ec_ns
+    if [[ -n "$_ec_ns" ]]; then
+      key_line="export MONITOR_API_KEY=\"\$(envchain $_ec_ns printenv ANTHROPIC_API_KEY)\""
+    fi
+  fi
+  if [[ -z "${key_line:-}" ]]; then
+    key_line="$(printf "export MONITOR_API_KEY='%s'" "${ANTHROPIC_API_KEY//\'/\'\\\'\'}")"
+  fi
+  mkdir -p "$HOME/.config/claude-monitor"
+  printf '# Sourced by the claude wrapper to provide MONITOR_API_KEY at runtime.\nexport MONITOR_PROVIDER=anthropic\n%s\n' "$key_line" \
+    >"$HOME/.config/claude-monitor/env"
+  chmod 600 "$HOME/.config/claude-monitor/env"
+  status "Written to ~/.config/claude-monitor/env (mode 600)"
+  status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the conflict."
+}
+
 monitor_ok=false
 if [[ -n "${MONITOR_API_KEY:-}" ]]; then
   status "Monitor provider: ${MONITOR_PROVIDER:-anthropic} (via MONITOR_API_KEY)"
@@ -357,17 +382,8 @@ elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     warn "ANTHROPIC_API_KEY is set — this conflicts with claude.ai auth"
     read -rp "   Move it to ~/.config/claude-monitor/env as MONITOR_API_KEY? (y/N) " choice
     case "$choice" in
-    y | Y)
-      mkdir -p "$HOME/.config/claude-monitor"
-      printf '# Sourced by the claude wrapper. Edit to use envchain/keychain instead.\nexport MONITOR_PROVIDER=anthropic\n' >"$HOME/.config/claude-monitor/env"
-      printf "export MONITOR_API_KEY='%s'\\n" "${ANTHROPIC_API_KEY//\'/\'\\\'\'}" >>"$HOME/.config/claude-monitor/env"
-      chmod 600 "$HOME/.config/claude-monitor/env"
-      status "Written to ~/.config/claude-monitor/env (mode 600)"
-      status "Remove ANTHROPIC_API_KEY from your shell profile to resolve the conflict."
-      ;;
-    *)
-      status "Skipped — auth conflict remains."
-      ;;
+    y | Y) write_monitor_env ;;
+    *) status "Skipped — auth conflict remains." ;;
     esac
   else
     status "Monitor provider: Anthropic (claude-haiku-4-5)"

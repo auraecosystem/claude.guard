@@ -165,7 +165,7 @@ Set `MONITOR_API_KEY` to supply the monitor with its own key, independent of Cla
 | `ANTHROPIC_API_KEY`    | Anthropic                             | claude-haiku-4-5 |
 | `VENICE_INFERENCE_KEY` | Venice (E2EE)                         | qwen3-coder-480b |
 
-**Host mode (recommended):** Set `MONITOR_API_KEY` + `MONITOR_PROVIDER=anthropic` instead of `ANTHROPIC_API_KEY` (which Claude Code treats as an API login, conflicting with your claude.ai subscription). Run `setup.bash` — it detects your credential store (`envchain`, macOS Keychain, `secret-tool`, `pass`) and writes `~/.config/claude-monitor/env` with a retrieval command the wrapper sources at launch. The key stays in your keychain, never on disk.
+**Host mode (recommended):** Set `MONITOR_API_KEY` + `MONITOR_PROVIDER=anthropic` instead of `ANTHROPIC_API_KEY` (which Claude Code treats as an API login, conflicting with your claude.ai subscription). Run `setup.bash` — if `envchain` is installed, it writes a retrieval command (`envchain <ns> printenv ANTHROPIC_API_KEY`) to `~/.config/claude-monitor/env` so the key stays in your keychain and auto-rotates; otherwise it moves the key directly (chmod 600). The wrapper sources this file at launch.
 
 ## Environment variables
 
