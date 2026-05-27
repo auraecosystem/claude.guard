@@ -122,6 +122,10 @@ def clear_cb() -> None:
         CB_FILE.unlink()
     except OSError:
         pass
+    try:
+        (CB_DIR / "ntfy-sent").unlink()
+    except OSError:
+        pass
 
 
 def call_api(
@@ -315,13 +319,18 @@ def main() -> None:
         now = int(time.time())
         remaining = cb_cooldown - (now - cb_tripped_at)
         if remaining > 0:
-            print(
-                hook_output(
-                    "ask",
-                    f"[MONITOR] Circuit breaker open — {cb_failures} consecutive "
-                    f"API failures. Retrying in {remaining}s.",
-                )
+            msg = (
+                f"Circuit breaker open — {cb_failures} consecutive "
+                f"API failures. Retrying in {remaining}s."
             )
+            ntfy_sent = CB_DIR / "ntfy-sent"
+            if not ntfy_sent.exists():
+                send_ntfy(tool_name, msg)
+                try:
+                    ntfy_sent.touch()
+                except OSError:
+                    pass
+            print(hook_output("ask", f"[MONITOR] {msg}"))
             return
 
     truncated_input = tool_input[:4000]
