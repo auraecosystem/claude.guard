@@ -22,7 +22,6 @@ Environment variables:
   MONITOR_SKIP_TOOLS   colon-separated tools to skip (default: Read)
   MONITOR_POLICY       path to custom policy prompt
   MONITOR_NTFY_CONF    path to ntfy config file
-  MONITOR_DISABLED     set to 1 to pass through without checking
 
   MONITOR_CB_THRESHOLD consecutive failures before tripping (default: 5)
   MONITOR_CB_COOLDOWN  seconds before retrying after trip (default: 60)
