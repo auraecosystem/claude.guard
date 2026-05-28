@@ -310,7 +310,18 @@ if [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]]; then
     -e no_proxy= -e NO_PROXY= -e NODE_EXTRA_CA_CERTS=)
 fi
 
+# Forward the SCRUB_SECRETS_ALLOW override (and the non-secret vars it names)
+# into the container so the credential scrub there spares them.
+scrub_allow_flags=()
+if [[ -n "${SCRUB_SECRETS_ALLOW:-}" ]]; then
+  # shellcheck source=lib/scrub-allow.bash disable=SC1091
+  source "$(dirname "$SELF_CANONICAL")/lib/scrub-allow.bash"
+  while IFS= read -r _flag; do scrub_allow_flags+=("$_flag"); done \
+    < <(scrub_allow_exec_flags)
+fi
+
 exec docker exec "${docker_flags[@]}" ${ccr_flags[@]+"${ccr_flags[@]}"} \
   ${noproxy_flags[@]+"${noproxy_flags[@]}"} \
+  ${scrub_allow_flags[@]+"${scrub_allow_flags[@]}"} \
   -w "$container_cwd" -u node "$container_id" \
   claude --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}" "$@"
