@@ -208,8 +208,9 @@ Security code should hold itself to a higher standard. Every layer of this repo 
 | -------------------------------- | ---------------------------------------------- | -------------- |
 | **ESLint**                       | JS hooks (`.claude/hooks/*.mjs`)               | pre-commit, CI |
 | **TypeScript** (`tsc --checkJs`) | JS hooks — type errors without rewriting to TS | pre-commit, CI |
-| **mypy**                         | Python hooks and scripts                       | CI             |
+| **mypy**                         | Python type checking (hooks and scripts)       | CI             |
 | **pylint**                       | Python hooks and scripts (10.00/10)            | CI             |
+| **ruff**                         | Python linting and formatting                  | pre-commit     |
 | **actionlint**                   | GitHub Actions workflow syntax                 | pre-commit, CI |
 
 **Testing**
@@ -217,7 +218,7 @@ Security code should hold itself to a higher standard. Every layer of this repo 
 | Tool       | Scope                                              | Enforcement |
 | ---------- | -------------------------------------------------- | ----------- |
 | **c8**     | JS hook coverage — 100% lines, branches, functions | CI          |
-| **pytest** | Python test suite (216 tests)                      | CI          |
+| **pytest** | Python test suite — 100% file coverage (216 tests) | CI          |
 
 **Security**
 
@@ -228,13 +229,12 @@ Security code should hold itself to a higher standard. Every layer of this repo 
 
 **Formatting & hygiene**
 
-| Tool                   | Scope                         | Enforcement     |
-| ---------------------- | ----------------------------- | --------------- |
-| **Prettier**           | JS, JSON, YAML, Markdown      | pre-commit, CI  |
-| **ruff**               | Python linting and formatting | pre-commit      |
-| **shellcheck + shfmt** | Shell scripts                 | pre-commit      |
-| **codespell**          | Typo detection                | pre-commit, CI  |
-| **commitlint**         | Conventional commit messages  | commit-msg hook |
+| Tool                   | Scope                        | Enforcement     |
+| ---------------------- | ---------------------------- | --------------- |
+| **Prettier**           | JS, JSON, YAML, Markdown     | pre-commit, CI  |
+| **shellcheck + shfmt** | Shell scripts                | pre-commit      |
+| **codespell**          | Typo detection               | pre-commit, CI  |
+| **commitlint**         | Conventional commit messages | commit-msg hook |
 
 [^1]: We do not use multi-model consensus (calling 2+ monitors and requiring agreement). [Redwood Research's control evaluations](https://arxiv.org/abs/2312.06942) found that architectural controls (trusted monitors + audit) outperform voting among correlated judges, and universal jailbreaks [transfer across models](https://arxiv.org/abs/2511.09493), limiting the diversity that voting provides.
 
