@@ -176,6 +176,37 @@ describe("scanFile", () => {
     writeFileSync(file, `text ${chunks.join(" ")} more\n`);
     assert.deepEqual(scanFile(file), []);
   });
+
+  it("reports both a run AND scattered payload without double-counting", () => {
+    const file = join(tmpDir, "test.md");
+    // One qualifying contiguous run...
+    const run = zwRun(LONG_RUN_THRESHOLD);
+    // ...plus many scattered chars that, EXCLUDING the run, exceed threshold.
+    const scatterCount = TOTAL_INVISIBLE_THRESHOLD + 3;
+    const scattered = Array.from({ length: scatterCount }, (_, i) =>
+      i % 2 === 0 ? `x${cp(0x200b)}` : cp(0x200b),
+    ).join("");
+    writeFileSync(file, `head ${run}\n${scattered}\n`);
+    const findings = scanFile(file);
+    // The run is reported once.
+    const runFinding = findings.find((f) => f.charCount === LONG_RUN_THRESHOLD);
+    assert.ok(runFinding, "contiguous run should be reported");
+    // The scattered finding is reported and excludes the run's chars.
+    const scatter = findings.find((f) => /scattered/.test(f.method));
+    assert.ok(scatter, "scattered payload should be reported");
+    assert.equal(scatter.charCount, scatterCount);
+  });
+
+  it("does not report scattered when only a run pushes total over threshold", () => {
+    const file = join(tmpDir, "test.md");
+    // A single large run whose chars alone exceed TOTAL_INVISIBLE_THRESHOLD,
+    // but there are no scattered chars beyond it — scattered must stay 0.
+    const run = zwRun(TOTAL_INVISIBLE_THRESHOLD + 5);
+    writeFileSync(file, `head ${run} tail\n`);
+    const findings = scanFile(file);
+    assert.equal(findings.length, 1);
+    assert.match(findings[0].method, /zero-width binary/);
+  });
 });
 
 // ─── Integration: full hook ─────────────────────────────────────────────────
