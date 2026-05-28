@@ -78,12 +78,16 @@ app_ns=$($DC exec -T app readlink /proc/1/ns/net)
 fw_ns=$($DC exec -T firewall readlink /proc/1/ns/net)
 # shellcheck disable=SC2086
 mon_ns=$($DC exec -T monitor readlink /proc/1/ns/net)
+[[ -n "$app_ns" ]] || fail "could not read app net namespace (container not running?)"
+[[ -n "$fw_ns" ]] || fail "could not read firewall net namespace (container not running?)"
+[[ -n "$mon_ns" ]] || fail "could not read monitor net namespace (container not running?)"
 [[ "$app_ns" != "$fw_ns" ]] || fail "app and firewall share a net namespace (should be separate)"
 pass "app has separate network namespace from firewall"
 [[ "$mon_ns" == "$fw_ns" ]] || fail "monitor and firewall net namespaces differ: mon=$mon_ns fw=$fw_ns"
 pass "monitor shares firewall's network namespace"
 # shellcheck disable=SC2086
 ccr_ns=$($DC exec -T ccr readlink /proc/1/ns/net)
+[[ -n "$ccr_ns" ]] || fail "could not read ccr net namespace (container not running?)"
 [[ "$ccr_ns" == "$fw_ns" ]] || fail "ccr and firewall net namespaces differ: ccr=$ccr_ns fw=$fw_ns"
 pass "ccr shares firewall's network namespace"
 
@@ -120,12 +124,14 @@ for doc in CLAUDE.md AGENTS.md; do
 done
 pass "project docs are root-owned"
 
-# ── Sudoers removed ──────────────────────────────────────────────────
+# ── Sudoers preserved ────────────────────────────────────────────────
+# The entrypoint keeps the sudoers entry so postStartCommand succeeds
+# on container restart, not just first start.
 # shellcheck disable=SC2086
-if $DC exec -T app test -f /etc/sudoers.d/node-firewall 2>/dev/null; then
-  fail "sudoers entry not cleaned up"
+if ! $DC exec -T app test -f /etc/sudoers.d/node-firewall 2>/dev/null; then
+  fail "sudoers entry missing (needed for container restart)"
 fi
-pass "sudoers entry removed after entrypoint"
+pass "sudoers entry preserved for container restart"
 
 # ── Monitor TCP endpoint ──────────────────────────────────────────────
 MONITOR_PORT="${MONITOR_PORT:-9199}"

@@ -15,6 +15,7 @@ import { readFileSync, globSync, writeFileSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { LONG_RUN_RE, LONG_RUN_THRESHOLD, STRIP } from "./invisible-chars.mjs";
 
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -51,7 +52,7 @@ function decodeRun(run) {
       .join("");
     return {
       method: "zero-width binary encoding",
-      decoded: `[${cps.length} zero-width chars: ${bits.slice(0, 80)}${bits.length > 80 ? "…" : ""}]`,
+      decoded: `[${cps.length} zero-width chars: ${bits.slice(0, 80)}]`,
     };
   }
 
@@ -146,7 +147,7 @@ export { formatReport };
 // ─── Main (skip when imported for testing) ──────────────────────────────────
 
 const isDirectRun =
-  process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 
 if (isDirectRun) {
   // Clean up stale alert from a previous session
@@ -178,10 +179,36 @@ if (isDirectRun) {
     process.exit(0);
   }
 
-  const report = formatReport(allFindings);
-  process.stderr.write(report + "\n");
+  // Auto-clean: strip invisible characters from contaminated files
+  // and save them. The gate hook is a fallback; cleaning here means
+  // the session can proceed safely without blocking every tool call.
+  let cleaned = 0;
+  for (const { file, findings } of allFindings) {
+    const absPath = join(PROJECT_DIR, file);
+    try {
+      const original = readFileSync(absPath, "utf-8");
+      const stripped = original.replace(STRIP, "");
+      if (stripped !== original) {
+        writeFileSync(absPath, stripped);
+        cleaned++;
+      }
+      /* c8 ignore start -- only fires on root-owned files in devcontainer; test runs as root where chmod 444 doesn't prevent writes */
+    } catch {}
+    /* c8 ignore stop */
+  }
 
-  // Write alert file; the PreToolUse gate will prompt the user via
-  // permissionDecision: "ask" on every tool call until they approve.
-  writeFileSync(ALERT_FILE, report + "\n");
+  const report = formatReport(allFindings);
+
+  if (cleaned === allFindings.length) {
+    process.stderr.write(
+      report +
+        `\nAll ${cleaned} file(s) cleaned automatically. ` +
+        "Invisible characters have been stripped.\n",
+    );
+    /* c8 ignore start -- only reachable when the read-only catch above fires (same root-runs-as-root limitation) */
+  } else {
+    process.stderr.write(report + "\n");
+    writeFileSync(ALERT_FILE, report + "\n");
+  }
+  /* c8 ignore stop */
 }

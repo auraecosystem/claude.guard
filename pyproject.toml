@@ -8,10 +8,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.0.3", "pyyaml==6.0.3"]
+dev = ["pytest==9.0.3", "pytest-cov==7.1.0", "pyyaml==6.0.3"]
 
 [tool.ruff]
 target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pyyaml==6.0.3",
+]

@@ -50,6 +50,8 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
     @staticmethod
     def _audit(body_bytes):
+        if not body_bytes:
+            return
         entry = json.dumps(
             {
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -124,7 +126,7 @@ if __name__ == "__main__":
 
     os.environ["MONITOR_POLICY"] = POLICY_PATH
 
-    server = http.server.HTTPServer(("0.0.0.0", MONITOR_PORT), MonitorHandler)
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", MONITOR_PORT), MonitorHandler)
     print(f"Monitor sidecar listening on port {MONITOR_PORT}", file=sys.stderr)
     try:
         server.serve_forever()

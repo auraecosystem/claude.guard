@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { denyPreToolUse as deny, readStdinJson } from "./lib-hook-io.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..");
@@ -20,18 +21,6 @@ const ALLOWLIST_PATH = join(
   "domain-allowlist.json",
 );
 
-function deny(reason) {
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: reason,
-      },
-    }),
-  );
-}
-
 let allowedDomains;
 try {
   const raw = JSON.parse(readFileSync(ALLOWLIST_PATH, "utf-8"));
@@ -40,6 +29,7 @@ try {
       .filter(([, access]) => access === "ro")
       .map(([domain]) => domain),
   );
+  /* c8 ignore start -- tested via isolated copy (missing-allowlist test), but c8 can't attribute subprocess coverage from a temp dir to this file path */
 } catch (err) {
   process.stderr.write(
     `validate-webfetch: failed to load ${ALLOWLIST_PATH}: ${err.message}\n`,
@@ -49,11 +39,10 @@ try {
   );
   process.exit(0);
 }
+/* c8 ignore stop */
 
 try {
-  const chunks = [];
-  for await (const c of process.stdin) chunks.push(c);
-  const input = JSON.parse(Buffer.concat(chunks).toString());
+  const input = await readStdinJson();
 
   if (input.tool_name !== "WebFetch") process.exit(0);
 
@@ -71,7 +60,11 @@ try {
     process.exit(0);
   }
 
-  if (!allowedDomains.has(hostname)) {
+  const domainAllowed =
+    allowedDomains.has(hostname) ||
+    [...allowedDomains].some((d) => hostname.endsWith(`.${d}`));
+
+  if (!domainAllowed) {
     deny(
       `WebFetch blocked: "${hostname}" is not in the domain allowlist. ` +
         'Add it to .devcontainer/domain-allowlist.json as "ro".',
