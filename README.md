@@ -81,11 +81,9 @@ Works outside git repos too — the wrapper detects the absence and mounts `$PWD
 
 ### Prebuilt sandbox image
 
-The first launch otherwise builds the container locally (apt, squid CA, Claude Code, git-delta) — slow and network-heavy. Instead, [`publish-image.yaml`](https://github.com/alexander-turner/secure-claude-code-defaults/blob/main/.github/workflows/publish-image.yaml) builds the three runtime images straight from the compose Dockerfiles and pushes them to GHCR (multi-arch: `amd64` + `arm64`) tagged `git-<commit-sha>`.
+The first launch otherwise builds the container locally (apt, squid CA, Claude Code, git-delta) — slow and network-heavy. Instead, CI publishes the runtime images to GHCR tagged with each commit's SHA (multi-arch: `amd64` + `arm64`), and a launch pulls the image matching your checkout instead of building it.
 
-A checkout already knows its own commit SHA, so [`bin/lib/resolve-image.bash`](https://github.com/alexander-turner/secure-claude-code-defaults/blob/main/bin/lib/resolve-image.bash) derives the exact tag and **pulls instead of building** — no lockfile, no digest writeback. It falls back to a local build (the compose default) whenever a prebuilt image is unavailable: a commit that was never published, a CI publish still in flight, a non-`github.com` remote (forks publish to their own owner), or — importantly — **a dirty working tree** (uncommitted changes could alter the image, so they always build locally). `git-<sha>` tags are immutable by convention, so this is nearly as auditable as digest pinning while staying entirely build-fallback-safe: a broken or missing publish can never break a launch. Set `SCCD_NO_PREBUILT=1` to always build locally.
-
-Two practical notes. The GHCR packages must be **public** for the unauthenticated pull to work — after the first publish run, flip `secure-claude-{sandbox,monitor,ccr}` to public in your package settings (forks publish under their own owner and must do the same). The workflow's `verify-public` job asserts this anonymously and fails the run while the packages are still private, so a red publish means "go make them public." And expect your **first launch on a freshly merged commit to build locally** if CI hasn't finished publishing that commit's image yet; subsequent launches on the same commit pull.
+It falls back to a local build whenever no matching image is available — a commit CI hasn't published yet, or a dirty working tree (uncommitted changes could change the image) — so a launch never breaks. Set `SCCD_NO_PREBUILT=1` to always build locally.
 
 ### Why not just the built-in sandbox?
 

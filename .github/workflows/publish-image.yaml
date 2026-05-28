@@ -112,8 +112,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # No token access: this must succeed as an anonymous user, exactly like
-    # resolve-image.bash / claude-doctor on a real machine. If it fails, the
-    # packages are still private — make them public (see README).
+    # resolve-image.bash / claude-doctor on a real machine. New GHCR packages
+    # are private by default — make secure-claude-{sandbox,monitor,ccr} public
+    # once (package settings -> Danger Zone -> Change visibility). This job
+    # stays red until they are, which is the signal to do it.
     permissions: {}
     steps:
       - name: Assert unauthenticated manifest access for git-${{ github.sha }}
@@ -135,6 +137,6 @@ jobs:
             fi
           done
           if [[ "$fail" -ne 0 ]]; then
-            echo "::error::One or more images are private, so prebuilt pulls fall back to local builds for everyone. Make the GHCR packages public — see README 'Prebuilt sandbox image'." >&2
+            echo "::error::One or more images are private, so prebuilt pulls fall back to local builds for everyone. Make the secure-claude-* GHCR packages public (package settings -> Change visibility)." >&2
             exit 1
           fi
