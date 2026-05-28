@@ -9,23 +9,13 @@ name: publish image
 # Multi-arch is done with native runners (amd64 + arm64) and a manifest merge,
 # so no QEMU/buildx actions are needed — only the SHA-pinned actions this repo
 # already uses.
+#
+# No `paths:` filter on purpose: resolve-image.bash pins to the exact HEAD sha,
+# so every main commit needs its own image or consumers silently build locally.
 
 on:
   push:
     branches: [main]
-    paths:
-      - ".devcontainer/Dockerfile"
-      - ".devcontainer/Dockerfile.monitor"
-      - ".devcontainer/Dockerfile.ccr"
-      - ".devcontainer/entrypoint.bash"
-      - ".devcontainer/init-firewall.bash"
-      - ".devcontainer/install-claude.bash"
-      - ".devcontainer/domain-allowlist.json"
-      - ".devcontainer/profiles/**"
-      - ".devcontainer/monitor-server.py"
-      - ".devcontainer/monitor-policy.txt"
-      - ".claude/hooks/monitor.py"
-      - ".github/workflows/publish-image.yaml"
   workflow_dispatch:
 
 permissions:
@@ -35,9 +25,6 @@ permissions:
 concurrency:
   group: publish-image-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  DOCKER_CLI_EXPERIMENTAL: enabled
 
 jobs:
   build:

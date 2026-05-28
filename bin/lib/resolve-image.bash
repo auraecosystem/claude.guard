@@ -36,8 +36,6 @@ _sccd_ghcr_owner() {
 resolve_prebuilt_image() {
   local repo="$1"
   [[ "${SCCD_NO_PREBUILT:-}" == "1" ]] && return 0
-  command -v docker >/dev/null 2>&1 || return 0
-  command -v git >/dev/null 2>&1 || return 0
 
   local sha owner reg
   sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
@@ -58,17 +56,15 @@ resolve_prebuilt_image() {
   local ref_monitor="${reg}/secure-claude-monitor:git-${sha}"
   local ref_ccr="${reg}/secure-claude-ccr:git-${sha}"
 
-  # Cheap existence check first (metadata only, no layer download). All three
-  # must exist; we never mix a prebuilt image with a locally built one.
-  local r
-  for r in "$ref_main" "$ref_monitor" "$ref_ccr"; do
-    if ! docker manifest inspect "$r" >/dev/null 2>&1; then
-      echo "claude: no prebuilt image for ${sha:0:12} — building locally (SCCD_NO_PREBUILT=1 to always build)." >&2
-      return 0
-    fi
-  done
+  # publish-image.yaml pushes all three together, so the main image's presence
+  # implies the set. Check it (metadata only, no layer download) before pulling.
+  if ! docker manifest inspect "$ref_main" >/dev/null 2>&1; then
+    echo "claude: no prebuilt image for ${sha:0:12} — building locally (SCCD_NO_PREBUILT=1 to always build)." >&2
+    return 0
+  fi
 
   echo "claude: pulling prebuilt sandbox image for ${sha:0:12} (skips local build)..." >&2
+  local r
   for r in "$ref_main" "$ref_monitor" "$ref_ccr"; do
     if ! docker pull "$r"; then
       echo "claude: prebuilt image pull failed — building locally instead." >&2
