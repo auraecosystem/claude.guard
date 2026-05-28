@@ -115,7 +115,7 @@ services:
       NPM_CONFIG_IGNORE_SCRIPTS: "true"
       # Pinned, not latest — keep equal to Dockerfile ARG + setup.bash. This is
       # the version install-claude.bash uses when run at runtime (smoke-check).
-      CLAUDE_CODE_VERSION: 2.1.145
+      CLAUDE_CODE_VERSION: 2.1.153
       GH_TOKEN: ""
       GITHUB_TOKEN: ""
       AWS_ACCESS_KEY_ID: ""

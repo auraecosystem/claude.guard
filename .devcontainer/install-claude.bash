@@ -17,7 +17,7 @@ unset NPM_CONFIG_IGNORE_SCRIPTS
 
 # Default pinned, not latest — keep equal to Dockerfile ARG + docker-compose.yml
 # + setup.bash. Upgrade path: bump the pin in all four, then rebuild.
-version="${CLAUDE_CODE_VERSION:-2.1.145}"
+version="${CLAUDE_CODE_VERSION:-2.1.153}"
 
 if pnpm add -g --allow-build=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${version}" 2>&1; then
   echo "==> Installed with --allow-build"

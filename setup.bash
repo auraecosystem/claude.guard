@@ -31,7 +31,7 @@ done
 # this binary's settings/hook contract, so we don't auto-update to @latest.
 # Keep equal to .devcontainer/{Dockerfile,docker-compose.yml,install-claude.bash}.
 # Upgrade path: bump the pin here + those three, then rebuild the sandbox image.
-CLAUDE_CODE_VERSION="2.1.145"
+CLAUDE_CODE_VERSION="2.1.153"
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
