@@ -32,6 +32,19 @@ command_exists() { command -v "$1" >/dev/null 2>&1; }
 status() { printf ':: %s\n' "$1"; }
 warn() { printf '!! %s\n' "$1" >&2; }
 
+# Native Windows (Git Bash / MSYS2 / Cygwin) needs WSL2 — it can't host the
+# Linux containers + sandbox runtime this stack requires. WSL2 reports uname as
+# "Linux" (handled below); bail out loudly on the bare-Windows bash flavors.
+_kernel="$(uname -s)"
+case "$_kernel" in
+MINGW* | MSYS* | CYGWIN*)
+  warn "Native Windows ($_kernel) is not supported — run inside WSL2."
+  warn "Install WSL2, then re-run setup.bash from your WSL2 distro:"
+  warn "https://learn.microsoft.com/windows/wsl/install"
+  exit 1
+  ;;
+esac
+
 # Atomically replace a root-owned config file: write a temp file in the same
 # directory, preserve the destination's mode, then rename over it. An interrupted
 # write can never leave a truncated config (e.g. a half-written daemon.json).
