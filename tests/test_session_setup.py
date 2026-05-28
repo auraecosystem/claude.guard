@@ -1,10 +1,9 @@
 """Tests for .claude/hooks/session-setup.sh (a SessionStart hook).
 
-Migrated 1:1 from tests/bats/session-setup.bats. The script installs tools and
-configures git; here we exercise only the deterministic, network-free branches:
-clean exit on an empty repo, and the proxy-URL remote detection that exports
-GH_REPO into $CLAUDE_ENV_FILE. We never assert on tool installation (which
-depends on uv/webi/network availability).
+Migrated 1:1 from tests/bats/session-setup.bats. We exercise only the
+deterministic, network-free branches: clean exit on an empty repo, and the
+proxy-URL remote detection that exports GH_REPO into $CLAUDE_ENV_FILE. Tool
+installation (uv/webi/network) is never asserted on.
 """
 
 import subprocess
@@ -13,7 +12,7 @@ from typing import Iterator
 
 import pytest
 
-from tests._helpers import REPO_ROOT, git_env
+from tests._helpers import REPO_ROOT, git_env, run_capture
 
 SESSION_SETUP = REPO_ROOT / ".claude" / "hooks" / "session-setup.sh"
 
@@ -44,14 +43,7 @@ def _run_setup(repo: Path, env_file: Path, **env_overrides: str):
     }
     env.pop("GH_REPO", None)
     env.update(env_overrides)
-    return subprocess.run(
-        ["bash", str(SESSION_SETUP)],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    return run_capture(["bash", str(SESSION_SETUP)], cwd=repo, env=env)
 
 
 def _add_origin(repo: Path, url: str) -> None:
@@ -66,16 +58,9 @@ def _refute_gh_repo_line(env_file: Path) -> None:
 
 
 def test_empty_repo_no_env_exit_0(repo: Path) -> None:
-    """empty repo, no env: exit 0."""
+    """empty repo, no CLAUDE_ENV_FILE: exit 0 (no-env-file branch)."""
     env = {**git_env(), "CLAUDE_PROJECT_DIR": str(repo)}
-    r = subprocess.run(
-        ["bash", str(SESSION_SETUP)],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    r = run_capture(["bash", str(SESSION_SETUP)], cwd=repo, env=env)
     assert r.returncode == 0, f"stderr: {r.stderr}"
 
 

@@ -15,9 +15,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(
-    subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
-)
+from tests._helpers import REPO_ROOT, run_capture
+
 SETUP = REPO_ROOT / "setup.bash"
 
 WRAPPER_SCRIPTS = (
@@ -53,12 +52,9 @@ def fake_home(tmp_path: Path) -> Path:
 
 
 def _uninstall(fake_home: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_capture(
         ["bash", str(SETUP), "--uninstall"],
         env={**os.environ, "HOME": str(fake_home)},
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
 

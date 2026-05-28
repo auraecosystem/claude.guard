@@ -11,15 +11,12 @@ so the best verdict reachable in CI is DEGRADED (key present, tools present,
 but managed-settings absent); UNPROTECTED is exercised by removing a tool.
 """
 
-import stat
-import subprocess
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(
-    subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
-)
+from tests._helpers import REPO_ROOT, run_capture, write_exe
+
 DOCTOR = REPO_ROOT / "bin" / "claude-doctor"
 
 # docker stub: reports gVisor as the only runtime and treats `ps` as a reachable
@@ -40,11 +37,6 @@ exit 0
 ALL_TOOLS = ("devcontainer", "uv", "jq", "curl", "dig")
 
 
-def _executable(path: Path, body: str) -> None:
-    path.write_text(body)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
 def _make_stubs(
     tmp_path: Path,
     tools: tuple[str, ...] = ALL_TOOLS,
@@ -60,9 +52,9 @@ def _make_stubs(
     stubs = tmp_path / "stubs"
     stubs.mkdir(exist_ok=True)
     if docker:
-        _executable(stubs / "docker", _DOCKER_STUB.format(ps_exit=docker_ps_exit))
+        write_exe(stubs / "docker", _DOCKER_STUB.format(ps_exit=docker_ps_exit))
     for tool in tools:
-        _executable(stubs / tool, "#!/usr/bin/env bash\nexit 0\n")
+        write_exe(stubs / tool, "#!/usr/bin/env bash\nexit 0\n")
     return stubs
 
 
@@ -79,19 +71,8 @@ def _run(
     CONTAINER_RUNTIME values are passed through `env_overrides`.
     """
     path = f"{stubs}:/usr/bin:/bin" if stubs is not None else "/usr/bin:/bin"
-    env = {
-        "PATH": path,
-        "HOME": str(home),
-        **env_overrides,
-    }
-    return subprocess.run(
-        [str(DOCTOR)],
-        env=env,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    env = {"PATH": path, "HOME": str(home), **env_overrides}
+    return run_capture([str(DOCTOR)], env=env, cwd=cwd)
 
 
 def test_bare_host_reports_unprotected(tmp_path: Path) -> None:

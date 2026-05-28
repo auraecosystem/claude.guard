@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, run_capture
 
 LIB = REPO_ROOT / "bin" / "lib" / "scrub-allow.bash"
 
@@ -20,18 +20,15 @@ LIB = REPO_ROOT / "bin" / "lib" / "scrub-allow.bash"
 def emit(cwd: Path | None = None, **env_vars: str) -> subprocess.CompletedProcess[str]:
     """Source the lib and run scrub_allow_exec_flags with a controlled env.
 
-    `env_vars` populate the environment the function inspects. `cwd` lets a test
-    run in a sandbox dir (to prove a glob char is treated literally, not as a
-    filename match).
+    `env_vars` populate the environment the function inspects; SCRUB_SECRETS_ALLOW
+    is cleared first so a host value never leaks in. `cwd` lets a test run in a
+    sandbox dir (to prove a glob char is treated literally, not a filename match).
     """
-    env = {**os.environ, **env_vars}
-    return subprocess.run(
-        ["bash", "-c", f"source '{LIB}'; scrub_allow_exec_flags"],
-        env=env,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
+    env = {**os.environ}
+    env.pop("SCRUB_SECRETS_ALLOW", None)
+    env.update(env_vars)
+    return run_capture(
+        ["bash", "-c", f"source '{LIB}'; scrub_allow_exec_flags"], env=env, cwd=cwd
     )
 
 
@@ -42,16 +39,7 @@ def tokens(result: subprocess.CompletedProcess[str]) -> list[str]:
 
 
 def test_no_allowlist_emits_nothing() -> None:
-    # SCRUB_SECRETS_ALLOW may leak in from the host env; clear it explicitly.
-    env = {**os.environ}
-    env.pop("SCRUB_SECRETS_ALLOW", None)
-    r = subprocess.run(
-        ["bash", "-c", f"source '{LIB}'; scrub_allow_exec_flags"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    r = emit()
     assert r.returncode == 0, r.stderr
     assert r.stdout == ""
 

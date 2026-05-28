@@ -1,25 +1,18 @@
 """Tests for .devcontainer/smoke-check.bash.
 
-Migrated 1:1 from tests/bats/smoke-check.bats. This script is designed to run
-INSIDE the built devcontainer image and asserts that $DOTFILES_TOOLS tools and
-/usr/local/bin/{init-firewall,entrypoint,install-claude}.bash exist. On a plain
-CI runner those image paths are absent, so we only exercise the
-environment-independent early branches:
-
-  * DOTFILES_TOOLS unset  -> exit 1 with a clear message
-  * DOTFILES_TOOLS set but image binaries missing -> exit 1 (later branch)
-
-We do NOT fake the container; deeper branches are covered by the devcontainer
-smoke workflow, not by pytest.
+Migrated 1:1 from tests/bats/smoke-check.bats. The script runs INSIDE the built
+devcontainer image and asserts $DOTFILES_TOOLS tools and the
+/usr/local/bin/*.bash image binaries exist. On a plain CI runner those image
+paths are absent, so we only exercise the environment-independent early
+branches; deeper branches are covered by the devcontainer smoke workflow.
 """
 
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, run_capture
 
 SMOKE_CHECK = REPO_ROOT / ".devcontainer" / "smoke-check.bash"
 
@@ -27,22 +20,15 @@ SMOKE_CHECK = REPO_ROOT / ".devcontainer" / "smoke-check.bash"
 def _run(dotfiles_tools: "str | None"):
     """Run smoke-check.bash with DOTFILES_TOOLS set (or unset when None).
 
-    bats `run` merges stdout+stderr into $output; the script writes its FAIL
-    diagnostics via echo (stdout), so combining the streams reproduces the
-    bats `$output` substring checks faithfully.
+    The script writes FAIL diagnostics to stdout, so we combine stdout+stderr to
+    reproduce the bats `$output` substring checks faithfully.
     """
     env = dict(os.environ)
     if dotfiles_tools is None:
         env.pop("DOTFILES_TOOLS", None)
     else:
         env["DOTFILES_TOOLS"] = dotfiles_tools
-    r = subprocess.run(
-        ["bash", str(SMOKE_CHECK)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    r = run_capture(["bash", str(SMOKE_CHECK)], env=env)
     return r.returncode, r.stdout + r.stderr
 
 

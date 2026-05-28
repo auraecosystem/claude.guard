@@ -1,14 +1,10 @@
 """Tests for hooks/pre-push-check.bash, the git pre-push delegate.
 
-`hooks/pre-push-check.bash` execs `.claude/hooks/pre-push-check.sh`, which runs
-the configured package.json checks before a push / PR. These cases exercise the
-exit codes for missing, placeholder, passing, and failing project scripts.
-
-Migrated 1:1 from tests/bats/pre-push-check.bats. Each test runs in a fresh git
-repo under `tmp_path` with CLAUDE_PROJECT_DIR pointed at it; the real `pnpm` and
-`jq` on PATH actually execute the package.json scripts (mirroring bats, which
-also relied on the host's pnpm/jq). `tmp_path` has no pyproject.toml/uv.lock, so
-the Python check branch never runs — keeping the tests hermetic.
+Migrated 1:1 from tests/bats/pre-push-check.bats. It execs
+`.claude/hooks/pre-push-check.sh`, which runs the configured package.json checks;
+these cases exercise the exit codes for missing, placeholder, passing, and
+failing scripts. Each runs in a fresh repo with the host's real pnpm/jq, and
+`tmp_path` has no pyproject.toml/uv.lock so the Python branch never runs.
 """
 
 import json
@@ -18,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT, init_test_repo
+from tests._helpers import REPO_ROOT, init_test_repo, run_capture
 
 HOOK = REPO_ROOT / "hooks" / "pre-push-check.bash"
 
@@ -29,13 +25,10 @@ def _run_hook(project_dir: Path, stdin: str = "") -> subprocess.CompletedProcess
     The git-pre-push path passes no hook JSON (empty stdin), so draft detection
     never matches and every check runs.
     """
-    return subprocess.run(
+    return run_capture(
         ["bash", str(HOOK)],
         env={**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)},
         input=stdin,
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
 

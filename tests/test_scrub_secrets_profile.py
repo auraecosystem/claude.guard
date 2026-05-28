@@ -12,38 +12,36 @@ spawned shell (after the scrub), not in Python's view of the environment.
 """
 
 import os
-import subprocess
 
 import pytest
 
-from tests._helpers import REPO_ROOT
+from tests._helpers import REPO_ROOT, run_capture
 
 SCRUB = REPO_ROOT / ".devcontainer" / "profiles" / "scrub-secrets.sh"
 
 
-def scrub_run(cmd: str, **env_vars: str) -> subprocess.CompletedProcess[str]:
+def scrub_run(cmd: str, *, bash_env: bool = True, **env_vars: str):
     """Run `bash --norc -c <cmd>` with the scrub sourced via BASH_ENV.
 
     `env_vars` populate the (hermetic) environment the scrub inspects; BASH_ENV
     points bash at the scrub so it runs before `cmd`, mirroring the agent's
-    non-interactive tool path.
+    non-interactive tool path. `bash_env=False` drops BASH_ENV (login/interactive
+    direct-source path), where `cmd` is expected to `source` the scrub itself.
     """
-    env = {**os.environ, "BASH_ENV": str(SCRUB), **env_vars}
-    return subprocess.run(
-        ["bash", "--norc", "-c", cmd],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    env = {**os.environ, **env_vars}
+    env.pop("BASH_ENV", None)
+    if bash_env:
+        env["BASH_ENV"] = str(SCRUB)
+    return run_capture(["bash", "--norc", "-c", cmd], env=env)
 
 
-# ── BASH_ENV path: secrets are scrubbed ──────────────────────────────────────
+# ── exact-output scenarios across all scrub paths ────────────────────────────
 
 
 @pytest.mark.parametrize(
     "cmd,env,expected,desc",
     [
+        # BASH_ENV path: secret-named vars are scrubbed.
         (
             'echo "[${FAKE_API_KEY-UNSET}][${MY_SECRET_TOKEN-UNSET}][${DB_PASSWORD-UNSET}]"',
             {
@@ -60,62 +58,31 @@ def scrub_run(cmd: str, **env_vars: str) -> subprocess.CompletedProcess[str]:
             "[U][U][U]",
             "real-world secrets (AWS/GH/OpenAI) are unset",
         ),
-    ],
-)
-def test_secrets_scrubbed(
-    cmd: str, env: dict[str, str], expected: str, desc: str
-) -> None:
-    r = scrub_run(cmd, **env)
-    assert r.returncode == 0, f"{desc}\nstderr: {r.stderr}"
-    assert r.stdout.strip() == expected, desc
-
-
-# ── vars that must survive the scrub ─────────────────────────────────────────
-
-
-def test_must_keep_vars_survive() -> None:
-    r = scrub_run(
-        'echo "[${NODE_OPTIONS-U}][${CLAUDE_CONFIG_DIR-U}]'
-        '[${CLAUDE_CODE_VERSION-U}][${NPM_CONFIG_IGNORE_SCRIPTS-U}]"',
-        NODE_OPTIONS="--max-old-space-size=4096",
-        CLAUDE_CONFIG_DIR="/home/node/.claude",
-        CLAUDE_CODE_VERSION="latest",
-        NPM_CONFIG_IGNORE_SCRIPTS="true",
-    )
-    assert r.returncode == 0, r.stderr
-    assert (
-        r.stdout.strip()
-        == "[--max-old-space-size=4096][/home/node/.claude][latest][true]"
-    )
-
-
-def test_proxy_and_monitor_port_untouched() -> None:
-    """Proxy vars and MONITOR_PORT match no scrub glob, so they pass through."""
-    r = scrub_run(
-        'echo "[${https_proxy-U}][${NODE_EXTRA_CA_CERTS-U}][${MONITOR_PORT-U}]"',
-        https_proxy="http://172.30.0.2:3128",
-        NODE_EXTRA_CA_CERTS="/etc/squid/ssl_cert/ca-cert.pem",
-        MONITOR_PORT="9199",
-    )
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == (
-        "[http://172.30.0.2:3128][/etc/squid/ssl_cert/ca-cert.pem][9199]"
-    )
-
-
-def test_non_secret_vars_without_glob_substrings_untouched() -> None:
-    r = scrub_run('echo "[${HOME-U}][${PATH+SET}][${EDITOR-U}]"', EDITOR="nano")
-    assert r.returncode == 0, r.stderr
-    assert "[nano]" in r.stdout
-    assert "[SET]" in r.stdout
-
-
-# ── SCRUB_SECRETS_ALLOW behavior ─────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "cmd,env,expected,desc",
-    [
+        # must-keep allowlist survives the scrub.
+        (
+            'echo "[${NODE_OPTIONS-U}][${CLAUDE_CONFIG_DIR-U}]'
+            '[${CLAUDE_CODE_VERSION-U}][${NPM_CONFIG_IGNORE_SCRIPTS-U}]"',
+            {
+                "NODE_OPTIONS": "--max-old-space-size=4096",
+                "CLAUDE_CONFIG_DIR": "/home/node/.claude",
+                "CLAUDE_CODE_VERSION": "latest",
+                "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+            },
+            "[--max-old-space-size=4096][/home/node/.claude][latest][true]",
+            "must-keep vars survive the scrub",
+        ),
+        # proxy/monitor vars match no glob, so they pass through.
+        (
+            'echo "[${https_proxy-U}][${NODE_EXTRA_CA_CERTS-U}][${MONITOR_PORT-U}]"',
+            {
+                "https_proxy": "http://172.30.0.2:3128",
+                "NODE_EXTRA_CA_CERTS": "/etc/squid/ssl_cert/ca-cert.pem",
+                "MONITOR_PORT": "9199",
+            },
+            "[http://172.30.0.2:3128][/etc/squid/ssl_cert/ca-cert.pem][9199]",
+            "proxy vars and MONITOR_PORT untouched",
+        ),
+        # SCRUB_SECRETS_ALLOW spares named vars.
         (
             'echo "[${MY_API_TOKEN-U}][${OTHER_SECRET-U}]"',
             {
@@ -151,9 +118,33 @@ def test_non_secret_vars_without_glob_substrings_untouched() -> None:
             "[https://api.example.com]",
             "false-positive non-secret var survives via SCRUB_SECRETS_ALLOW",
         ),
+        # idempotency: re-sourcing on top of the BASH_ENV run keeps the scrub.
+        (
+            f'source "{SCRUB}"; echo "[${{FAKE_API_KEY-U}}]"',
+            {"FAKE_API_KEY": "sk-123"},
+            "[U]",
+            "idempotent: sourcing the scrub twice still scrubs",
+        ),
+        # nested non-interactive bash re-sources BASH_ENV without a fork storm.
+        (
+            'bash -c "echo nested-ok"',
+            {"FAKE_API_KEY": "sk-123"},
+            "nested-ok",
+            "nested bash -c succeeds (compgen, no per-call fork)",
+        ),
+        # outer shell keeps SCRUB_SECRETS_ALLOW (*secret*), so nested re-source spares the var.
+        (
+            r'bash -c "echo [\${API_BASE_URL-U}][\${SCRUB_SECRETS_ALLOW-U}]"',
+            {
+                "SCRUB_SECRETS_ALLOW": "API_BASE_URL",
+                "API_BASE_URL": "https://api.example.com",
+            },
+            "[https://api.example.com][API_BASE_URL]",
+            "SCRUB_SECRETS_ALLOW propagates to nested bash",
+        ),
     ],
 )
-def test_scrub_secrets_allow(
+def test_scrub_exact_output(
     cmd: str, env: dict[str, str], expected: str, desc: str
 ) -> None:
     r = scrub_run(cmd, **env)
@@ -161,57 +152,21 @@ def test_scrub_secrets_allow(
     assert r.stdout.strip() == expected, desc
 
 
-# ── idempotency, direct-source path, and nesting ─────────────────────────────
-
-
-def test_idempotent_sourcing_twice() -> None:
-    """Sourcing the scrub again on top of the BASH_ENV run does not error and
-    leaves the secret still scrubbed."""
-    r = scrub_run(
-        f'source "{SCRUB}"; echo "[${{FAKE_API_KEY-U}}]"',
-        FAKE_API_KEY="sk-123",
-    )
+def test_non_secret_vars_without_glob_substrings_untouched() -> None:
+    r = scrub_run('echo "[${HOME-U}][${PATH+SET}][${EDITOR-U}]"', EDITOR="nano")
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "[U]"
+    assert "[nano]" in r.stdout
+    assert "[SET]" in r.stdout
 
 
 def test_direct_source_scrubs_secrets() -> None:
     """The login/interactive path (direct `source`, no BASH_ENV) also scrubs
     secrets while keeping must-keep vars."""
-    env = {**os.environ, "FAKE_API_KEY": "sk-123", "NODE_OPTIONS": "keep"}
-    env.pop("BASH_ENV", None)
-    r = subprocess.run(
-        [
-            "bash",
-            "--norc",
-            "-c",
-            f'source "{SCRUB}"; echo "[${{FAKE_API_KEY-U}}][${{NODE_OPTIONS-U}}]"',
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+    r = scrub_run(
+        f'source "{SCRUB}"; echo "[${{FAKE_API_KEY-U}}][${{NODE_OPTIONS-U}}]"',
+        bash_env=False,
+        FAKE_API_KEY="sk-123",
+        NODE_OPTIONS="keep",
     )
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "[U][keep]"
-
-
-def test_no_fork_storm_nested_bash_succeeds() -> None:
-    """A nested non-interactive `bash -c` re-sources BASH_ENV; using only
-    compgen (no subshell/fork per invocation) means it returns normally."""
-    r = scrub_run('bash -c "echo nested-ok"', FAKE_API_KEY="sk-123")
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "nested-ok"
-
-
-def test_scrub_secrets_allow_propagates_to_nested_bash() -> None:
-    """The outer shell keeps SCRUB_SECRETS_ALLOW (it matches *secret*), so a
-    nested `bash -c` re-sources the scrub WITH the allowlist and the spared var
-    survives. The inner shell does the `${...}` expansion (escaped here)."""
-    r = scrub_run(
-        r'bash -c "echo [\${API_BASE_URL-U}][\${SCRUB_SECRETS_ALLOW-U}]"',
-        SCRUB_SECRETS_ALLOW="API_BASE_URL",
-        API_BASE_URL="https://api.example.com",
-    )
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "[https://api.example.com][API_BASE_URL]"

@@ -10,20 +10,14 @@ privileged step (the global-config merge) without touching the host.
 """
 
 import os
-import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(
-    subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
-)
+from tests._helpers import REPO_ROOT, run_capture, write_exe
+
 SETUP = REPO_ROOT / "setup.bash"
-
-
-def _make_executable(path: Path) -> None:
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _run_setup(tmp_path: Path, kernel: str) -> subprocess.CompletedProcess[str]:
@@ -31,34 +25,23 @@ def _run_setup(tmp_path: Path, kernel: str) -> subprocess.CompletedProcess[str]:
     that prints SUDO_CALLED then fails, under a throwaway HOME — exactly the
     bats setup()/_run_setup() harness."""
     stubs = tmp_path / "stubs"
-    stubs.mkdir()
-
-    sudo = stubs / "sudo"
-    sudo.write_text('#!/usr/bin/env bash\necho "SUDO_CALLED" >&2\nexit 1\n')
-    _make_executable(sudo)
-
-    uname = stubs / "uname"
-    uname.write_text(
+    write_exe(stubs / "sudo", '#!/usr/bin/env bash\necho "SUDO_CALLED" >&2\nexit 1\n')
+    write_exe(
+        stubs / "uname",
         "#!/usr/bin/env bash\n"
         'case "${1:-}" in\n'
         '-m) echo "x86_64" ;;\n'
         f'*) echo "{kernel}" ;;\n'
-        "esac\n"
+        "esac\n",
     )
-    _make_executable(uname)
-
-    home = tmp_path / "home"
-    return subprocess.run(
+    return run_capture(
         ["bash", str(SETUP)],
+        # Prepend stubs to the real PATH so the stubbed uname/sudo win while
+        # jq/dirname/etc. (needed before the preflight) stay resolvable.
         env={
-            # Prepend stubs to the real PATH so the stubbed uname/sudo win while
-            # jq/dirname/etc. (needed before the preflight) stay resolvable.
             "PATH": f"{stubs}:{os.environ.get('PATH', '')}",
-            "HOME": str(home),
+            "HOME": str(tmp_path / "home"),
         },
-        capture_output=True,
-        text=True,
-        check=False,
     )
 
 
