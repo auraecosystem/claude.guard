@@ -287,8 +287,7 @@ fi
 # remote installer in a security tool — the wrappers are inert without it.
 if ! command_exists uv; then
   warn "uv not found — the claude wrapper scripts cannot launch the sandbox without it."
-  warn "Install uv, then re-run setup.bash: curl -LsSf https://astral.sh/uv/install.sh | sh"
-  warn "Docs: https://docs.astral.sh/uv/getting-started/installation/"
+  warn "Install uv first: https://docs.astral.sh/uv/getting-started/installation/"
 fi
 
 status "Linking wrapper scripts into ~/.local/bin/..."

@@ -30,9 +30,7 @@ The sandbox is the default and `claude` **fails closed** without it, so install 
 | **pnpm + Node.js**                                                | `setup.bash` uses pnpm to install Claude Code + ccr; skips that step (with a warning) if pnpm is absent.                                                                             |
 | **`jq` and `curl`**                                               | Used by the host-mode firewall builder and the monitor plumbing.                                                                                                                     |
 
-**`setup.bash` installs for you:** Claude Code (pinned, see [How it works](#how-it-works)) + [claude-code-router](https://github.com/musistudio/claude-code-router) via pnpm, the sandbox runtime (Kata/Firecracker on Linux when `/dev/kvm` is available, else gVisor/runsc; gVisor inside the Docker VM on macOS), the root-owned managed settings, and the wrapper symlinks.
-
-Kata/Firecracker microVM isolation needs `/dev/kvm`; without it the stack falls back to gVisor/runsc. Run [`claude-doctor`](#commands) after setup to see which runtime you actually got.
+**`setup.bash` installs for you:** Claude Code (pinned, see [How it works](#how-it-works)) + [claude-code-router](https://github.com/musistudio/claude-code-router) via pnpm, the sandbox runtime (Kata/Firecracker on Linux when `/dev/kvm` is available, else gVisor/runsc; gVisor inside the Docker VM on macOS), the root-owned managed settings, and the wrapper symlinks. Run [`claude-doctor`](#commands) afterward to see which runtime you got.
 
 ## Install
 
@@ -43,7 +41,7 @@ cd ~/.local/share/secure-claude-code-defaults
 bash setup.bash
 ```
 
-`setup.bash` installs root-owned security settings, the sandbox runtime, and the `claude` wrapper. `--hooks-only` installs just the hooks + deny rules (no Docker); `--uninstall` reverses the install (keeps your API keys). Linux and macOS; on Windows, run inside WSL2.
+`--hooks-only` installs just the hooks + deny rules (no Docker/sandbox); `--uninstall` reverses the install (keeps your API keys).
 
 **Windows:** run everything inside [WSL2](https://learn.microsoft.com/windows/wsl/install). Native Windows (Git Bash / MSYS2 / Cygwin) can't host the Linux containers and sandbox runtime this stack depends on, so `setup.bash` detects those shells and exits with guidance instead of attempting a doomed install.
 
