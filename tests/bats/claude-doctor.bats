@@ -130,6 +130,15 @@ DOCKER
   [[ "$output" == *"microVM"* ]]
 }
 
+@test "reports the prebuilt-image plan for the next launch (informational)" {
+  # Robust to repo state (clean=>available, dirty=>build): just assert the
+  # section renders a plan line and never alters the verdict.
+  _run_all_tools_present
+  [ "$status" -eq 1 ] # still DEGRADED (managed-settings absent), not worse
+  [[ "$output" == *"Prebuilt sandbox image"* ]]
+  [[ "$output" == *"next launch:"* ]]
+}
+
 @test "is read-only: leaves no new files in the working directory" {
   workdir="$BATS_TEST_TMPDIR/work"
   mkdir -p "$workdir"

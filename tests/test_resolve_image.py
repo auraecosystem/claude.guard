@@ -68,6 +68,48 @@ def _run(bindir: Path, env_extra: dict[str, str] | None = None) -> dict[str, str
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
 
 
+def _probe(bindir: Path, env_extra: dict[str, str] | None = None) -> str:
+    script = f'source {LIB}\n_sccd_prebuilt_probe "/some/repo"\n'
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}", **(env_extra or {})}
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env, check=True
+    ).stdout.strip()
+
+
+def test_probe_available_emits_refs(tmp_path: Path) -> None:
+    _fake_git(tmp_path)
+    _fake_docker(tmp_path, manifest_ok=True)
+    state, _, rest = _probe(tmp_path).partition("\t")
+    assert state == "available"
+    assert rest.startswith(
+        f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{FAKE_SHA}"
+    )
+
+
+def test_probe_miss(tmp_path: Path) -> None:
+    _fake_git(tmp_path)
+    _fake_docker(tmp_path, manifest_ok=False)
+    assert _probe(tmp_path).split("\t")[0] == "miss"
+
+
+def test_probe_dirty(tmp_path: Path) -> None:
+    _fake_git(tmp_path, dirty=True)
+    _fake_docker(tmp_path, manifest_ok=True)
+    assert _probe(tmp_path) == "dirty"
+
+
+def test_probe_disabled(tmp_path: Path) -> None:
+    _fake_git(tmp_path)
+    _fake_docker(tmp_path, manifest_ok=True)
+    assert _probe(tmp_path, {"SCCD_NO_PREBUILT": "1"}) == "disabled"
+
+
+def test_probe_no_remote(tmp_path: Path) -> None:
+    _fake_git(tmp_path, origin="https://gitlab.com/foo/bar.git")
+    _fake_docker(tmp_path, manifest_ok=True)
+    assert _probe(tmp_path) == "no-remote"
+
+
 def test_success_path_exports_pinned_images(tmp_path: Path) -> None:
     _fake_git(tmp_path)
     _fake_docker(tmp_path, manifest_ok=True)
