@@ -27,6 +27,12 @@ for arg in "$@"; do
   [[ "$arg" == "--uninstall" ]] && UNINSTALL=true
 done
 
+# Pinned Claude Code version for the host install. The security model depends on
+# this binary's settings/hook contract, so we don't auto-update to @latest.
+# Keep equal to .devcontainer/{Dockerfile,docker-compose.yml,install-claude.bash}.
+# Upgrade path: bump the pin here + those three, then rebuild the sandbox image.
+CLAUDE_CODE_VERSION="2.1.145"
+
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 status() { printf ':: %s\n' "$1"; }
@@ -200,7 +206,7 @@ run_uninstall() {
   status "Uninstalling secure-claude-code-defaults..."
 
   # Wrapper symlinks (only ours).
-  for script in claude claude-private claude-paranoid claude-create-worktree; do
+  for script in claude claude-private claude-paranoid claude-create-worktree claude-doctor; do
     remove_repo_symlink "$HOME/.local/bin/$script" "$script"
   done
   # The commands dir symlinks into this repo's skills.
@@ -275,10 +281,20 @@ if $HOOKS_ONLY; then
 fi
 
 # ── Wrapper scripts ────────────────────────────────────────────────────────
+# uv is a hard runtime dependency: the claude wrapper runs `uv run ...` to launch
+# the sandbox, and bin/lib/venice-resolve.bash + bin/setup-ntfy.bash use it too.
+# Warn loudly (matching the pnpm handling above) rather than auto-curl|sh a
+# remote installer in a security tool — the wrappers are inert without it.
+if ! command_exists uv; then
+  warn "uv not found — the claude wrapper scripts cannot launch the sandbox without it."
+  warn "Install uv, then re-run setup.bash: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  warn "Docs: https://docs.astral.sh/uv/getting-started/installation/"
+fi
+
 status "Linking wrapper scripts into ~/.local/bin/..."
 
 mkdir -p "$HOME/.local/bin"
-for script in claude claude-private claude-paranoid claude-create-worktree; do
+for script in claude claude-private claude-paranoid claude-create-worktree claude-doctor; do
   safe_symlink "$SCRIPT_DIR/bin/$script" \
     "$HOME/.local/bin/$script" "$script"
 done
@@ -296,9 +312,9 @@ if command_exists pnpm; then
   *) export PATH="$PNPM_HOME/bin:$PATH" ;;
   esac
 
-  status "Installing claude-code + claude-code-router via pnpm..."
+  status "Installing claude-code@${CLAUDE_CODE_VERSION} + claude-code-router via pnpm..."
   pnpm add --global --reporter=append-only \
-    @anthropic-ai/claude-code @musistudio/claude-code-router
+    "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" @musistudio/claude-code-router
 
   CLAUDE_INSTALLER="$(pnpm root -g)/@anthropic-ai/claude-code/install.cjs"
   if [[ -f "$CLAUDE_INSTALLER" ]] && command_exists node; then

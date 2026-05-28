@@ -113,7 +113,9 @@ services:
       NODE_OPTIONS: "--max-old-space-size=4096"
       CLAUDE_CONFIG_DIR: /home/node/.claude
       NPM_CONFIG_IGNORE_SCRIPTS: "true"
-      CLAUDE_CODE_VERSION: latest
+      # Pinned, not latest — keep equal to Dockerfile ARG + setup.bash. This is
+      # the version install-claude.bash uses when run at runtime (smoke-check).
+      CLAUDE_CODE_VERSION: 2.1.145
       GH_TOKEN: ""
       GITHUB_TOKEN: ""
       AWS_ACCESS_KEY_ID: ""
