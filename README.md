@@ -8,29 +8,13 @@
 
 Right now you're probably handing Claude a shell on a machine full of your code, your credentials, and your compute budget—and trusting a single layer of prompt-level guardrails to keep a misaligned or prompt-injected agent in line. The responsible setup is enough of a hassle that almost nobody bothers, so we all run it more dangerously than we'd admit.
 
-This repo makes the responsible setup the default: a hardware-isolated, allowlist-firewalled sandbox, an AI monitor with a red-alert ability to halt the session and push-notify your phone, and input/output sanitization. After setup, `claude` runs sandboxed by default — and **fails closed**: if a prerequisite for the sandbox is missing, it errors out telling you what to install rather than silently dropping you onto the bare host. Run [`claude-doctor`](#commands) any time to confirm your actual protection state.
+This repo makes the responsible setup the default: a hardware-isolated, allowlist-firewalled sandbox, an AI monitor with a red-alert ability to halt the session and push-notify your phone, and input/output sanitization. After setup, `claude` runs sandboxed by default. Run [`claude-doctor`](#commands) any time to confirm your actual protection state.
 
 The design is defense-in-depth and grounded in the AI-control literature—[trusted monitoring](https://arxiv.org/abs/2312.06942), [prompt control-flow integrity](https://arxiv.org/abs/2603.18433), channel separation. For each way an agent with shell access can hurt you, the [threat model](#threat-models) names the **hard boundary** a model can't talk its way past—and stays honest about which layers are merely best-effort filters you shouldn't rely on.
 
 ![A guard goose wearing a visor stands watch atop a flaming brick firewall. In a field below, Claude-logo flowers sway. Some of them look suspicious.](https://assets.turntrout.com/static/images/guard-goose-sccd.avif)
 
 _Disclaimer: I'm an AI professional but not a security professional. I cannot personally ensure the security of this code, though it is surely more secure than nothing at all. I welcome issues and PRs._
-
-## Prerequisites
-
-The sandbox is the default and `claude` **fails closed** without it, so install these **before** running `setup.bash`. Linux and macOS are supported; on Windows, run everything inside [WSL2](https://learn.microsoft.com/windows/wsl/install) (native Git Bash / MSYS2 / Cygwin can't host the Linux containers and `setup.bash` will refuse to run there).
-
-**You must install yourself** (`setup.bash` does not install these for you):
-
-| Tool                                                              | Why                                                                                                                                                                                  |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Docker** with a running daemon                                  | Hosts the sandbox container. macOS: [Colima](https://github.com/abiosoft/colima), [OrbStack](https://orbstack.dev), or Docker Desktop. `claude` errors if the daemon is unreachable. |
-| **[devcontainer CLI](https://github.com/devcontainers/cli)**      | Brings the sandbox up. The wrapper errors closed without it (or `pnpm add -g @devcontainers/cli`).                                                                                   |
-| **[uv](https://docs.astral.sh/uv/getting-started/installation/)** | Hard runtime dependency — the wrapper runs `uv run …` to launch the sandbox. `setup.bash` warns if missing but will not auto-install it.                                             |
-| **pnpm + Node.js**                                                | `setup.bash` uses pnpm to install Claude Code + ccr; skips that step (with a warning) if pnpm is absent.                                                                             |
-| **`jq` and `curl`**                                               | Used by the host-mode firewall builder and the monitor plumbing.                                                                                                                     |
-
-**`setup.bash` installs for you:** Claude Code (pinned, see [How it works](#how-it-works)) + [claude-code-router](https://github.com/musistudio/claude-code-router) via pnpm, the sandbox runtime (Kata/Firecracker on Linux when `/dev/kvm` is available, else gVisor/runsc; gVisor inside the Docker VM on macOS), the root-owned managed settings, and the wrapper symlinks. Run [`claude-doctor`](#commands) afterward to see which runtime you got.
 
 ## Install
 
@@ -62,8 +46,6 @@ When you type `claude`:
 4. A **trusted monitor** (cheap model in a separate container) acts as the emergency brake — in auto mode it only fires on the scariest patterns (exfiltration, monitor circumvention, obfuscation) and immediately halts the session + [push-notifies your phone](https://ntfy.sh). `claude-paranoid` runs the monitor in full mode (allow/deny/ask on every tool call)
 
 Works outside git repos too — the wrapper detects the absence and mounts `$PWD` as the workspace. Set `CLAUDE_WORKSPACE` to mount a broader directory tree (e.g., a parent that spans multiple repos).
-
-**Pinned Claude Code version.** The security model depends on this binary's settings/hook contract, so Claude Code is pinned to a known-good version (`2.1.145`) rather than tracking `@latest`. The pin lives in `setup.bash` (`CLAUDE_CODE_VERSION`) and `.devcontainer/{Dockerfile,docker-compose.yml,install-claude.bash}`. To upgrade: bump the pin in all four places, then rebuild the sandbox image.
 
 ### Why not just the built-in sandbox?
 
@@ -205,20 +187,18 @@ Every prompt includes your code. If you don't trust the provider, that's a data 
 
 ### Wrapper options
 
-| Variable                       | Effect                                                                                                                                                                                                                                |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CLAUDE_NO_SANDBOX=1`          | Skip the container — run on host                                                                                                                                                                                                      |
-| `CLAUDE_ALLOW_HOST_FALLBACK=1` | Opt out of fail-closed: if a sandbox prerequisite (`devcontainer` CLI, `uv`, `docker`, or a reachable daemon) is missing, degrade to host execution **with a warning** instead of erroring. Off by default — the sandbox is required. |
-| `CLAUDE_REQUIRE_VM=1`          | **Deprecated no-op** — VM isolation is now the default. Kept for backward compatibility; has no effect.                                                                                                                               |
-| `CLAUDE_PASSTHROUGH=1`         | Skip wrapper entirely — exec real `claude` binary (for scripts/CI)                                                                                                                                                                    |
-| `CLAUDE_WORKTREE=1`            | Per-session git worktree so your working copy is untouched                                                                                                                                                                            |
-| `CLAUDE_WORKSPACE=<dir>`       | Override workspace root (mount a broader directory tree)                                                                                                                                                                              |
-| `CLAUDE_SELF_EDIT=1`           | Don't root-own `.claude/` in devcontainer (for iterating on the template)                                                                                                                                                             |
-| `CLAUDE_NO_VOLUME_GC=1`        | Skip auto-pruning of orphaned per-workspace Docker volumes on launch                                                                                                                                                                  |
-| `--dangerously-skip-firewall`  | Disable the domain-allowlist firewall — **unrestricted internet** (or `DANGEROUSLY_SKIP_FIREWALL=1`)                                                                                                                                  |
-| `--dangerously-skip-container` | Run on the host instead of the container, but keep the domain allowlist via the built-in sandbox (OS-level, Bash only; no monitor/VM). Combine with `--dangerously-skip-firewall` for bare host. (or `DANGEROUSLY_SKIP_CONTAINER=1`)  |
-| `EGRESS_QUOTA_MB=N`            | Total outbound bytes per session in MB (default: 512)                                                                                                                                                                                 |
-| `DNS_REFRESH_INTERVAL=N`       | Seconds between firewall DNS re-resolution (default: 300)                                                                                                                                                                             |
+| Variable                       | Effect                                                                                                                                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CLAUDE_NO_SANDBOX=1`          | Skip the container — run on host                                                                                                                                                                                                     |
+| `CLAUDE_PASSTHROUGH=1`         | Skip wrapper entirely — exec real `claude` binary (for scripts/CI)                                                                                                                                                                   |
+| `CLAUDE_WORKTREE=1`            | Per-session git worktree so your working copy is untouched                                                                                                                                                                           |
+| `CLAUDE_WORKSPACE=<dir>`       | Override workspace root (mount a broader directory tree)                                                                                                                                                                             |
+| `CLAUDE_SELF_EDIT=1`           | Don't root-own `.claude/` in devcontainer (for iterating on the template)                                                                                                                                                            |
+| `CLAUDE_NO_VOLUME_GC=1`        | Skip auto-pruning of orphaned per-workspace Docker volumes on launch                                                                                                                                                                 |
+| `--dangerously-skip-firewall`  | Disable the domain-allowlist firewall — **unrestricted internet** (or `DANGEROUSLY_SKIP_FIREWALL=1`)                                                                                                                                 |
+| `--dangerously-skip-container` | Run on the host instead of the container, but keep the domain allowlist via the built-in sandbox (OS-level, Bash only; no monitor/VM). Combine with `--dangerously-skip-firewall` for bare host. (or `DANGEROUSLY_SKIP_CONTAINER=1`) |
+| `EGRESS_QUOTA_MB=N`            | Total outbound bytes per session in MB (default: 512)                                                                                                                                                                                |
+| `DNS_REFRESH_INTERVAL=N`       | Seconds between firewall DNS re-resolution (default: 300)                                                                                                                                                                            |
 
 ### Security levels
 
