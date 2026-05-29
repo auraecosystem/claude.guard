@@ -579,7 +579,6 @@ def main() -> None:
         f"[END UNTRUSTED TOOL CALL]"
     )
 
-    # Call the monitor LLM
     decision = ""
     reason = ""
     raw_output = ""
