@@ -557,6 +557,17 @@ else
   # both Apple Silicon and Intel, no nested KVM needed.
   # Supports Colima and OrbStack; Docker Desktop uses its own Linux VM.
   docker_vm_ssh=""
+
+  # Install Colima when there's no Colima and no reachable Docker daemon to talk
+  # to. Colima is the macOS Docker runtime this stack expects; brew ships a
+  # signed package, so we OFFER it (prompted; never curl|sh, never silent).
+  # OrbStack / Docker Desktop users already have a daemon, so this only fires
+  # when there is nothing to talk to.
+  if ! command_exists colima && ! docker info >/dev/null 2>&1; then
+    offer_install "Colima + docker CLI (macOS Docker runtime)" colima colima docker ||
+      warn "Colima not installed — install it (brew install colima docker), then re-run setup.bash."
+  fi
+
   if command_exists colima && colima status >/dev/null 2>&1; then
     docker_vm_ssh="colima ssh --"
   elif command_exists colima; then

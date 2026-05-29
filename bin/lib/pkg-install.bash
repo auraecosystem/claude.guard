@@ -6,7 +6,9 @@
 # prerequisites that have a real package we OFFER (prompt) to install them.
 # Tools without a clean package (the devcontainer CLI is npm-only; uv has no
 # apt/dnf package on Linux) keep the warn-with-URL path in the caller. We never
-# pick or install Docker (a deliberate user choice) and never run sudo silently.
+# install a Docker daemon for you on Linux (a deliberate user choice); on macOS
+# setup.bash *offers* (prompted) the Colima runtime, since the stack needs a
+# daemon there and brew ships a signed package. We never run sudo silently.
 
 # Self-contained so the lib is unit-testable in isolation, but defer to a
 # caller that already defines command_exists (e.g. setup.bash) so its copy stays
