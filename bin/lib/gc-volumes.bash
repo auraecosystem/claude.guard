@@ -24,11 +24,8 @@ docker ps >/dev/null 2>&1 || exit 0
 
 removed=0
 while IFS=$'\t' read -r name workspace; do
-  # Skip blank lines and volumes with no recorded workspace path.
   [[ -n "$name" && -n "$workspace" ]] || continue
-  # Workspace still exists → volume is live; keep it.
   [[ -d "$workspace" ]] && continue
-  # Orphaned, but still attached to a container → leave it for that container.
   [[ -n "$(docker ps -a --filter "volume=$name" -q 2>/dev/null)" ]] && continue
   if docker volume rm "$name" >/dev/null 2>&1; then
     removed=$((removed + 1))
