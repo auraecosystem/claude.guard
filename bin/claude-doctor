@@ -147,11 +147,9 @@ status "Prebuilt sandbox image"
 if [[ -r "$SELF_DIR/lib/resolve-image.bash" ]] && command -v docker >/dev/null 2>&1; then
   # shellcheck source=lib/resolve-image.bash disable=SC1091
   source "$SELF_DIR/lib/resolve-image.bash"
-  repo_dir="$(git -C "$SELF_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$SELF_DIR/..")"
-  probe="$(_sccd_prebuilt_probe "$repo_dir")"
-  pb_state="${probe%%$'\t'*}"
-  pb_ref="${probe#*$'\t'}"
-  pb_ref="${pb_ref%%$'\t'*}"
+  # SELF_DIR is bin/, so bin/.. is the install repo root; the probe re-runs
+  # git -C on it (and tolerates a non-repo path via its no-git branch).
+  IFS=$'\t' read -r pb_state pb_ref _ < <(_sccd_prebuilt_probe "$SELF_DIR/..")
   case "$pb_state" in
   available) printf '   next launch: PULL prebuilt (%s)\n' "$pb_ref" ;;
   miss) printf '   next launch: build locally — no image published for this commit (is the package public? has CI published it yet?)\n' ;;
