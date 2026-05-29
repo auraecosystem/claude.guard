@@ -466,10 +466,6 @@ echo "squid started — $(wc -l <"$RO_DOMAINS") read-only domains"
 # EGRESS_QUOTA_MB cap, so the quota rule lives in the one-time setup only.
 REFRESH_INTERVAL="${DNS_REFRESH_INTERVAL:-300}"
 
-# Cap the egress log's disk use: when access.log grows past this, the refresh
-# loop asks squid to rotate (retaining `logfile_rotate` copies). 50 MiB default.
-EGRESS_LOG_MAX_BYTES="${EGRESS_LOG_MAX_BYTES:-52428800}"
-
 DOCKER_DNS=$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf.docker)
 
 if [[ -z "$DOCKER_DNS" ]]; then
@@ -486,22 +482,13 @@ else
     iptables -D INPUT -p udp --sport 53 -s "$DOCKER_DNS" -j ACCEPT 2>/dev/null || true
   }
 
-  # Rotate the egress log once it exceeds the size cap so the volume can't fill
-  # the disk over a long-lived container. squid keeps `logfile_rotate` copies.
-  rotate_egress_log() {
-    local log=/var/log/squid/access.log size
-    size=$(stat -c%s "$log" 2>/dev/null || echo 0)
-    if ((size > EGRESS_LOG_MAX_BYTES)); then
-      squid -k rotate 2>/dev/null || true
-    fi
-  }
-
   refresh_dns() {
     set +e
     trap close_dns_window EXIT
     while true; do
       sleep "$REFRESH_INTERVAL"
-      rotate_egress_log
+      # Bound the persistent egress log's disk use (see rotate-egress-log.bash).
+      "$SCRIPT_DIR/rotate-egress-log.bash" || true
 
       local new_conf
       new_conf=$(mktemp /tmp/dnsmasq-refresh.XXXXXX)
