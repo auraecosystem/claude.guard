@@ -35,6 +35,58 @@ def _make_fake_claude(dir_: Path) -> Path:
     return fake
 
 
+def _make_exec(path: Path, body: str) -> Path:
+    path.write_text(body)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
+def _run_sandboxed(cwd: Path, stub_dir: Path, home: Path, **env_overrides: str):
+    """Drive the wrapper through its real sandboxed (devcontainer) path.
+
+    Fakes `docker` and `devcontainer` so the wrapper passes its daemon check,
+    finds an already-running container (skipping the costly `devcontainer up`
+    branch), and reaches the final `docker exec ... claude`. The fake docker
+    logs every invocation to <stub_dir>/docker.log so tests can assert on the
+    real side effects (e.g. whether the volume GC actually ran).
+    CONTAINER_RUNTIME is preset so runtime detection doesn't shell out.
+    """
+    log = stub_dir / "docker.log"
+    _make_exec(
+        stub_dir / "docker",
+        f'''#!/bin/bash
+printf '%s\\n' "$*" >> "{log}"
+case "$1" in
+  ps)
+    # `docker ps --filter ... -q` → return a running container; bare ps → OK.
+    for a in "$@"; do [ "$a" = "-q" ] && {{ echo fakecontainer; exit 0; }}; done
+    exit 0 ;;
+  exec)
+    # The final launch is `docker exec ... claude ...`; the snapshot is a tar.
+    for a in "$@"; do [ "$a" = "claude" ] && {{ echo LAUNCHED-CLAUDE; exit 0; }}; done
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+''',
+    )
+    # devcontainer must exist on PATH (fail-closed check) but is never invoked
+    # on the warm-container path.
+    _make_exec(stub_dir / "devcontainer", "#!/bin/bash\nexit 0\n")
+    env = {
+        **os.environ,
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
+        "HOME": str(home),
+        "CONTAINER_RUNTIME": "runsc",
+        **env_overrides,
+    }
+    env.pop("CLAUDE_NO_SANDBOX", None)
+    env.pop("DEVCONTAINER", None)
+    r = subprocess.run(
+        [str(WRAPPER)], env=env, cwd=cwd, capture_output=True, text=True, check=False
+    )
+    return r, (log.read_text() if log.exists() else "")
+
+
 def _init_repo(path: Path) -> None:
     """Minimal git repo with one commit so `worktree add` has a base."""
     subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
@@ -261,6 +313,39 @@ def test_volumes_labeled_with_workspace_for_gc() -> None:
         assert labels.get("com.secure-claude.workspace") == (
             "${CLAUDE_DEVCONTAINER_WORKSPACE:-}"
         ), f"volume {name!r} missing the com.secure-claude.workspace GC label"
+
+
+def test_wrapper_runs_volume_gc_on_sandboxed_launch(tmp_path: Path) -> None:
+    """On the sandboxed launch path the wrapper must actually run the volume GC
+    (lib/gc-volumes.bash), which lists labeled volumes via `docker volume ls`."""
+    _init_repo(tmp_path)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    r, docker_log = _run_sandboxed(tmp_path, stub, home)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert "LAUNCHED-CLAUDE" in r.stdout, "wrapper should reach the container launch"
+    assert "volume ls" in docker_log, "volume GC did not run on the sandboxed path"
+
+
+def test_wrapper_shared_auth_warns_and_pins_gc_off(tmp_path: Path) -> None:
+    """CLAUDE_SHARED_AUTH=1 must announce that per-project isolation is off and
+    pin volume GC off (so pruning a deleted project can't delete the shared
+    volume). Observed behaviorally: the warning is printed and gc-volumes.bash
+    short-circuits before it ever lists volumes."""
+    _init_repo(tmp_path)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    r, docker_log = _run_sandboxed(tmp_path, stub, home, CLAUDE_SHARED_AUTH="1")
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    assert "per-project isolation is OFF" in r.stderr
+    assert "volume ls" not in docker_log, "shared-auth must skip the volume GC"
 
 
 def test_wrapper_sources_monitor_env(tmp_path: Path) -> None:
