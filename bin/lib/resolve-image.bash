@@ -46,11 +46,9 @@ _sccd_prebuilt_probe() {
     return 0
   }
 
+  # rev-parse yields empty output outside a repo or with no commits → no-git.
   local sha owner
-  sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || {
-    printf 'no-git\n'
-    return 0
-  }
+  sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)"
   [[ -n "$sha" ]] || {
     printf 'no-git\n'
     return 0
