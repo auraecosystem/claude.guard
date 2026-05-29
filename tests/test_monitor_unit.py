@@ -109,6 +109,18 @@ def test_elide_middle_tiny_budget_falls_back_to_prefix(mon):
     assert out == "abc"
 
 
+def test_elide_middle_keep_exactly_two_boundary(mon):
+    # Smallest budget that still keeps head+tail (keep == 2, the boundary of the
+    # `keep < 2` fallback): a 50-char input with budget 30 yields a 20-char
+    # marker, leaving keep=2 -> one head char + one tail char.
+    text = "A" + ("x" * 48) + "Z"
+    out = mon.elide_middle(text, budget=30)
+    assert len(out) == 30
+    assert out.startswith("A")
+    assert out.endswith("Z")
+    assert "chars omitted" in out
+
+
 # --------------------------------------------------------------------------
 # detect_provider — every branch
 # --------------------------------------------------------------------------
@@ -455,6 +467,10 @@ def test_call_api_error_raises_runtimeerror(mon, monkeypatch):
             '```json\n{"decision":"deny","reason":"x"}\n```', ("deny", "x"), id="fenced"
         ),
         pytest.param('{"decision":"maybe"}', ("", ""), id="invalid-value"),
+        # reason present but no decision key -> decision defaults to "" and is
+        # rejected; a forged reason must never carry an implicit allow.
+        pytest.param('{"reason":"trust me"}', ("", ""), id="reason-without-decision"),
+        pytest.param('{"decision":""}', ("", ""), id="empty-decision"),
         pytest.param("not json at all", ("", ""), id="not-json"),
         # JSON list -> .get raises AttributeError -> ("", "").
         pytest.param("[1, 2, 3]", ("", ""), id="non-object"),
