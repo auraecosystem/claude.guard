@@ -94,14 +94,18 @@ def stop_payload(transcript_path: str) -> dict:
     }
 
 
-def test_scrapes_each_tool_call_with_lifecycle(mod, tmp_path, monkeypatch):
+@pytest.mark.parametrize("runs", [1, 2], ids=["single-stop", "duplicate-stop"])
+def test_scrapes_tool_calls_idempotently(mod, tmp_path, monkeypatch, runs):
+    """Each tool call is recorded once; a repeated SubagentStop doesn't double up."""
     transcript = tmp_path / "agent.jsonl"
     transcript.write_text(RICH_TRANSCRIPT)
-    records = run_main(mod, stop_payload(str(transcript)), tmp_path, monkeypatch)
+    records: list[dict] = []
+    for _ in range(runs):
+        records = run_main(mod, stop_payload(str(transcript)), tmp_path, monkeypatch)
 
     assert records[0]["event"] == "SubagentStop"
     calls = [r for r in records if r["event"] == "SubagentToolUse"]
-    assert [c["tool_name"] for c in calls] == ["Bash", "Read"]
+    assert [c["tool_name"] for c in calls] == ["Bash", "Read"]  # 2, never 4
     assert calls[0] == {
         "ts": "2026-01-01T00:00:01Z",
         "event": "SubagentToolUse",
@@ -113,44 +117,34 @@ def test_scrapes_each_tool_call_with_lifecycle(mod, tmp_path, monkeypatch):
     }
 
 
-def test_duplicate_stop_is_idempotent(mod, tmp_path, monkeypatch):
-    transcript = tmp_path / "agent.jsonl"
-    transcript.write_text(RICH_TRANSCRIPT)
-    run_main(mod, stop_payload(str(transcript)), tmp_path, monkeypatch)
-    records = run_main(mod, stop_payload(str(transcript)), tmp_path, monkeypatch)
-
-    calls = [r for r in records if r["event"] == "SubagentToolUse"]
-    assert len(calls) == 2  # not 4 — the marker blocks the second scrape
-
-
-def test_subagent_start_logs_lifecycle_only(mod, tmp_path, monkeypatch):
-    payload = {
-        "hook_event_name": "SubagentStart",
-        "agent_type": "Explore",
-        "agent_id": "s1",
-        "agent_transcript_path": "",
-    }
-    records = run_main(mod, payload, tmp_path, monkeypatch)
-    assert records == [
-        {
-            "ts": records[0]["ts"],
-            "event": "SubagentStart",
+@pytest.mark.parametrize(
+    "make_payload",
+    [
+        lambda tp: {
+            "hook_event_name": "SubagentStart",
             "agent_type": "Explore",
             "agent_id": "s1",
-        }
-    ]
+            "agent_transcript_path": "",
+        },
+        lambda tp: stop_payload(""),
+        lambda tp: stop_payload(str(tp / "nope.jsonl")),
+    ],
+    ids=["start-event", "stop-empty-path", "stop-missing-file"],
+)
+def test_lifecycle_only_when_nothing_to_scrape(
+    mod, tmp_path, monkeypatch, make_payload
+):
+    payload = make_payload(tmp_path)
+    records = run_main(mod, payload, tmp_path, monkeypatch)
 
-
-def test_stop_without_transcript_path(mod, tmp_path, monkeypatch):
-    records = run_main(mod, stop_payload(""), tmp_path, monkeypatch)
-    assert [r["event"] for r in records] == ["SubagentStop"]
-
-
-def test_stop_with_missing_transcript_file(mod, tmp_path, monkeypatch):
-    records = run_main(
-        mod, stop_payload(str(tmp_path / "nope.jsonl")), tmp_path, monkeypatch
-    )
-    assert [r["event"] for r in records] == ["SubagentStop"]
+    assert len(records) == 1  # lifecycle record only, nothing scraped
+    record = records[0]
+    assert record.pop("ts")  # timestamp present, value is non-deterministic
+    assert record == {
+        "event": payload["hook_event_name"],
+        "agent_type": payload["agent_type"],
+        "agent_id": payload["agent_id"],
+    }
 
 
 def test_tool_calls_is_lazy(mod, tmp_path):
