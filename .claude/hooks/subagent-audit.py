@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 """Audit log for sub-agent lifecycle and tool calls.
 
-Sub-agent tool calls bypass PreToolUse/PostToolUse by design (GitHub #27661,
-#34692), so the parent monitor never sees them live and cannot block them.
+Sub-agent tool calls are not gated by the parent session's PreToolUse/
+PostToolUse hooks -- a confirmed security bug, not intended behavior (GitHub
+#21460), so the parent monitor never sees them live and cannot block them.
 We cannot intercept them, but Claude Code writes each sub-agent's transcript
 to disk and hands us its path in the SubagentStop payload
 (``agent_transcript_path``). So at SubagentStop we read that transcript and
 append one record per tool call. This is a post-hoc audit trail, not
 prevention.
 
-In the devcontainer each record is also forwarded to the monitor sidecar's
-audit-only endpoint, which appends it to the tamper-resistant ``claude-audit``
-volume the app container cannot write directly. The endpoint deliberately
-skips the monitor LLM (the calls already ran; re-judging them is pointless),
-so the forwarded records are stored raw. On host (no sidecar) the records
-live only in the agent-writable cache.
+The log lives in the agent-writable cache, NOT the tamper-resistant
+``claude-audit`` volume, and that is deliberate. This hook runs in the app
+container, in the agent's own trust domain: anything it could send to the
+sidecar to reach the protected volume, the agent could send too (same
+container, same user) -- and the source transcript is itself agent-writable,
+so a scraped record is something the agent could have fabricated. Writing it
+into the protected log would let the agent inject misleading entries alongside
+the genuine, sidecar-mediated records there, making the trusted log impossible
+to take at face value. Keeping this data in the explicitly-untrusted cache
+keeps its provenance honest.
 """
 
 import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
-
-# The sidecar owns the protected audit volume; the app container reaches it
-# only over this address (same host:port the monitor dispatch uses). The
-# hardening sentinel is root-created, so the agent cannot forge devcontainer
-# detection to redirect audit traffic.
-MONITOR_HOST = "172.30.0.2"
-HARDENING_SENTINEL = Path("/run/hardening/complete")
 
 
 def log_dir() -> Path:
@@ -41,41 +37,6 @@ def log_dir() -> Path:
 def append(audit_log: Path, record: dict[str, object]) -> None:
     with open(audit_log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
-
-
-def sidecar_audit_url() -> str | None:
-    """Audit-only endpoint of the monitor sidecar, or None outside the devcontainer."""
-    if not HARDENING_SENTINEL.is_file():
-        return None
-    port = os.environ.get("MONITOR_PORT", "9199")
-    return f"http://{MONITOR_HOST}:{port}/audit"
-
-
-def post_audit(url: str, record: dict[str, object]) -> None:
-    """Best-effort forward of one record to the sidecar's audit endpoint.
-
-    The sidecar appends it to the protected volume ``claude-audit`` reads. A
-    sidecar hiccup must not crash a (non-blocking) Stop hook, and the local
-    cache copy is already written, so on failure we warn and continue rather
-    than raise -- but we do warn, because the cache copy is agent-writable and
-    therefore not the tamper-resistant record we wanted.
-    """
-    data = json.dumps(record).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=5):
-            pass
-    except (urllib.error.URLError, OSError) as exc:
-        print(f"subagent-audit: sidecar forward failed: {exc}", file=sys.stderr)
-
-
-def emit(audit_log: Path, url: str | None, record: dict[str, object]) -> None:
-    """Record one entry locally and, in the devcontainer, in the protected volume."""
-    append(audit_log, record)
-    if url is not None:
-        post_audit(url, record)
 
 
 def already_scraped(index: Path, agent_id: str) -> bool:
@@ -129,12 +90,10 @@ def main() -> None:
     directory = log_dir()
     directory.mkdir(parents=True, exist_ok=True)
     audit_log = directory / "subagent-audit.jsonl"
-    url = sidecar_audit_url()
 
     # Lifecycle record -- always written, even if scraping below fails.
-    emit(
+    append(
         audit_log,
-        url,
         {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "event": event,
@@ -155,7 +114,7 @@ def main() -> None:
     if not transcript_path.is_file():
         return
     for record in tool_calls(transcript_path, agent_type, agent_id):
-        emit(audit_log, url, record)
+        append(audit_log, record)
     mark_scraped(index, agent_id)
 
 
