@@ -69,9 +69,13 @@ case "$1" in
 esac
 ''',
     )
-    # devcontainer must exist on PATH (fail-closed check) but is never invoked
-    # on the warm-container path.
+    # devcontainer and uv must exist on PATH (fail-closed prerequisite checks)
+    # but are never invoked on the warm-container path — `uv run … devcontainer
+    # up` only fires on cold start, which the running-container fake skips. Stub
+    # them so the test is hermetic and doesn't depend on the host having uv
+    # installed (the smoke-tests CI runner installs deps via pip, not uv).
     _make_exec(stub_dir / "devcontainer", "#!/bin/bash\nexit 0\n")
+    _make_exec(stub_dir / "uv", "#!/bin/bash\nexit 0\n")
     env = {
         **os.environ,
         "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
@@ -537,9 +541,9 @@ def test_detect_runtime_on_linux(
 
 
 def test_missing_devcontainer_fails_closed_by_default(tmp_path: Path) -> None:
-    """No devcontainer CLI and no opt-out → the wrapper refuses to run on the
-    host (security default). It must exit non-zero, name the tool to install,
-    and NOT exec the host claude."""
+    """No devcontainer CLI → the wrapper refuses to run on the host (security
+    default; there is no host-fallback escape hatch). It must exit non-zero,
+    name the tool to install, and NOT exec the host claude."""
     _init_repo(tmp_path)
     real_dir = tmp_path / "stubs"
     real_dir.mkdir()
