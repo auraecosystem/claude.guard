@@ -151,29 +151,33 @@ def _jsonl(*entries) -> str:
     return "\n".join(json.dumps(e) for e in entries)
 
 
+def _msg(role, content) -> dict:
+    """A transcript entry: {"message": {"role": role, "content": content}}."""
+    return {"message": {"role": role, "content": content}}
+
+
+_TEXT = {"type": "text", "text": "ok"}
+_TOOL_USE = {"type": "tool_use", "name": "Bash", "input": {}}
+
+
 @pytest.mark.parametrize(
     "raw, expected",
     [
+        pytest.param(_jsonl(_msg("user", "hello")), "user: hello", id="string"),
         pytest.param(
-            _jsonl({"message": {"role": "user", "content": "hello"}}),
-            "user: hello",
-            id="string-content",
+            _jsonl(_msg("assistant", [_TEXT, _TOOL_USE, {"type": "tool_result"}])),
+            "assistant: ok [tool_use Bash] [tool_result]",
+            id="all-block-types",
         ),
         pytest.param(
-            _jsonl(
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": "ok"},
-                            {"type": "tool_use", "name": "Bash", "input": {}},
-                            {"type": "tool_result", "content": "x"},
-                        ],
-                    }
-                }
-            ),
-            "assistant: ok [tool_use Bash] [tool_result]",
-            id="list-content",
+            _jsonl(_msg("assistant", [{"type": "tool_result"}, _TEXT])),
+            "assistant: [tool_result] ok",
+            id="tool-result-not-last",
+        ),
+        pytest.param(
+            _jsonl(_msg("user", [{"type": "image"}, _TEXT])),
+            "user: ok",
+            id="unknown-block-type-skipped",
         ),
         pytest.param(
             _jsonl({"type": "user", "message": {"content": "via type"}}),
@@ -183,55 +187,11 @@ def _jsonl(*entries) -> str:
         pytest.param("not json\n{bad}", "", id="all-unparsable-skipped"),
         pytest.param(json.dumps([1, 2, 3]), "", id="non-dict-entry-skipped"),
         pytest.param(_jsonl({"type": "user"}), "", id="no-message-key"),
-        pytest.param(
-            _jsonl({"message": {"role": "user", "content": {"k": "v"}}}),
-            "",
-            id="dict-content",
-        ),
-        pytest.param(
-            _jsonl(
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "tool_result"},
-                            {"type": "text", "text": "after"},
-                        ],
-                    }
-                }
-            ),
-            "assistant: [tool_result] after",
-            id="tool-result-not-last",
-        ),
-        pytest.param(
-            _jsonl(
-                {
-                    "message": {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": "hi"},
-                        ],
-                    }
-                }
-            ),
-            "user: hi",
-            id="unknown-block-type-skipped",
-        ),
-        pytest.param(
-            "\n  \n" + json.dumps({"message": {"role": "user", "content": "hi"}}),
-            "user: hi",
-            id="blank-lines-skipped",
-        ),
+        pytest.param(_jsonl(_msg("user", {"k": "v"})), "", id="dict-content"),
+        pytest.param(_jsonl(_msg("user", "")), "", id="empty-body"),
+        pytest.param(_jsonl(_msg("user", [42, "x"])), "", id="non-dict-blocks-skipped"),
+        pytest.param("\n  \n" + json.dumps(_msg("user", "hi")), "user: hi", id="blank"),
         pytest.param("", "", id="empty"),
-        pytest.param(
-            _jsonl({"message": {"role": "user", "content": ""}}), "", id="empty-body"
-        ),
-        pytest.param(
-            _jsonl({"message": {"role": "user", "content": [42, "x"]}}),
-            "",
-            id="non-dict-blocks-skipped",
-        ),
     ],
 )
 def test_summarize_transcript(mon, raw, expected):
@@ -240,9 +200,7 @@ def test_summarize_transcript(mon, raw, expected):
 
 def test_summarize_transcript_keeps_last_n(mon):
     n = mon.HISTORY_MAX_ENTRIES
-    raw = _jsonl(
-        *[{"message": {"role": "user", "content": f"m{i}"}} for i in range(n + 5)]
-    )
+    raw = _jsonl(*[_msg("user", f"m{i}") for i in range(n + 5)])
     lines = mon.summarize_transcript(raw).splitlines()
     assert len(lines) == n
     assert lines[0] == "user: m5"
@@ -250,14 +208,13 @@ def test_summarize_transcript_keeps_last_n(mon):
 
 
 def test_summarize_transcript_budget_truncates(mon):
-    raw = _jsonl({"message": {"role": "user", "content": "A" * 10000}})
-    out = mon.summarize_transcript(raw)
+    out = mon.summarize_transcript(_jsonl(_msg("user", "A" * 10000)))
     assert len(out) <= mon.HISTORY_BUDGET
     assert "chars omitted" in out
 
 
 def test_history_block_present(mon):
-    env = {"session_transcript": _jsonl({"message": {"role": "user", "content": "hi"}})}
+    env = {"session_transcript": _jsonl(_msg("user", "hi"))}
     block = mon.history_block(env)
     assert block.startswith("[SESSION HISTORY")
     assert "user: hi" in block
@@ -1327,7 +1284,11 @@ def test_handle_permission_denied_prompt_includes_denial_reason(
     assert "rm -rf /" in user_msg
 
 
-def test_handle_permission_denied_edit_rendered_as_diff(mon, monkeypatch, capsys):
+def _review_prompt(mon, monkeypatch, envelope, *, via_main):
+    """Run the monitor with a stubbed LLM and return the user_msg it sends.
+
+    via_main routes through main() (PreToolUse); otherwise handle_permission_denied.
+    """
     monkeypatch.setenv("MONITOR_API_KEY", "k")
     monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
     captured = {}
@@ -1337,65 +1298,49 @@ def test_handle_permission_denied_edit_rendered_as_diff(mon, monkeypatch, capsys
         return _anthropic_resp("allow")
 
     monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
-    envelope = {
-        **PD_ENVELOPE,
-        "tool_name": "Edit",
-        "tool_input": {
-            "file_path": "/etc/passwd",
-            "old_string": "x",
-            "new_string": "evil",
-        },
-    }
-    mon.handle_permission_denied(envelope)
-    user_msg = captured["body"]["messages"][0]["content"]
-    assert "Edit /etc/passwd:" in user_msg
-    assert "-x" in user_msg
-    assert "+evil" in user_msg
+    if via_main:
+        _stdin(monkeypatch, mon, envelope)
+        mon.main()
+    else:
+        mon.handle_permission_denied(envelope)
+    return captured["body"]["messages"][0]["content"]
 
 
-def test_handle_permission_denied_includes_session_history(mon, monkeypatch, capsys):
-    monkeypatch.setenv("MONITOR_API_KEY", "k")
-    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    captured = {}
-
-    def fake_urlopen(req, timeout=None):
-        captured["body"] = json.loads(req.data)
-        return _anthropic_resp("allow")
-
-    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
-    envelope = {
-        **PD_ENVELOPE,
-        "session_transcript": json.dumps(
-            {"message": {"role": "user", "content": "delete everything"}}
+@pytest.mark.parametrize(
+    "envelope, via_main, expected",
+    [
+        pytest.param(
+            {
+                **PD_ENVELOPE,
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": "/etc/passwd",
+                    "old_string": "x",
+                    "new_string": "evil",
+                },
+            },
+            False,
+            ["Edit /etc/passwd:", "-x", "+evil"],
+            id="edit-diff-pd",
         ),
-    }
-    mon.handle_permission_denied(envelope)
-    user_msg = captured["body"]["messages"][0]["content"]
-    assert "[SESSION HISTORY" in user_msg
-    assert "user: delete everything" in user_msg
-
-
-def test_main_includes_session_history(mon, monkeypatch, capsys):
-    monkeypatch.setenv("MONITOR_API_KEY", "k")
-    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    captured = {}
-
-    def fake_urlopen(req, timeout=None):
-        captured["body"] = json.loads(req.data)
-        return _anthropic_resp("allow")
-
-    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
-    envelope = {
-        **ENVELOPE,
-        "session_transcript": json.dumps(
-            {"message": {"role": "user", "content": "ctx marker"}}
+        pytest.param(
+            {**PD_ENVELOPE, "session_transcript": json.dumps(_msg("user", "del all"))},
+            False,
+            ["[SESSION HISTORY", "user: del all"],
+            id="history-pd",
         ),
-    }
-    _stdin(monkeypatch, mon, envelope)
-    mon.main()
-    user_msg = captured["body"]["messages"][0]["content"]
-    assert "[SESSION HISTORY" in user_msg
-    assert "ctx marker" in user_msg
+        pytest.param(
+            {**ENVELOPE, "session_transcript": json.dumps(_msg("user", "ctx marker"))},
+            True,
+            ["[SESSION HISTORY", "user: ctx marker"],
+            id="history-main",
+        ),
+    ],
+)
+def test_review_prompt_includes_context(mon, monkeypatch, envelope, via_main, expected):
+    user_msg = _review_prompt(mon, monkeypatch, envelope, via_main=via_main)
+    for substring in expected:
+        assert substring in user_msg
 
 
 def test_main_routes_permission_denied(mon, monkeypatch, capsys):
