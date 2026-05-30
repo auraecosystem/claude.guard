@@ -359,6 +359,49 @@ def test_permission_denied_no_key_stands(tmp_path: Path) -> None:
     assert hso["retry"] is False
 
 
+# --- Session-transcript inlining ---
+
+
+@pytest.mark.parametrize(
+    "with_transcript, expected",
+    [(True, "True"), (False, "False")],
+    ids=["injected", "absent"],
+)
+def test_transcript_tail_injection(
+    tmp_path: Path, with_transcript: bool, expected: str
+) -> None:
+    """The dispatch tails transcript_path and inlines session_transcript before
+    invoking the monitor. The stub fails --check-allow to force the full path,
+    then reflects whether session_transcript arrived."""
+    _install_lib(tmp_path)
+    stub = tmp_path / "monitor.py"
+    stub.write_text(
+        "import sys, json\n"
+        "if '--check-allow' in sys.argv: sys.exit(1)\n"
+        "env = json.load(sys.stdin)\n"
+        "print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',"
+        " 'permissionDecision': 'allow',"
+        " 'permissionDecisionReason': str('session_transcript' in env)}}))\n"
+    )
+    stub.chmod(0o755)
+    env_obj = {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+    if with_transcript:
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text(
+            json.dumps({"message": {"role": "user", "content": "ctx"}}) + "\n"
+        )
+        env_obj["transcript_path"] = str(transcript)
+    result = _run_envelope(
+        DISPATCH.read_text(),
+        _base_env(tmp_path, ANTHROPIC_API_KEY="sk-test"),
+        json.dumps(env_obj),
+        tmp_path / "d.bash",
+    )
+    assert result.returncode == 0, result.stderr
+    hso = json.loads(result.stdout)["hookSpecificOutput"]
+    assert hso["permissionDecisionReason"] == expected
+
+
 # --- detect_env: IS_SANDBOX must not be forgeable via CLAUDE_ENV_FILE ---
 
 
