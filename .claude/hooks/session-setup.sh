@@ -5,6 +5,10 @@ set -uo pipefail
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
+#######################################
+# Helpers
+#######################################
+
 SETUP_WARNINGS=0
 warn() {
   echo "WARNING: $1" >&2
@@ -44,10 +48,18 @@ webi_install_if_missing() {
   fi
 }
 
+#######################################
+# PATH setup
+#######################################
+
 export PATH="$HOME/.local/bin:$PATH"
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
 fi
+
+#######################################
+# Tool installation (optional - warn on failure)
+#######################################
 
 # Versions pinned for supply-chain safety.
 webi_install_if_missing shfmt shfmt@3
@@ -58,6 +70,10 @@ if ! command -v shellcheck &>/dev/null && is_root; then
   { apt-get update -qq && apt-get install -y -qq shellcheck; } || warn "Failed to install shellcheck"
 fi
 
+#######################################
+# Git setup
+#######################################
+
 cd "$PROJECT_DIR" || exit 1
 git config core.hooksPath .hooks
 
@@ -67,11 +83,19 @@ if [ -n "${CLAUDE_CODE_BASE_REF:-}" ]; then
     warn "Failed to fetch base branch $CLAUDE_CODE_BASE_REF"
 fi
 
+#######################################
+# GitHub CLI auth
+#######################################
+
 if ! command -v gh &>/dev/null; then
   warn "gh CLI not found"
 elif [ -z "${GH_TOKEN:-}" ]; then
   warn "GH_TOKEN is not set — GitHub CLI requires authentication"
 fi
+
+#######################################
+# GitHub repo detection for proxy environments
+#######################################
 
 # Web-session remotes use a proxy URL (http://local_proxy@127.0.0.1:PORT/git/owner/repo)
 # gh can't parse, so extract owner/repo and export GH_REPO.
@@ -95,6 +119,10 @@ if [ -z "${GH_REPO:-}" ]; then
     fi
   fi
 fi
+
+#######################################
+# Project dependencies
+#######################################
 
 if [ -f "$PROJECT_DIR/package.json" ]; then
   # Skip only when node_modules is root-owned AND we are the unprivileged agent:
@@ -124,6 +152,10 @@ fi
 if [ "$SETUP_WARNINGS" -gt 0 ]; then
   echo "Setup done with $SETUP_WARNINGS warning(s) — see above" >&2
 fi
+
+#######################################
+# Monitor setup check
+#######################################
 
 _check_monitor() {
   [ "${IS_SANDBOX:-}" = "yes" ] && return
