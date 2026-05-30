@@ -87,18 +87,20 @@ def test_corrupt_dispatcher_blocks_edit_outside_hooks_dir(tmp_path: Path) -> Non
     assert out["permissionDecision"] == "ask"
 
 
-@pytest.mark.parametrize(
-    "sneaky", ["{d}/../escape.bash", "{d}/sub/../monitor-dispatch.bash"]
-)
-def test_corrupt_dispatcher_rejects_dotdot(tmp_path: Path, sneaky: str) -> None:
-    """ANY '..' is rejected, whether it escapes the dir or would resolve back
-    inside it. The guard is lexical (no realpath: -m is GNU-only and realpath is
-    absent on older macOS), so it rejects the component rather than normalising —
-    the conservative, portable choice. `{d}/../escape.bash` literally starts with
-    `{d}/`, so without the '..' check it would wrongly match the prefix."""
+def _allows(result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert result.stdout.strip() == "", "in-dir edit must be allowed"
+
+
+def test_corrupt_dispatcher_rejects_dotdot_escape(tmp_path: Path) -> None:
+    """A '..' that escapes the hooks dir must not be allowed. cd+`pwd -P`
+    canonicalises the parent, so the escape resolves outside $DIR -> 'ask'."""
     launch = _setup(tmp_path, _CORRUPT_DISPATCH)
     envelope = json.dumps(
-        {"tool_name": "Write", "tool_input": {"file_path": sneaky.format(d=tmp_path)}}
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": f"{tmp_path}/../escape.bash"},
+        }
     )
     out = _verdict(_run(launch, envelope))
     assert out["permissionDecision"] == "ask"
@@ -108,12 +110,46 @@ def test_corrupt_dispatcher_rejects_dotdot(tmp_path: Path, sneaky: str) -> None:
 def test_corrupt_dispatcher_allows_in_dir_dot_segments(
     tmp_path: Path, rel: str
 ) -> None:
-    """'.' and '//' segments that keep the target inside the hooks dir are still
-    allowed — the prefix check tolerates them; only '..' is rejected."""
+    """'.' and '//' segments that keep the target inside the hooks dir are allowed."""
     launch = _setup(tmp_path, _CORRUPT_DISPATCH)
     envelope = json.dumps(
         {"tool_name": "Write", "tool_input": {"file_path": f"{tmp_path}/{rel}"}}
     )
-    result = _run(launch, envelope)
-    assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert result.stdout.strip() == "", "in-dir edit must be allowed"
+    _allows(_run(launch, envelope))
+
+
+def test_corrupt_dispatcher_allows_dotdot_resolving_in_dir(tmp_path: Path) -> None:
+    """A '..' that physically resolves back INSIDE the hooks dir is allowed —
+    cd+`pwd -P` resolves it rather than rejecting on the literal string."""
+    launch = _setup(tmp_path, _CORRUPT_DISPATCH)
+    (tmp_path / "sub").mkdir()
+    target = f"{tmp_path}/sub/../monitor-dispatch.bash"
+    envelope = json.dumps({"tool_name": "Write", "tool_input": {"file_path": target}})
+    _allows(_run(launch, envelope))
+
+
+def test_corrupt_dispatcher_rejects_symlink_leaf_escape(tmp_path: Path) -> None:
+    """A symlink leaf INSIDE the hooks dir that points OUT is a write-through
+    escape (the parent canonicalises to $DIR, but the write lands elsewhere), so
+    the `! -L` leaf check rejects it -> 'ask'."""
+    launch = _setup(tmp_path, _CORRUPT_DISPATCH)
+    link = tmp_path / "evil"
+    link.symlink_to(tmp_path.parent / "payload")
+    envelope = json.dumps(
+        {"tool_name": "Write", "tool_input": {"file_path": str(link)}}
+    )
+    out = _verdict(_run(launch, envelope))
+    assert out["permissionDecision"] == "ask"
+
+
+def test_corrupt_dispatcher_rejects_symlink_dir_escape(tmp_path: Path) -> None:
+    """A symlinked SUBDIR pointing OUT must not let a write escape via the parent
+    path: cd+`pwd -P` resolves the parent outside $DIR -> 'ask'."""
+    launch = _setup(tmp_path, _CORRUPT_DISPATCH)
+    outside = tmp_path.parent / "outdir"
+    outside.mkdir()
+    (tmp_path / "sub").symlink_to(outside)
+    target = f"{tmp_path}/sub/payload"
+    envelope = json.dumps({"tool_name": "Write", "tool_input": {"file_path": target}})
+    out = _verdict(_run(launch, envelope))
+    assert out["permissionDecision"] == "ask"
