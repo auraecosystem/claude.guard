@@ -64,7 +64,10 @@ jobs:
       - name: Lint devcontainer Dockerfiles
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
-          dockerfile: .devcontainer/Dockerfile*
+          # hadolint-action doesn't expand globs — pass the directory and
+          # let `recursive: true` find every Dockerfile under it.
+          dockerfile: .devcontainer
+          recursive: true
           failure-threshold: warning
 
   gitleaks:
