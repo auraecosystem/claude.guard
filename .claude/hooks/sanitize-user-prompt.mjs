@@ -12,51 +12,39 @@
  * for UX consistency.
  */
 import stripAnsi from "strip-ansi";
-import { readStdinJson } from "./lib-hook-io.mjs";
+import { readStdinJson, HookEvent } from "./lib-hook-io.mjs";
 import {
   CHECKS,
   STRIP,
   LONG_RUN_RE,
   LONG_RUN_THRESHOLD,
+  SCATTERED_THRESHOLD,
 } from "./invisible-chars.mjs";
 
-const SCATTERED_THRESHOLD = 30;
+// eslint-disable-next-line no-control-regex -- ESC (U+001B) is exactly what we're detecting
+const ESC = /\x1b/;
 
-function analyzePrompt(prompt) {
-  const deAnsi = stripAnsi(prompt);
-  const hasAnsi = deAnsi.length !== prompt.length;
-
-  LONG_RUN_RE.lastIndex = 0;
-  const longRunMatch = deAnsi.match(LONG_RUN_RE);
-  const hasLongRun = longRunMatch !== null;
-
-  STRIP.lastIndex = 0;
-  const allInvisible = deAnsi.match(STRIP);
-  const invisibleCount = allInvisible ? allInvisible.length : 0;
-
-  const categories = CHECKS.filter(([, re]) => deAnsi.search(re) !== -1).map(
-    ([label]) => label,
+function block(reason) {
+  process.stdout.write(
+    JSON.stringify({
+      decision: "block",
+      reason,
+      hookSpecificOutput: {
+        hookEventName: HookEvent.USER_PROMPT_SUBMIT,
+        additionalContext:
+          "User prompt blocked: payload-capable invisible/ANSI characters detected.",
+      },
+    }),
   );
-  if (hasAnsi) categories.push("ANSI escapes");
-
-  const block = hasLongRun || hasAnsi || invisibleCount >= SCATTERED_THRESHOLD;
-
-  return {
-    block,
-    categories,
-    invisibleCount,
-    hasLongRun,
-    longRunSample: hasLongRun ? longRunMatch[0] : null,
-  };
 }
 
-function formatReason(a) {
+function formatReason(categories, invisibleCount, longRunSample) {
   const parts = [
-    `Detected: ${a.categories.join(", ")}.`,
-    `Invisible char count: ${a.invisibleCount} (long-run threshold: ${LONG_RUN_THRESHOLD}, scattered threshold: ${SCATTERED_THRESHOLD}).`,
+    `Detected: ${categories.join(", ")}.`,
+    `Invisible char count: ${invisibleCount} (long-run threshold: ${LONG_RUN_THRESHOLD}, scattered threshold: ${SCATTERED_THRESHOLD}).`,
   ];
-  if (a.hasLongRun) {
-    const cps = [...a.longRunSample]
+  if (longRunSample) {
+    const cps = [...longRunSample]
       .slice(0, 16)
       .map(
         (ch) =>
@@ -76,20 +64,27 @@ try {
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
   if (!prompt) process.exit(0);
 
-  const result = analyzePrompt(prompt);
-  if (!result.block) process.exit(0);
+  // Cheap pre-check: most prompts have no ESC, skip the full stripAnsi walk.
+  const hasAnsi = ESC.test(prompt);
+  const deAnsi = hasAnsi ? stripAnsi(prompt) : prompt;
 
-  process.stdout.write(
-    JSON.stringify({
-      decision: "block",
-      reason: formatReason(result),
-      hookSpecificOutput: {
-        hookEventName: "UserPromptSubmit",
-        additionalContext:
-          "User prompt blocked: payload-capable invisible/ANSI characters detected.",
-      },
-    }),
+  const longRunSample = deAnsi.match(LONG_RUN_RE)?.[0] ?? null;
+  const invisibleCount = deAnsi.match(STRIP)?.length ?? 0;
+
+  if (
+    !hasAnsi &&
+    longRunSample === null &&
+    invisibleCount < SCATTERED_THRESHOLD
+  ) {
+    process.exit(0);
+  }
+
+  const categories = CHECKS.filter(([, re]) => deAnsi.search(re) !== -1).map(
+    ([label]) => label,
   );
+  if (hasAnsi) categories.push("ANSI escapes");
+
+  block(formatReason(categories, invisibleCount, longRunSample));
 } catch (err) {
   process.stderr.write(`sanitize-user-prompt hook error: ${err.message}\n`);
   process.stdout.write(
