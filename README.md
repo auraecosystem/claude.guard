@@ -1,7 +1,7 @@
 [![smoke tests](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/smoke-tests.yaml?label=smoke%20tests)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/smoke-tests.yaml)
-[![JS coverage 100%](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/node-tests.yaml?label=JS%20coverage%20100%25)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/node-tests.yaml)
+[![JS coverage 100%](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/js.yaml?label=JS%20coverage%20100%25)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/js.yaml)
 [![pytest coverage 100%](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/validate-config.yaml?label=pytest%20coverage%20100%25)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/validate-config.yaml)
-[![ESLint + tsc](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/lint.yaml?label=ESLint%20%2B%20tsc)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/lint.yaml)
+[![ESLint + tsc](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/js.yaml?label=ESLint%20%2B%20tsc)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/js.yaml)
 [![CI lint](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/actionlint.yaml?label=CI%20lint)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/actionlint.yaml)
 [![isolation](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/runsc-smoke.yaml?label=isolation)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/runsc-smoke.yaml)
 [![bash tests](https://img.shields.io/github/actions/workflow/status/alexander-turner/secure-claude-code-defaults/validate-config.yaml?label=bash%20tests)](https://github.com/alexander-turner/secure-claude-code-defaults/actions/workflows/validate-config.yaml)
@@ -150,7 +150,7 @@ _Adversary: external attacker who plants invisible Unicode in markdown the user 
 
 `CLAUDE.md`, `AGENTS.md`, and `.claude/skills/*/SKILL.md` bypass the PostToolUse sanitizer because they're loaded directly as context at session start. An attacker publishes a helpful-looking snippet containing invisible [Unicode tag characters](<https://en.wikipedia.org/wiki/Tags_(Unicode_block)>) that encode ASCII, or zero-width chars that encode binary. The hidden payload can invoke skills, override instructions, or exfiltrate data.
 
-**Filters:** A SessionStart hook scans instruction files for invisible-character runs, decodes the payload, and auto-cleans the files in place. If the files are read-only (e.g. root-owned in devcontainer), a PreToolUse gate prompts the user on each tool call.
+**Filters:** A SessionStart hook scans instruction files for invisible-character runs, decodes the payload, and auto-cleans the files in place. If the files are read-only (e.g. root-owned in devcontainer), a PreToolUse gate prompts the user on each tool call. A UserPromptSubmit hook applies the same detection to pasted prompts and blocks the submission when payload-capable runs are found.
 
 ### 4. The agent tampers with its own guardrails
 

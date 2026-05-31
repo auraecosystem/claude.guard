@@ -21,11 +21,13 @@ const denyPatterns = JSON.parse(readFileSync(settingsPath, "utf8")).permissions
 // below and accepted per the CLAUDE.md deny-rule doctrine (speed bump, not a
 // wall — the sandbox is the floor).
 
-function matches(pattern, toolCall) {
+function matchesPattern(pattern, toolCall) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
   return new RegExp("^" + escaped.replace(/\*/g, ".*") + "$").test(toolCall);
 }
-const isDenied = (t) => denyPatterns.some((p) => matches(p, t));
+function isDenied(toolCall) {
+  return denyPatterns.some((pattern) => matchesPattern(pattern, toolCall));
+}
 
 // [pattern, [shouldMatch...], [[bypassAttempt, expectedDenied]...]]
 // prettier-ignore
@@ -252,14 +254,14 @@ const cases = [
 
 describe("deny-rule round-trip", () => {
   it("every deny pattern is covered exactly once", () => {
-    const covered = cases.map(([p]) => p);
+    const covered = cases.map(([pattern]) => pattern);
     assert.deepEqual(
-      denyPatterns.filter((p) => !covered.includes(p)),
+      denyPatterns.filter((pattern) => !covered.includes(pattern)),
       [],
       "uncovered patterns",
     );
     assert.deepEqual(
-      covered.filter((p) => !denyPatterns.includes(p)),
+      covered.filter((pattern) => !denyPatterns.includes(pattern)),
       [],
       "stale case rows",
     );
@@ -268,7 +270,10 @@ describe("deny-rule round-trip", () => {
   for (const [pattern, shouldMatch, bypasses] of cases) {
     for (const input of shouldMatch) {
       it(`${pattern} matches ${input}`, () => {
-        assert.ok(matches(pattern, input), "rule no longer matches its intent");
+        assert.ok(
+          matchesPattern(pattern, input),
+          "rule no longer matches its intent",
+        );
         assert.ok(isDenied(input));
       });
     }
@@ -281,7 +286,7 @@ describe("deny-rule round-trip", () => {
 });
 
 describe("legitimate commands pass through", () => {
-  for (const t of [
+  for (const toolCall of [
     "Bash(ls -la)",
     "Bash(git status)",
     "Bash(git push origin feature-branch)",
@@ -300,6 +305,6 @@ describe("legitimate commands pass through", () => {
     "Bash(ssh user@host.com)",
     "Bash(scp file.txt user@host.com:/tmp/)",
   ]) {
-    it(`allows ${t}`, () => assert.ok(!isDenied(t)));
+    it(`allows ${toolCall}`, () => assert.ok(!isDenied(toolCall)));
   }
 });
