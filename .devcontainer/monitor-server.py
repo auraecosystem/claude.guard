@@ -163,10 +163,13 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             return self._reply(429, _hook_deny("rate limit exceeded"))
         try:
             length = int(self.headers.get("Content-Length", 0))
+            err, code = (
+                ("request body too large", 413) if length > MAX_BODY_SIZE else (None, 0)
+            )
         except (ValueError, TypeError):
-            return self._reply(400, _hook_deny("invalid Content-Length"))
-        if length > MAX_BODY_SIZE:
-            return self._reply(413, _hook_deny("request body too large"))
+            err, code = "invalid Content-Length", 400
+        if err:
+            return self._reply(code, _hook_deny(err))
         body = self.rfile.read(length) if length else b""
 
         # HMAC check before _audit: a forged POST is dropped at the door, so
