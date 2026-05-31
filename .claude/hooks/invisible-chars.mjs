@@ -23,6 +23,10 @@ export const STRIP = new RegExp(
 
 export const LONG_RUN_THRESHOLD = 10;
 
+/** Total invisible-char count above which a file/prompt is treated as
+ * payload-capable even without a long run (threshold-evasion catch). */
+export const SCATTERED_THRESHOLD = 30;
+
 export const LONG_RUN_RE = new RegExp(
   `(?:${STRIP.source}){${LONG_RUN_THRESHOLD},}`,
   "gu",
