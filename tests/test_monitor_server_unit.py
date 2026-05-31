@@ -327,11 +327,20 @@ def test_rotate_promotes_current_to_dot1(mod, tmp_path, capsys):
     assert not log.exists()
     rotated = tmp_path / "audit.jsonl.1"
     assert rotated.exists() and rotated.stat().st_size == 200
-    assert "audit log rotated" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "audit log rotated" in err
+    manifest = json.loads((tmp_path / "audit.jsonl.manifest").read_text().strip())
+    assert manifest["bytes"] == 200
+    assert manifest["rotated"].endswith("audit.jsonl.1")
+    assert len(manifest["sha256"]) == 64
+    # Same record echoed to stderr.
+    assert manifest["sha256"] in err
 
 
 def test_rotate_drops_oldest_at_k_plus_one(mod, tmp_path):
-    """After K+1 rotations the very first archive must be gone."""
+    """After K+1 rotations the oldest archive is gone, but the manifest
+    keeps a tamper-evident record of every rotated file — so a flooder
+    can't silently push a damning record out of the K window."""
     log = tmp_path / "audit.jsonl"
     mod.AUDIT_LOG = str(log)
     mod.AUDIT_MAX_SIZE_BYTES = 10
@@ -339,11 +348,21 @@ def test_rotate_drops_oldest_at_k_plus_one(mod, tmp_path):
     for tag in range(1, 5):  # 4 = K + 1 rotations
         log.write_text(f"gen{tag}\n" + "x" * 100)
         mod._maybe_rotate()
-    # Generations gen2..gen4 survive in .1..K; gen1 was dropped.
-    survivors = sorted(p.name for p in tmp_path.iterdir())
+    survivors = sorted(p.name for p in tmp_path.iterdir() if "manifest" not in p.name)
     assert survivors == ["audit.jsonl.1", "audit.jsonl.2", "audit.jsonl.3"]
     contents = [(tmp_path / n).read_text().splitlines()[0] for n in survivors]
     assert contents == ["gen4", "gen3", "gen2"]
+    # Manifest preserved all 4 rotations even though only 3 archives remain.
+    manifest = (tmp_path / "audit.jsonl.manifest").read_text().splitlines()
+    assert len(manifest) == 4
+    entries = [json.loads(line) for line in manifest]
+    assert [e["lines"] for e in entries] == [1, 1, 1, 1]
+    assert all(len(e["sha256"]) == 64 for e in entries)
+    # The hash for gen1 (the dropped archive) is still in the manifest.
+    import hashlib
+
+    gen1_sha = hashlib.sha256(b"gen1\n" + b"x" * 100).hexdigest()
+    assert entries[0]["sha256"] == gen1_sha
 
 
 def test_rotate_missing_log_noop(mod, tmp_path):
