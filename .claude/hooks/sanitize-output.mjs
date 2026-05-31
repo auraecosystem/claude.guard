@@ -33,10 +33,9 @@ import styleToObject from "style-to-object";
 // ─── Layer 2: HTML sanitization (rehype + remark) ────────────────────────────
 
 export function isHiddenStyle(styleStr) {
-  // style-to-object throws on syntactically invalid CSS (missing colon,
-  // stray characters). A browser would ignore the broken declaration, so
-  // we match that semantics rather than letting the exception escape and
-  // suppress the entire tool output via the top-level try/catch.
+  // style-to-object throws on syntactically invalid CSS; a browser would
+  // ignore the broken declaration, so we do too rather than letting the
+  // exception escape and suppress the entire tool output.
   let rawProps;
   try {
     // @ts-ignore -- style-to-object default export not resolved under NodeNext
@@ -46,10 +45,8 @@ export function isHiddenStyle(styleStr) {
   }
   if (!rawProps) return false;
 
-  // CSS property names are case-insensitive in the spec and `!important` is
-  // a legal trailing flag. style-to-object preserves both verbatim, so
-  // `<div style="DISPLAY:NONE !important">` would otherwise evade the
-  // equality checks below.
+  // CSS property names are case-insensitive and `!important` is a legal
+  // trailing flag; style-to-object preserves both verbatim.
   const props = {};
   for (const [k, v] of Object.entries(rawProps)) {
     props[k.toLowerCase()] = String(v).replace(/\s*!\s*important\s*$/i, "");
@@ -91,7 +88,7 @@ export function isHiddenStyle(styleStr) {
   return false;
 }
 
-function isHiddenOrDangerous(node) {
+export function isHiddenOrDangerous(node) {
   /* c8 ignore next -- comments are stripped by the remark pipeline before reaching rehype; defense-in-depth if pipeline order changes */
   if (node.type === "comment") return true;
   if (node.type !== "element") return false;
@@ -110,11 +107,8 @@ const htmlSanitizer = unified()
   .use(function () {
     return (tree) => remove(tree, isHiddenOrDangerous);
   })
-  // clobberPrefix defaults to "user-content-" and is re-applied on every
-  // pass, causing unbounded id-attribute growth across re-sanitization
-  // (id="" → id="user-content-" → id="user-content-user-content-" → …).
-  // Tool output rendered to the model has no use for the GitHub-style
-  // namespace, so disable it.
+  // clobberPrefix defaults to "user-content-" and re-applies every pass —
+  // makes sanitize non-idempotent (unbounded id growth). Disable.
   // @ts-ignore -- rehype-sanitize plugin type not compatible with unified overload resolution
   .use(rehypeSanitize, { ...defaultSchema, clobberPrefix: "" })
   .use(rehypeStringify);
@@ -415,13 +409,8 @@ function extractToolText(toolOutput) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-// Guard so importing this module (e.g. from property tests) does not
-// block on stdin or emit a hook response. `process.argv[1]` is the entry
-// script path; converted to a file:// URL it equals `import.meta.url`
-// only when this file *is* the entry.
-const isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
-
-if (isMain)
+// Guard so importing (e.g. property tests) doesn't block on stdin.
+if (import.meta.url === pathToFileURL(process.argv[1]).href)
   try {
     const input = await readStdinJson();
 
