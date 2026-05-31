@@ -29,7 +29,7 @@ uv_install_if_missing() {
 }
 
 #######################################
-# Pinned tool versions + sha256 (linux-amd64)
+# Pinned tool versions + sha256
 #######################################
 #
 # Why pinned: SessionStart hooks run BEFORE the monitor / deny-list see

@@ -1,9 +1,14 @@
 """Tests for .claude/hooks/session-setup.sh (a SessionStart hook).
 
-Migrated 1:1 from tests/bats/session-setup.bats. We exercise only the
-deterministic, network-free branches: clean exit on an empty repo, and the
-proxy-URL remote detection that exports GH_REPO into $CLAUDE_ENV_FILE. Tool
-installation (uv/webi/network) is never asserted on.
+Two slices:
+
+1. The original deterministic, network-free branches migrated 1:1 from
+   tests/bats/session-setup.bats — clean exit on an empty repo, and
+   proxy-URL remote detection that exports GH_REPO into $CLAUDE_ENV_FILE.
+2. The pinned-install supply-chain path. We never touch the network: a
+   stubbed `curl` on PATH serves a fixture payload and a stubbed `uname`
+   forces a target platform. The tests then assert on the resulting
+   file state and stderr warnings.
 """
 
 import hashlib
