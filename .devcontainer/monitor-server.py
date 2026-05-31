@@ -152,11 +152,11 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         if isinstance(envelope, dict) and envelope.get("_audit_only"):
             try:
                 self._audit(envelope, "audit-only", envelope.get("_audit_reason", ""))
-                code, body = 200, {"audit_only": True, "ok": True}
+                code, payload = 200, {"audit_only": True, "ok": True}
             except OSError as e:
                 print(f"FATAL: audit write failed: {e}", file=sys.stderr)
-                code, body = 500, {"audit_only": True, "ok": False, "error": str(e)}
-            return self._reply(code, json.dumps(body).encode())
+                code, payload = 500, {"audit_only": True, "ok": False, "error": str(e)}
+            return self._reply(code, json.dumps(payload).encode())
 
         try:
             monitor = _load_monitor()
