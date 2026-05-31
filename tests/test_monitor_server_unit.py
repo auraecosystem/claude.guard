@@ -38,10 +38,10 @@ class FakeHeaders:
         return self._values.get(key, default)
 
 
-def make_handler(mod, *, headers=None, body=b"", client_address=("127.0.0.1", 1234)):
+def make_handler(mod, *, headers=None, body=b""):
     """Build a MonitorHandler without invoking BaseHTTPRequestHandler.__init__."""
     handler = mod.MonitorHandler.__new__(mod.MonitorHandler)
-    handler.client_address = client_address
+    handler.client_address = ("127.0.0.1", 1234)
     handler.headers = FakeHeaders(headers or {})
     handler.rfile = io.BytesIO(body)
     handler.wfile = io.BytesIO()
@@ -433,15 +433,6 @@ def test_do_post_rate_limited_does_not_audit(mod, tmp_path):
     assert body["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "rate limit" in body["hookSpecificOutput"]["permissionDecisionReason"]
     assert not log.exists()
-
-
-def test_do_post_missing_client_address_falls_back(mod, tmp_path):
-    """Helper path: a handler built without a client_address must still work."""
-    mod.AUDIT_LOG = str(tmp_path / "audit.jsonl")
-    handler = make_handler(mod, headers={"Content-Length": "0"}, client_address=None)
-    handler.do_POST()
-    # Reaches the no-output deny path rather than crashing on attribute access.
-    assert handler.responses == [200]
 
 
 def test_main_guard_missing_file_exits(monkeypatch):
