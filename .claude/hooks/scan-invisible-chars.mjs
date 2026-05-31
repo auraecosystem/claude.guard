@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import {
   LONG_RUN_RE,
   LONG_RUN_THRESHOLD,
+  SCATTERED_THRESHOLD as TOTAL_INVISIBLE_THRESHOLD,
   STRIP,
   stripInvisible,
 } from "./invisible-chars.mjs";
@@ -27,7 +28,6 @@ const ALERT_FILE = join(
   tmpdir(),
   `.claude-invisible-char-alert-${PROJECT_HASH}`,
 );
-const TOTAL_INVISIBLE_THRESHOLD = 30;
 
 // Decoder
 
