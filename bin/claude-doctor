@@ -169,6 +169,24 @@ else
   degrade "no monitor API key — tool calls run unmonitored"
 fi
 
+# ── Most recent panic snapshot (informational; never changes verdict) ────────
+# Surfaces where to look if claude-panic has been run recently. Reads the host
+# panic dir directly — no docker call, no volume mount — so it works even with
+# Docker down or the workspace volumes gone.
+status "Panic snapshots"
+panic_root="${CLAUDE_PANIC_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-monitor/panic}"
+if [[ -d "$panic_root" ]]; then
+  # find ... -maxdepth 3: <panic_root>/<workspace-id>/<UTC>/ — newest wins.
+  latest_snap=$(find "$panic_root" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | sort | tail -1)
+  if [[ -n "$latest_snap" ]]; then
+    printf '   latest snapshot: %s\n' "$latest_snap"
+  else
+    printf '   no snapshots under %s yet\n' "$panic_root"
+  fi
+else
+  printf '   no panic dir at %s (run claude-panic to create one)\n' "$panic_root"
+fi
+
 # ── Prebuilt image for the next launch (informational; never changes verdict) ─
 # Building locally is the safe default, not a degradation — so this only reports
 # what the next `claude` launch will do, mirroring bin/lib/resolve-image.bash.
