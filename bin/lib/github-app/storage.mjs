@@ -20,7 +20,9 @@ export function paths() {
   };
 }
 
-async function atomicWrite(target, body) {
+// Atomic-write a file under the github-app config dir: ensure the dir is
+// 0700, write to .tmp at 0600, rename over the target.
+export async function atomicWrite(target, body) {
   const dir = path.dirname(target);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.chmod(dir, 0o700);
@@ -62,13 +64,10 @@ export async function readPem() {
 
 // Snapshot of what's installed: { dir, meta, pem } for the CLI's status cmd.
 export async function status() {
-  const out = { dir: paths().dir, meta: null, pem: false };
-  out.meta = await readMeta().catch(() => null);
-  try {
-    await loadPem({ backend: out.meta?.pem_backend ?? "file" });
-    out.pem = true;
-  } catch {
-    /* missing */
-  }
-  return out;
+  const meta = await readMeta().catch(() => null);
+  const pem = await loadPem({ backend: meta?.pem_backend ?? "file" }).then(
+    () => true,
+    () => false,
+  );
+  return { dir: paths().dir, meta, pem };
 }

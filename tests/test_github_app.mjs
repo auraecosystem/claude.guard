@@ -1,6 +1,7 @@
-// Tests for bin/lib/github-app: JWT structure + signature, and storage perms.
-// Network paths (manifest conversion, token endpoint) are not exercised here —
-// add an integration test behind an env flag when wiring CI.
+// Tests for bin/lib/github-app: JWT, manifest invariants, storage perms,
+// keychain backends, CLI parseArgs. Network paths (manifest conversion,
+// installation tokens) are exercised in test_github_app_integration.mjs
+// behind CLAUDE_GH_APP_INTEGRATION=1.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -9,14 +10,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-import { buildJwt } from "../bin/lib/github-app/token.mjs";
+import {
+  buildJwt,
+  mintInstallationToken,
+} from "../bin/lib/github-app/token.mjs";
 import { buildManifest } from "../bin/lib/github-app/manifest-flow.mjs";
 import { parseArgs } from "../bin/lib/github-app/cli.mjs";
-import {
-  probeBackend,
-  storePem,
-  loadPem,
-} from "../bin/lib/github-app/keychain.mjs";
+import * as kc from "../bin/lib/github-app/keychain.mjs";
+import * as storage from "../bin/lib/github-app/storage.mjs";
 
 function genKeypair() {
   return crypto.generateKeyPairSync("rsa", {
@@ -26,14 +27,23 @@ function genKeypair() {
   });
 }
 
+async function tmpXdg(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghapp-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  process.env.XDG_CONFIG_HOME = dir;
+  return dir;
+}
+
 test("buildJwt: header + payload claims match GitHub's spec", () => {
   const { privateKey } = genKeypair();
   const now = 1_700_000_000;
   const jwt = buildJwt({ appId: 12345, pem: privateKey, now });
   const [h, p] = jwt.split(".");
-  const header = JSON.parse(Buffer.from(h, "base64url").toString());
+  assert.deepEqual(JSON.parse(Buffer.from(h, "base64url").toString()), {
+    alg: "RS256",
+    typ: "JWT",
+  });
   const payload = JSON.parse(Buffer.from(p, "base64url").toString());
-  assert.deepEqual(header, { alg: "RS256", typ: "JWT" });
   assert.equal(payload.iss, "12345");
   assert.equal(payload.iat, now - 60);
   assert.equal(payload.exp, now + 9 * 60);
@@ -45,34 +55,22 @@ test("buildJwt: signature verifies with the matching public key", () => {
   const [h, p, s] = jwt.split(".");
   const verifier = crypto.createVerify("RSA-SHA256");
   verifier.update(`${h}.${p}`);
-  const ok = verifier.verify(publicKey, Buffer.from(s, "base64url"));
-  assert.equal(ok, true);
+  assert.equal(verifier.verify(publicKey, Buffer.from(s, "base64url")), true);
 });
 
 test("storage: readPem refuses world-readable key (file backend)", async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghapp-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  process.env.XDG_CONFIG_HOME = dir;
-  const storage = await import(
-    `../bin/lib/github-app/storage.mjs?cachebust=${Date.now()}`
-  );
+  await tmpXdg(t);
   await storage.saveAppCreds({
     meta: { app_id: 1, app_slug: "x", client_id: "c", html_url: "h" },
     pem: "DUMMY",
     backend: "file",
   });
-  const { pem } = storage.paths();
-  await fs.chmod(pem, 0o644);
+  await fs.chmod(storage.paths().pem, 0o644);
   await assert.rejects(() => storage.readPem(), /insecure permissions/);
 });
 
 test("storage: saveAppCreds round-trip with file backend", async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghapp-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  process.env.XDG_CONFIG_HOME = dir;
-  const storage = await import(
-    `../bin/lib/github-app/storage.mjs?cachebust=${Date.now()}`
-  );
+  await tmpXdg(t);
   const meta = {
     app_id: 42,
     app_slug: "demo",
@@ -81,10 +79,8 @@ test("storage: saveAppCreds round-trip with file backend", async (t) => {
   };
   await storage.saveAppCreds({ meta, pem: "PEMBODY", backend: "file" });
   const p = storage.paths();
-  const stMeta = await fs.stat(p.meta);
-  const stPem = await fs.stat(p.pem);
-  assert.equal(stMeta.mode & 0o777, 0o600);
-  assert.equal(stPem.mode & 0o777, 0o600);
+  assert.equal((await fs.stat(p.meta)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(p.pem)).mode & 0o777, 0o600);
   const readBack = await storage.readMeta();
   assert.equal(readBack.app_id, meta.app_id);
   assert.equal(readBack.pem_backend, "file");
@@ -100,7 +96,6 @@ test("manifest invariants: permissions are exactly the agreed-on set", () => {
   assert.equal(m.hook_attributes.active, false);
   assert.deepEqual(m.default_events, []);
   // If this assertion breaks, someone widened the scope of every user's App.
-  // Re-evaluate before updating the test.
   assert.deepEqual(Object.keys(m.default_permissions).sort(), [
     "contents",
     "issues",
@@ -115,30 +110,13 @@ test("manifest invariants: permissions are exactly the agreed-on set", () => {
 });
 
 test("token: mintInstallationToken errors clearly when no install id known", async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghapp-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  process.env.XDG_CONFIG_HOME = dir;
-  const { privateKey } = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  });
-  const storage = await import(
-    `../bin/lib/github-app/storage.mjs?cachebust=${Date.now()}`
-  );
+  await tmpXdg(t);
+  const { privateKey } = genKeypair();
   await storage.saveAppCreds({
-    meta: {
-      app_id: 1,
-      app_slug: "x",
-      client_id: "c",
-      html_url: "h",
-    },
+    meta: { app_id: 1, app_slug: "x", client_id: "c", html_url: "h" },
     pem: privateKey,
     backend: "file",
   });
-  const { mintInstallationToken } = await import(
-    `../bin/lib/github-app/token.mjs?cachebust=${Date.now()}`
-  );
   await assert.rejects(
     () => mintInstallationToken({}),
     /no installation_id known/,
@@ -173,15 +151,9 @@ for (const [name, args, expected] of [
 }
 
 test("keychain: file backend round-trip via the public API", async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghapp-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  process.env.XDG_CONFIG_HOME = dir;
-  const kc = await import(
-    `../bin/lib/github-app/keychain.mjs?cachebust=${Date.now()}`
-  );
+  await tmpXdg(t);
   // Force file backend so the test runs anywhere (no keychain daemons in CI).
-  const b = await kc.storePem("PEM-BODY", { backend: "file" });
-  assert.equal(b, "file");
+  assert.equal(await kc.storePem("PEM-BODY", { backend: "file" }), "file");
   assert.equal(await kc.loadPem({ backend: "file" }), "PEM-BODY");
 });
 
@@ -193,24 +165,12 @@ test("keychain: probeBackend falls back to file when no keychain bin on PATH", a
   t.after(() => {
     process.env.PATH = origPath;
   });
-  const kc = await import(
-    `../bin/lib/github-app/keychain.mjs?cachebust=${Date.now()}`
-  );
   assert.equal(await kc.probeBackend(), "file");
 });
 
 test("token: pem_backend pinned to file survives round-trip after save", async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ghapp-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  process.env.XDG_CONFIG_HOME = dir;
-  const { privateKey } = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  });
-  const storage = await import(
-    `../bin/lib/github-app/storage.mjs?cachebust=${Date.now()}`
-  );
+  await tmpXdg(t);
+  const { privateKey } = genKeypair();
   await storage.saveAppCreds({
     meta: { app_id: 7, app_slug: "y", client_id: "c", html_url: "h" },
     pem: privateKey,
@@ -220,6 +180,5 @@ test("token: pem_backend pinned to file survives round-trip after save", async (
   assert.equal(meta.pem_backend, "file");
   // readPem must use the pinned backend, not re-probe (which on a CI box
   // with `security` shimmed could go to the wrong backend).
-  const pem = await storage.readPem();
-  assert.ok(pem.includes("PRIVATE KEY"));
+  assert.ok((await storage.readPem()).includes("PRIVATE KEY"));
 });

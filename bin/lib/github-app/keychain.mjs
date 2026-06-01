@@ -14,7 +14,7 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
-import { paths } from "./storage.mjs";
+import { atomicWrite, paths } from "./storage.mjs";
 
 const SERVICE = "claude-github-app";
 const ACCOUNT = "private-key";
@@ -36,7 +36,6 @@ function run(cmd, args, input) {
 // $PATH walk without invoking the binary — avoids shell interpolation and
 // avoids side effects from `--version` probes on tools that don't support it.
 async function has(cmd) {
-  if (/[/\\]/.test(cmd)) return false;
   for (const dir of (process.env.PATH ?? "")
     .split(path.delimiter)
     .filter(Boolean)) {
@@ -99,23 +98,16 @@ const BACKENDS = {
       ]),
   },
   file: {
-    async store(v) {
-      const p = paths();
-      await fs.mkdir(p.dir, { recursive: true, mode: 0o700 });
-      await fs.chmod(p.dir, 0o700);
-      const tmp = p.pem + ".tmp";
-      await fs.writeFile(tmp, v, { mode: 0o600 });
-      await fs.rename(tmp, p.pem);
-    },
+    store: (v) => atomicWrite(paths().pem, v),
     async load() {
-      const p = paths();
-      const perms = (await fs.stat(p.pem)).mode & 0o777;
+      const { pem } = paths();
+      const perms = (await fs.stat(pem)).mode & 0o777;
       if (perms & 0o077) {
         throw new Error(
-          `private key ${p.pem} has insecure permissions ${perms.toString(8)} (expected 600).`,
+          `private key ${pem} has insecure permissions ${perms.toString(8)} (expected 600).`,
         );
       }
-      return fs.readFile(p.pem, "utf8");
+      return fs.readFile(pem, "utf8");
     },
   },
 };
