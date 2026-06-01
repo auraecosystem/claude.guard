@@ -552,16 +552,21 @@ install_kata_static() {
     rm -rf "$tmpdir"
     return 1
   }
-  if [[ -n "$digest" && "$digest" == sha256:* ]]; then
-    if ! printf '%s  %s\n' "${digest#sha256:}" "$tarball" | sha256sum -c - >/dev/null 2>&1; then
-      warn "Kata tarball checksum mismatch — refusing to extract a tampered or corrupt download"
-      rm -rf "$tmpdir"
-      return 1
-    fi
-    status "Verified Kata tarball against the release sha256 digest"
-  else
-    warn "No sha256 digest published for $asset — extracting without verification"
+  # Fail closed: no digest means we cannot verify, so we do not extract an
+  # unverifiable runtime into / as root (an attacker tampering with the API
+  # response could otherwise just omit the digest to skip the check). Matches
+  # the gVisor path, which aborts if its .sha512 sidecar is missing.
+  if [[ -z "$digest" || "$digest" != sha256:* ]]; then
+    warn "No sha256 digest published for $asset — refusing to extract an unverifiable download"
+    rm -rf "$tmpdir"
+    return 1
   fi
+  if ! printf '%s  %s\n' "${digest#sha256:}" "$tarball" | sha256sum -c - >/dev/null 2>&1; then
+    warn "Kata tarball checksum mismatch — refusing to extract a tampered or corrupt download"
+    rm -rf "$tmpdir"
+    return 1
+  fi
+  status "Verified Kata tarball against the release sha256 digest"
   sudo tar xf "$tarball" -C /
   rm -rf "$tmpdir"
 }
