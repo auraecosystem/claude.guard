@@ -152,14 +152,22 @@ function closingTagName(htmlValue) {
 }
 
 function remarkSanitizeHtml() {
-  return async (tree) => {
+  return async (tree, file) => {
     const promises = [];
+    // Track whether HTML was *actually* sanitized (a node stripped or an
+    // attribute removed), as opposed to remark-stringify merely reformatting
+    // benign markdown. Only the former warrants the "HTML sanitized" warning;
+    // surfacing reformat-only churn trains the reader to ignore the warning.
+    let sanitized = false;
 
     visit(tree, "html", (node, _index, parent) => {
       if (parent?.type === "root") {
+        const original = node.value.trim();
         promises.push(
           htmlSanitizer.process(node.value).then((result) => {
-            node.value = String(result).trim();
+            const out = String(result).trim();
+            if (out !== original) sanitized = true;
+            node.value = out;
           }),
         );
       }
@@ -211,6 +219,7 @@ function remarkSanitizeHtml() {
 
       if (toRemove.size > 0) {
         node.children = children.filter((_, i) => !toRemove.has(i));
+        sanitized = true;
       }
       return SKIP;
     });
@@ -224,6 +233,7 @@ function remarkSanitizeHtml() {
         // @ts-ignore -- node.children exists on paragraph nodes in remark AST
         node.type === "paragraph" && node.children.length === 0,
     );
+    file.data.htmlSanitized = sanitized;
   };
 }
 
@@ -284,8 +294,23 @@ export async function sanitizeHtml(text) {
     if (!htmlHasDangerousNodes(text)) return null;
     return String(await htmlSanitizer.process(text)).trimEnd();
   }
-  const result = String(await remarkProcessor.process(text)).trimEnd();
-  return result === text ? null : result;
+  // Markdown branch. remark-stringify renormalizes the whole document (bullet
+  // style, table padding, blank-line spacing) as a side effect, so a benign file
+  // that merely *contains* a safe inline tag (a `<br>`, an HTML snippet in test
+  // fixtures) gets rewritten even when nothing dangerous is stripped. Returning
+  // that reformat-only churn would falsely flag "HTML sanitized" — noise that
+  // trains the reader to ignore the warning. remarkSanitizeHtml records on the
+  // VFile whether it *actually* stripped a node or attribute; suppress the
+  // change (and the warning) unless it did. We can't gate on htmlHasDangerousNodes
+  // up front because rehype-sanitize also strips benign-but-unlisted attributes
+  // (e.g. a non-hiding inline `style`) that isHiddenOrDangerous does not flag.
+  // htmlSanitized is now the sole "did we change anything meaningful" signal:
+  // when false we already returned null above, and when true the pipeline
+  // stripped a node/attribute, so the stringified result necessarily differs
+  // from the input — no second `result === text` comparison is needed.
+  const file = await remarkProcessor.process(text);
+  if (!file.data.htmlSanitized) return null;
+  return String(file).trimEnd();
 }
 
 // ─── Layer 3: Markdown/URL exfiltration detection ────────────────────────────
