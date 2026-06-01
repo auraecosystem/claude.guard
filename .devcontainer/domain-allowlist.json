@@ -10,6 +10,7 @@
   "github.com": "ro",
   "api.github.com": "ro",
   "registry.npmjs.org": "ro",
+  "registry.yarnpkg.com": "ro",
   "pypi.org": "ro",
   "files.pythonhosted.org": "ro",
   "raw.githubusercontent.com": "ro",
