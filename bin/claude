@@ -137,15 +137,11 @@ else
   fi
 fi
 
-# Per-project opt-in: domains the project itself lists under
-# sandbox.network.allowedDomains in its .claude/settings.json or
-# .claude/settings.local.json. Unioned into the host allowlist so a project can
-# reach one extra host without editing the global allowlist or dropping the
-# firewall wholesale (--dangerously-skip-firewall, which restores UNRESTRICTED
-# network). Read at launch only — the agent cannot widen its own live allowlist
-# mid-session — and the additions are announced on stderr so the grant is
-# visible. Malformed project settings fail closed rather than silently ignoring
-# the file. Prints a JSON array on stdout.
+# Per-project opt-in: union the domains a project lists under
+# sandbox.network.allowedDomains in its own .claude/settings(.local).json, so it
+# can reach one extra host without editing the global list or dropping the
+# firewall. Launch-time only (the agent can't widen its live allowlist); fails
+# closed on unparsable settings.
 host_project_extra_domains() {
   local arr='[]' file extra
   for file in "$workspace_folder/.claude/settings.json" "$workspace_folder/.claude/settings.local.json"; do
