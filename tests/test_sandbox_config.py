@@ -572,7 +572,6 @@ class TestWrapperUsesAutoMode:
         assert "CLAUDE_PERMISSION_MODE=bypassPermissions" in CCR_LAUNCH.read_text()
 
 
-@pytest.mark.skipif(_CLAUDE_BIN is None, reason="claude CLI not on PATH")
 class TestAutoModeAcceptedByCLI:
     """Integration check against the installed claude binary.
 
@@ -581,11 +580,14 @@ class TestAutoModeAcceptedByCLI:
     CLI doesn't recognize `auto`. These tests substantiate the claim to the
     extent verifiable here — the mode is real and accepted by this CLI — without
     asserting unverifiable internals (whether the gate is an LLM, what exactly
-    it blocks). Skips where claude isn't installed (e.g. the pytest CI image).
+    it blocks). Requires the claude CLI on PATH (CI installs the pinned one).
     """
 
     def test_auto_listed_in_help_choices(self) -> None:
-        assert _CLAUDE_BIN is not None
+        assert _CLAUDE_BIN is not None, (
+            "claude CLI not on PATH; install @anthropic-ai/claude-code "
+            "(CI installs the pinned version) so this integration test runs"
+        )
         result = subprocess.run(
             [_CLAUDE_BIN, "--help"],
             capture_output=True,
@@ -605,7 +607,10 @@ class TestAutoModeAcceptedByCLI:
         # only exercises argument validation: a recognized mode exits 0, an
         # unrecognized one is rejected. Proves `auto` is a real mode, not an
         # arbitrary string the CLI ignores.
-        assert _CLAUDE_BIN is not None
+        assert _CLAUDE_BIN is not None, (
+            "claude CLI not on PATH; install @anthropic-ai/claude-code "
+            "(CI installs the pinned version) so this integration test runs"
+        )
         ok = subprocess.run(
             [_CLAUDE_BIN, "--permission-mode", "auto", "--help"],
             capture_output=True,
