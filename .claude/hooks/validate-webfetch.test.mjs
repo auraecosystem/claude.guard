@@ -31,6 +31,15 @@ describe("validate-webfetch", () => {
       "inference APIs (rw domains)",
       { url: "https://api.anthropic.com/v1/messages" },
       /api\.anthropic\.com/,
+      // api.anthropic.com is rw while .anthropic.com is ro: longest-match must
+      // pin it to rw and emit the inference-API message, not the generic one.
+      /inference API/,
+    ],
+    [
+      "OpenRouter inference API",
+      { url: "https://openrouter.ai/api/v1/chat/completions" },
+      /openrouter\.ai/,
+      /inference API/,
     ],
     ["malformed URLs", { url: "not-a-url" }, /malformed/],
     ["no URL", {}, /no URL/],
@@ -106,16 +115,15 @@ describe("validate-webfetch", () => {
   });
 
   // Longest-match precedence: when ro and rw entries overlap, the most-
-  // specific suffix wins. Each case below picks a different shape: the
-  // PR-#136 regression (rw under ro apex), the symmetric case (ro under
-  // rw apex — confirms the fix didn't over-correct), a deep-chain walk to
-  // an apex, and the plain rw-apex case.
-  for (const [name, allowlist, url, expected] of [
+  // specific suffix wins. Each row picks a different shape; reasonMatch
+  // pins the deny-message variant where it matters.
+  for (const [name, allowlist, url, expected, reasonMatch] of [
     [
-      "rw under ro apex → deny",
+      "rw under ro apex → deny (inference-API message)",
       { "anthropic.com": "ro", "api.anthropic.com": "rw" },
       "https://api.anthropic.com/v1/messages",
       "deny",
+      /inference API/,
     ],
     [
       "ro under rw apex → allow",
@@ -130,10 +138,11 @@ describe("validate-webfetch", () => {
       "allow",
     ],
     [
-      "rw apex with no ro child → deny",
+      "rw apex with no ro child → deny (inference-API message)",
       { "evil.com": "rw" },
       "https://evil.com/x",
       "deny",
+      /inference API/,
     ],
   ]) {
     it(`longest-match: ${name}`, async () => {
@@ -161,10 +170,10 @@ describe("validate-webfetch", () => {
         assert.equal(result.code, 0, `nonzero exit; stderr: ${result.stderr}`);
         assert.equal(result.stderr, "", `unexpected stderr: ${result.stderr}`);
         if (expected === "deny") {
-          assert.equal(
-            JSON.parse(result.stdout).hookSpecificOutput.permissionDecision,
-            "deny",
-          );
+          const out = JSON.parse(result.stdout).hookSpecificOutput;
+          assert.equal(out.permissionDecision, "deny");
+          if (reasonMatch)
+            assert.match(out.permissionDecisionReason, reasonMatch);
         } else {
           assert.equal(result.stdout, "");
         }
