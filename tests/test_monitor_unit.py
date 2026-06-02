@@ -1073,9 +1073,19 @@ def test_call_api_parse_error_not_retried(mon, monkeypatch):
             ("allow", "", 5),
             id="fenced-plus-prose",
         ),
-        # Truncated mid-string (no closing brace) stays unparsable, not guessed.
+        # Truncated mid-reason (max_tokens cut): JSON won't parse, but the
+        # early decision/reason fields are recovered by the regex fallback.
         pytest.param(
-            '{"decision":"allow","reason":"the user', ("", "", None), id="truncated"
+            '{"decision":"allow","reason":"the user',
+            ("allow", "the user", None),
+            id="truncated-recovers-decision-reason",
+        ),
+        # Truncated right after suspicion, no reason field -> decision+suspicion
+        # recovered, reason empty.
+        pytest.param(
+            '{"decision":"deny","suspicion":30',
+            ("deny", "", 30),
+            id="truncated-recovers-suspicion",
         ),
     ],
 )
