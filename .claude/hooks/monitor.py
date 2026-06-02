@@ -181,15 +181,10 @@ _meta_storage = threading.local()
 
 
 def get_last_call_meta() -> dict | None:
-    """The meta from the current thread's most recent main() invocation, or
-    None if main() didn't make a successful API call (e.g. unparsable input,
-    no API key). monitor-server.py reads this after main() returns to mirror
-    cost into the tamper-resistant audit log."""
     return getattr(_meta_storage, "value", None)
 
 
-# Default price table location; override with MONITOR_PRICES. Co-located with
-# monitor.py so both shells (Python here, Bash in statusline) read one file.
+# Override with MONITOR_PRICES.
 DEFAULT_PRICES_PATH = Path(__file__).resolve().parent / "prices.json"
 
 
@@ -493,9 +488,7 @@ class ApiUsage(NamedTuple):
 
 @functools.lru_cache(maxsize=4)
 def _load_prices_from(path: str) -> dict:
-    """Parse + filter a prices.json. Cached by path so the long-lived sidecar
-    pays the disk read once, not per request. Tests can clear via
-    `_load_prices_from.cache_clear()` if they need to re-read."""
+    # Cached so the long-lived sidecar pays the disk read once per path.
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
@@ -508,22 +501,13 @@ def _load_prices_from(path: str) -> dict:
 
 
 def load_prices() -> dict:
-    """Return {model_id: {input, output, cache_read?, cache_write?}}; {} on error.
-
-    Per-model $/Mtok. Honors MONITOR_PRICES override. Failing soft (empty dict)
-    means an unknown model's cost is logged as null rather than blocking the
-    monitor call entirely — pricing is observability, not enforcement.
-    """
+    """{model_id: {input, output, cache_read?, cache_write?}} in $/Mtok.
+    Empty on error — missing prices log cost as null, never block the call."""
     return _load_prices_from(os.environ.get("MONITOR_PRICES", str(DEFAULT_PRICES_PATH)))
 
 
 def compute_cost(model: str, usage: ApiUsage, prices: dict) -> float | None:
-    """Compute USD cost for one call, or None when the model isn't priced.
-
-    Provider-reported cost (OpenRouter) wins outright — it's the upstream's
-    own bill, not our estimate. Otherwise look up $/Mtok and apply, splitting
-    cached vs fresh input tokens when the model entry includes cache prices.
-    """
+    """USD cost for one call. Provider-reported wins; else local price table."""
     if usage.cost_usd is not None:
         return usage.cost_usd
     entry = prices.get(model)
@@ -940,12 +924,8 @@ def log_decision(
     try:
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        # Log the full tool input and full verdict — not the head-only slice the
-        # monitor LLM was sent. A prefix slice would drop the command's tail,
-        # exactly where an exfil payload hides, so this record must be complete.
-        # meta carries cost / token / latency fields under one nested key — same
-        # shape the sidecar mirrors into the tamper-resistant audit log, so
-        # downstream readers (statusline, claude-audit) parse one path.
+        # Log the full tool input and verdict, not the head-only slice the
+        # monitor LLM was sent — a prefix would drop the tail where exfil hides.
         entry = json.dumps(
             {
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1014,11 +994,7 @@ def _build_meta(
     api_ms: int | None = None,
     total_ms: int | None = None,
 ) -> dict:
-    """One shape for per-call billing/latency metadata, used by both writers:
-    the in-process thread-local that monitor-server.py mirrors into the
-    tamper-resistant audit log, and the "meta" field of monitor.jsonl.
-    Single source of truth so adding a token field doesn't have to be edited
-    in two places."""
+    """Single shape written into both monitor.jsonl's .meta and the audit log."""
     return {
         "model": model,
         "session_id": session_id,
@@ -1033,8 +1009,6 @@ def _build_meta(
 
 
 def _stash_meta(meta: dict) -> None:
-    """Publish per-call metadata so monitor-server.py can mirror it into the
-    tamper-resistant audit log (it imports this module and reads after main())."""
     _meta_storage.value = meta
 
 
@@ -1139,13 +1113,8 @@ def handle_permission_denied(envelope: dict) -> None:
 
 
 def print_session_summary() -> None:
-    """SessionEnd hook: print this session's monitor LLM spend to stdout.
-
-    Reads session_id from the hook envelope on stdin; tallies the cost field
-    across matching entries in monitor.jsonl (current nested .meta shape with
-    a flat .cost_usd fallback for pre-upgrade entries). Silent when there's
-    nothing to report — no session, no log, no priced calls — so a normal
-    quit on a no-monitor session doesn't print a useless "$0.00" line."""
+    """SessionEnd hook: print this session's monitor spend. Silent on nothing
+    to report so a hooks-only session doesn't get a "$0.00" goodbye line."""
     try:
         envelope = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, ValueError):

@@ -16,6 +16,7 @@ poison the audit log.
 
 import hmac
 import http.server
+import importlib.util
 import io
 import json
 import os
@@ -55,11 +56,8 @@ AUDIT_HISTORY_READ_BYTES = int(
 
 _monitor_module = None
 _state_lock = threading.Lock()
-# Dedicated lock for the import-cache: keeps the rate-limit lock from being
-# held across a (slow) module load on the first request. Concurrent first
-# callers race past `if _monitor_module is None` otherwise — one wins the
-# assignment, the other reads the half-initialized module and dies with
-# AttributeError: module 'monitor' has no attribute 'main'.
+# Separate from _state_lock so a slow first-time module load doesn't stall
+# concurrent rate-limit / rotation work.
 _load_lock = threading.Lock()
 _buckets: dict = {}
 
@@ -136,23 +134,18 @@ def _augment_with_history(envelope, body):
 
 
 def _load_monitor():
-    global _monitor_module
-    # Fast path: once loaded, no locking. Double-checked under the lock to
-    # avoid concurrent first-callers exec_module'ing the same spec twice and
-    # one returning a half-populated module to its handler thread.
-    if _monitor_module is not None:
-        return _monitor_module
+    """Import monitor.py on the first call; return the cached module thereafter.
+    The lock serializes concurrent first-callers so exec_module runs exactly
+    once — a half-populated module reaching a handler thread would crash with
+    AttributeError on the first attribute access."""
+    global _monitor_module  # noqa: PLW0603
     with _load_lock:
         if _monitor_module is None:
-            import importlib.util
-
             spec = importlib.util.spec_from_file_location("monitor", MONITOR_SCRIPT)
             if spec is None or spec.loader is None:
                 raise RuntimeError(f"cannot load {MONITOR_SCRIPT}: invalid module spec")
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            # Publish only after exec_module completes — other threads must
-            # never see a module whose top-level statements haven't all run.
             _monitor_module = mod
         return _monitor_module
 
@@ -204,13 +197,8 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
     @staticmethod
     def _audit(envelope, decision, reason, suspicion=None, meta=None):
-        """One record per call: the attempted call and the verdict on it.
-
-        meta carries per-call cost / token / model fields published by
-        monitor.main() in the same process — captured here so the
-        tamper-resistant audit log records what the call billed, not just what
-        it asked for. None for audit-only short-circuits (no LLM call was made).
-        """
+        """One record per call: the attempted call, the verdict, and meta (cost
+        / tokens / model from monitor.main(); None for audit-only short-circuits)."""
         entry = json.dumps(
             {
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -282,11 +270,8 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 monitor.main()
             finally:
                 sys.stdin, sys.stdout = old_stdin, old_stdout
-            # monitor.main() publishes per-call cost / tokens / model into a
-            # thread-local slot; read it now so the audit record below carries
-            # the billing info, not just the verdict. Thread-local (not a
-            # plain global) is what keeps concurrent POSTs from clobbering
-            # each other's meta between main() returning and this read.
+            # Thread-local on monitor.py's side — a module global would let
+            # concurrent POSTs clobber each other between main() and this read.
             call_meta = monitor.get_last_call_meta()
             output = captured.getvalue().strip()
             response = (
