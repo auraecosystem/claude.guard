@@ -332,6 +332,33 @@ class TestFirewallConfig:
     def test_squid_blocks_writes_to_ro_domains(self) -> None:
         assert "deny !safe_methods readonly_domains" in self.content
 
+    def test_ipset_population_is_not_ro_rw_gated(self) -> None:
+        """A ro endpoint must stay reachable for the sidecars (monitor/ccr) that
+        egress directly. They are gated by the iptables ipset, not squid, so the
+        ipset/DNS build must add EVERY allowlisted domain regardless of its ro/rw
+        tag. If this region ever started filtering on the tag, a ro provider
+        endpoint (e.g. openrouter.ai) would drop out of the set and the monitor
+        could not reach it — exactly the breakage this guards against."""
+        resolve = self.content[
+            self.content.index(
+                '"${!DOMAIN_ACCESS[@]}" >"$_dns_query"'
+            ) : self.content.index("Squid proxy for GET/HEAD-only")
+        ]
+        assert 'ipset add allowed-domains "$ip"' in resolve
+        assert '== "ro"' not in resolve and '== "rw"' not in resolve
+
+    def test_ro_tag_consumed_only_by_squid_readonly_list(self) -> None:
+        """The ro/rw distinction is a squid-only concept: the sole place a domain
+        is selected by its access tag is building squid's readonly-domains list,
+        which method-restricts the *proxied agent*. Sidecars bypass squid (see
+        check-compose-lifecycle.bash), so ro never restricts their POSTs."""
+        squid = self.content[
+            self.content.index("Squid proxy for GET/HEAD-only") : self.content.index(
+                "squid started"
+            )
+        ]
+        assert '== "ro"' in squid
+
     def test_invalid_access_value_aborts(self) -> None:
         """The squid policy bumps (GET/HEAD-only) domains matching `== "ro"` and
         SPLICES everything else with no method restriction. So an unrecognized
