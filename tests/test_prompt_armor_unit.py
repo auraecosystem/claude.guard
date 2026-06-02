@@ -6,6 +6,8 @@ so coverage measures real lines with no network call. End-to-end wiring through
 sanitize-output.mjs is covered by its JS integration test.
 """
 
+# covers: .claude/hooks/prompt-armor.py
+
 import importlib.util
 import io
 import json
