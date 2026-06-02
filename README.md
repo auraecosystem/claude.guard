@@ -86,7 +86,7 @@ The monitor is the trusted second opinion — in auto mode (`claude`), it review
 **Which key?** (auto-detected from whichever you set; override with `MONITOR_PROVIDER`)
 
 - On a **claude.ai subscription** → `MONITOR_API_KEY`. Monitor-only: the CLI never sees it, so it stays on the subscription instead of billing the API.
-- **OK billing the API** → `ANTHROPIC_API_KEY`, `VENICE_INFERENCE_KEY`, or `OPENROUTER_API_KEY`. OpenRouter is kept **out** of the static allowlist (no component uses it out of the box), but the firewall **auto-allowlists `openrouter.ai` (read-only) when OpenRouter is the configured monitor provider** — detected from `OPENROUTER_API_KEY`/`MONITOR_PROVIDER`, the same signals the monitor uses — so no manual edit is needed.
+- **OK billing the API** → `ANTHROPIC_API_KEY`, `VENICE_INFERENCE_KEY`, or `OPENROUTER_API_KEY`.
 - Using **`claude-paranoid`** → must be `VENICE_INFERENCE_KEY` (its only allowed provider — E2EE, no closed lab).
 - **Don't want a monitor** → `MONITOR_DISABLED=1`.
 
