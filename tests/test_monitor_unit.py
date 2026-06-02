@@ -33,6 +33,16 @@ def _load():
     return mod
 
 
+def _api_mod():
+    """Return the monitorlib.api module for patching internal transport functions.
+
+    Functions like _proxy_configured and _acquire_conn live in monitorlib.api, not
+    in the monitor.py facade. Patching the facade does not reach their call sites;
+    patch the real module instead.
+    """
+    return sys.modules["monitorlib.api"]
+
+
 # Canonical shell-metachar list, loaded once at collection time so it can drive
 # parametrize ids. The per-test `mon` fixture loads its own fresh module.
 _MONITOR_METACHARS = _load()._SHELL_METACHARS
@@ -78,6 +88,23 @@ def mon(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("MONITOR_LOG", str(tmp_path / "log.jsonl"))
     return m
+
+
+@pytest.fixture(autouse=True)
+def _default_urllib_transport(monkeypatch):
+    """Route call_api through the proxy-aware urllib path by default.
+
+    Most tests drive main()/handle_permission_denied with a stubbed
+    urllib.request.urlopen; setting a proxy env makes the real
+    _proxy_configured() select that path (without ever touching a real proxy,
+    since urlopen is mocked). Tests for the keep-alive path override
+    _proxy_configured explicitly, and the _proxy_configured tests stub
+    getproxies/proxy_bypass directly, so both keep working.
+    """
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
+    monkeypatch.setenv("https_proxy", "http://proxy.invalid:3128")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
 
 
 def _stdin(monkeypatch, mon, envelope: dict):
@@ -871,7 +898,50 @@ class _FakeResp:
         return False
 
 
+class _FakeConn:
+    """Stand-in for an http.client connection in call_api / _http_post tests."""
+
+    def __init__(
+        self,
+        *,
+        status=200,
+        payload=None,
+        raw=None,
+        raise_on_request=None,
+        raise_on_getresponse=None,
+    ):
+        self.status = status
+        if raw is not None:
+            self._body = raw
+        elif payload is not None:
+            self._body = json.dumps(payload).encode()
+        else:
+            self._body = b""
+        self._raise_request = raise_on_request
+        self._raise_getresponse = raise_on_getresponse
+        self.sent = None
+        self.closed = False
+
+    def request(self, method, path, body=None, headers=None):
+        if self._raise_request:
+            raise self._raise_request
+        self.sent = {"method": method, "path": path, "body": body, "headers": headers}
+
+    def getresponse(self):
+        if self._raise_getresponse:
+            raise self._raise_getresponse
+        return self
+
+    def read(self):
+        return self._body
+
+    def close(self):
+        self.closed = True
+
+
 def test_call_api_anthropic_success(mon, monkeypatch):
+    # Proxy path: verify auth headers, cache_control system prompt, tool forcing,
+    # and usage parsing. Response via text fallback (model ignores tool_choice).
     captured = {}
 
     def fake_urlopen(req, timeout=None):
@@ -892,12 +962,16 @@ def test_call_api_anthropic_success(mon, monkeypatch):
     monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
     content, usage = mon.call_api("anthropic", "key", "m", "http://x", "sys", "msg", 5)
     assert content == '{"decision":"allow"}'
+    # urllib titlecases header names.
     assert captured["headers"]["X-api-key"] == "key"
     # System prompt is sent as a cache_control: ephemeral block so its tokens
     # are read from cache on subsequent calls within the window.
     assert captured["body"]["system"] == [
         {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
     ]
+    # The verdict tool is forced on every request.
+    assert captured["body"]["tool_choice"] == {"type": "tool", "name": "emit_verdict"}
+    assert captured["body"]["tools"][0]["name"] == "emit_verdict"
     # Anthropic-shaped usage parsing keeps cache fields separate from prompt.
     assert usage == mon.ApiUsage(
         input_tokens=120,
@@ -909,6 +983,8 @@ def test_call_api_anthropic_success(mon, monkeypatch):
 
 
 def test_call_api_openai_wire_success(mon, monkeypatch):
+    # Proxy path: verify auth headers, system-as-message, tool forcing, usage.
+    # Response via content fallback (model ignores tool_choice).
     captured = {}
 
     def fake_urlopen(req, timeout=None):
@@ -932,6 +1008,12 @@ def test_call_api_openai_wire_success(mon, monkeypatch):
     assert captured["body"]["messages"][0]["role"] == "system"
     # Asks OpenRouter to return cost in the body (no-op for other openai-compat).
     assert captured["body"]["usage"] == {"include": True}
+    # The verdict tool is forced on every request.
+    assert captured["body"]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "emit_verdict"},
+    }
+    assert captured["body"]["tools"][0]["function"]["name"] == "emit_verdict"
     # Provider-reported cost survives into usage.cost_usd.
     assert usage == mon.ApiUsage(
         input_tokens=80,
@@ -942,78 +1024,476 @@ def test_call_api_openai_wire_success(mon, monkeypatch):
     )
 
 
+def test_call_api_anthropic_forces_tool_and_returns_input(mon, monkeypatch):
+    # Keep-alive path: the model answers through the forced verdict tool; call_api
+    # returns its input as a JSON string.
+    conn = _FakeConn(
+        payload={
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "emit_verdict",
+                    "input": {"decision": "allow", "reason": "ok"},
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    out, _usage = mon.call_api(
+        "anthropic", "key", "m", "https://api.x/v1/messages", "sys", "msg", 5
+    )
+    assert mon.parse_decision(out) == ("allow", "ok", None)
+    # http.client preserves header case.
+    assert conn.sent["headers"]["x-api-key"] == "key"
+    assert conn.sent["path"] == "/v1/messages"
+    body = json.loads(conn.sent["body"])
+    assert body["system"] == [
+        {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert body["tool_choice"] == {"type": "tool", "name": "emit_verdict"}
+    assert body["tools"][0]["name"] == "emit_verdict"
+
+
+def test_call_api_anthropic_falls_back_to_text(mon, monkeypatch):
+    # A model that ignores tool_choice and returns a text block still works.
+    conn = _FakeConn(
+        payload={"content": [{"type": "text", "text": '{"decision":"deny"}'}]}
+    )
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    out, _usage = mon.call_api(
+        "anthropic", "key", "m", "https://api.x/v1/messages", "sys", "msg", 5
+    )
+    assert out == '{"decision":"deny"}'
+
+
+def test_call_api_openai_forces_function_and_returns_arguments(mon, monkeypatch):
+    # OpenAI-shape forced tool use: the verdict comes back as the function
+    # call's arguments string.
+    conn = _FakeConn(
+        payload={
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "emit_verdict",
+                                    "arguments": '{"decision":"deny","reason":"rm"}',
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    out, _usage = mon.call_api(
+        "openai", "key", "m", "https://api.x/chat", "sys", "msg", 5
+    )
+    assert mon.parse_decision(out) == ("deny", "rm", None)
+    assert conn.sent["headers"]["Authorization"] == "Bearer key"
+    body = json.loads(conn.sent["body"])
+    assert body["messages"][0]["role"] == "system"
+    assert body["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "emit_verdict"},
+    }
+    assert body["tools"][0]["function"]["name"] == "emit_verdict"
+
+
+def test_call_api_openai_falls_back_to_content(mon, monkeypatch):
+    # A model that ignores tool_choice and answers in content still works.
+    conn = _FakeConn(
+        payload={"choices": [{"message": {"content": '{"decision":"allow"}'}}]}
+    )
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    out, _usage = mon.call_api(
+        "openai", "key", "m", "https://api.x/chat", "sys", "msg", 5
+    )
+    assert out == '{"decision":"allow"}'
+
+
+def test_call_api_unknown_wire_raises_before_any_request(mon, monkeypatch):
+    # An unrecognized wire must fail loud before any network attempt.
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(
+        _api_mod(),
+        "_acquire_conn",
+        lambda *a: pytest.fail("dialed despite unknown wire"),
+    )
+    with pytest.raises(ValueError):
+        mon.call_api("grpc", "key", "m", "https://api.x/", "sys", "msg", 5)
+
+
 def test_call_api_error_raises_runtimeerror(mon, monkeypatch):
     calls = {"n": 0}
 
-    def boom(req, timeout=None):
+    def acquire(key, timeout):
         calls["n"] += 1
-        raise urllib.error.URLError("down")
+        return _FakeConn(raise_on_getresponse=urllib.error.URLError("down"))
 
-    monkeypatch.setattr(mon.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", acquire)
     monkeypatch.setattr(mon.time, "sleep", lambda _s: None)
     monkeypatch.setenv("MONITOR_RETRIES", "2")
     with pytest.raises(RuntimeError):
-        mon.call_api("anthropic", "k", "m", "http://x", "s", "u", 1)
+        mon.call_api("anthropic", "k", "m", "https://x/", "s", "u", 1)
     # Exhausts every attempt (initial + 2 retries) before failing closed.
     assert calls["n"] == 3
 
 
 def test_call_api_retries_then_succeeds(mon, monkeypatch):
-    calls = {"n": 0}
+    seq = [
+        _FakeConn(raise_on_getresponse=urllib.error.URLError("blip")),
+        _FakeConn(raise_on_getresponse=urllib.error.URLError("blip")),
+        _FakeConn(payload={"content": [{"text": '{"decision":"allow"}'}]}),
+    ]
     slept = []
-
-    def flaky(req, timeout=None):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise urllib.error.URLError("blip")
-        return _FakeResp({"content": [{"text": '{"decision":"allow"}'}]})
-
-    monkeypatch.setattr(mon.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: seq.pop(0))
     monkeypatch.setattr(mon.time, "sleep", slept.append)
     monkeypatch.setenv("MONITOR_RETRIES", "2")
-    content, _usage = mon.call_api("anthropic", "k", "m", "http://x", "s", "u", 1)
-    assert content == '{"decision":"allow"}'
-    assert calls["n"] == 3
+    out, _usage = mon.call_api("anthropic", "k", "m", "https://x/", "s", "u", 1)
+    assert out == '{"decision":"allow"}'
     assert slept == [mon._RETRY_BACKOFF_SECS, mon._RETRY_BACKOFF_SECS * 2]
+
+
+def test_call_api_reuses_one_connection_across_calls(mon, monkeypatch):
+    # Drive the real _acquire_conn/_release_conn cache (not a stub) so the
+    # round trip proves what the sidecar relies on: a second call to the same
+    # host pops the connection the first call cached instead of dialing again.
+    mon._idle_conns.clear()
+    opened = []
+
+    def fake_https(host, port, timeout):
+        conn = _FakeConn(payload={"content": [{"text": '{"decision":"allow"}'}]})
+        opened.append(conn)
+        return conn
+
+    import http.client as _http_client
+
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_http_client, "HTTPSConnection", fake_https)
+    url = "https://api.x/v1/messages"
+    assert mon.call_api("anthropic", "k", "m", url, "s", "u", 5)
+    assert mon.call_api("anthropic", "k", "m", url, "s", "u", 5)
+    # One dial total: the second call reused the first call's cached connection.
+    assert len(opened) == 1
+    assert mon._idle_conns and mon._idle_conns[-1][1] is opened[0]
+    mon._idle_conns.clear()
+
+
+def test_call_api_drops_server_closed_conn_then_reopens(mon, monkeypatch):
+    # A cached keep-alive connection the server has since closed raises on
+    # reuse. It must be dropped (closed, never re-cached) and the retry must
+    # dial a fresh one — the reuse optimization must not strand a dead socket.
+    import http.client as _http_client
+
+    mon._idle_conns.clear()
+    stale = _FakeConn(raise_on_getresponse=_http_client.BadStatusLine("closed"))
+    fresh = _FakeConn(payload={"content": [{"text": '{"decision":"allow"}'}]})
+    key = ("https", "api.x", 443)
+    mon._release_conn(key, stale)  # pre-seed the cache with a doomed connection
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_http_client, "HTTPSConnection", lambda *a, **k: fresh)
+    monkeypatch.setattr(mon.time, "sleep", lambda _s: None)
+    monkeypatch.setenv("MONITOR_RETRIES", "2")
+    out, _usage = mon.call_api(
+        "anthropic", "k", "m", "https://api.x/v1/messages", "s", "u", 5
+    )
+    assert out == '{"decision":"allow"}'
+    assert stale.closed  # the dead socket was closed on the failed reuse
+    assert all(c is not stale for _, c in mon._idle_conns)  # never re-cached
+    assert mon._idle_conns[-1][1] is fresh  # the working conn is cached for reuse
+    mon._idle_conns.clear()
 
 
 def test_call_api_no_retries_when_disabled(mon, monkeypatch):
     calls = {"n": 0}
 
-    def boom(req, timeout=None):
+    def acquire(key, timeout):
         calls["n"] += 1
-        raise urllib.error.URLError("down")
+        return _FakeConn(raise_on_getresponse=urllib.error.URLError("down"))
 
-    monkeypatch.setattr(mon.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", acquire)
     monkeypatch.setenv("MONITOR_RETRIES", "0")
     with pytest.raises(RuntimeError):
-        mon.call_api("anthropic", "k", "m", "http://x", "s", "u", 1)
+        mon.call_api("anthropic", "k", "m", "https://x/", "s", "u", 1)
     assert calls["n"] == 1
+
+
+def test_call_api_http_error_status_retried_then_fails(mon, monkeypatch):
+    # A >=400 status is a transport-level failure: retried, then fail-closed,
+    # and the failed connection is never returned to the cache.
+    conns = []
+
+    def acquire(key, timeout):
+        c = _FakeConn(status=500, raw=b"err")
+        conns.append(c)
+        return c
+
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", acquire)
+    monkeypatch.setattr(mon.time, "sleep", lambda _s: None)
+    monkeypatch.setenv("MONITOR_RETRIES", "1")
+    with pytest.raises(RuntimeError):
+        mon.call_api("anthropic", "k", "m", "https://x/", "s", "u", 1)
+    assert len(conns) == 2  # initial + 1 retry
+    assert all(c.closed for c in conns)
 
 
 def test_call_api_parse_error_not_retried(mon, monkeypatch):
     calls = {"n": 0}
 
-    class _BadJSON:
-        def read(self):
-            return b"not json"
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def fake_urlopen(req, timeout=None):
+    def acquire(key, timeout):
         calls["n"] += 1
-        return _BadJSON()
+        return _FakeConn(raw=b"not json")
 
-    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", acquire)
     monkeypatch.setenv("MONITOR_RETRIES", "2")
     with pytest.raises(RuntimeError):
-        mon.call_api("anthropic", "k", "m", "http://x", "s", "u", 1)
+        mon.call_api("anthropic", "k", "m", "https://x/", "s", "u", 1)
     # A malformed response is not transient — fail immediately, no retries.
     assert calls["n"] == 1
+
+
+# --------------------------------------------------------------------------
+# verdict extraction and tool schema
+# --------------------------------------------------------------------------
+
+
+def test_extract_anthropic_verdict_tool_use_preferred(mon):
+    data = {
+        "content": [
+            {"type": "tool_use", "name": "emit_verdict", "input": {"decision": "deny"}},
+            {"type": "text", "text": '{"decision":"allow"}'},
+        ]
+    }
+    assert mon._extract_anthropic_verdict(data) == '{"decision": "deny"}'
+
+
+def test_extract_anthropic_verdict_falls_back_to_text(mon):
+    data = {"content": [{"type": "text", "text": '{"decision":"allow"}'}]}
+    assert mon._extract_anthropic_verdict(data) == '{"decision":"allow"}'
+
+
+def test_extract_anthropic_verdict_no_usable_block(mon):
+    data = {"content": [{"type": "thinking"}, {"type": "image"}]}
+    assert mon._extract_anthropic_verdict(data) == ""
+
+
+def test_extract_openai_verdict_uses_tool_call(mon):
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "emit_verdict",
+                                "arguments": '{"decision":"ask"}',
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    assert mon._extract_openai_verdict(data) == '{"decision":"ask"}'
+
+
+def test_extract_openai_verdict_skips_other_tool_then_uses_content(mon):
+    # A tool_call that isn't emit_verdict is skipped; the loop falls through to
+    # message content.
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [{"function": {"name": "something_else"}}],
+                    "content": '{"decision":"ask"}',
+                }
+            }
+        ]
+    }
+    assert mon._extract_openai_verdict(data) == '{"decision":"ask"}'
+
+
+def test_verdict_tool_anthropic_shape(mon):
+    # Anthropic Messages tool-use contract: tools[].input_schema + a
+    # tool_choice that forces this tool. Wrong shape => the API rejects the
+    # request and the monitor fails closed, so pin it.
+    tools, choice = mon._verdict_tool(mon.Wire.ANTHROPIC)
+    assert choice == {"type": "tool", "name": mon._VERDICT_TOOL}
+    assert tools[0]["name"] == mon._VERDICT_TOOL
+    assert tools[0]["input_schema"] is mon._VERDICT_INPUT_SCHEMA
+
+
+def test_verdict_tool_openai_shape(mon):
+    # OpenAI function-calling contract: tools[].function.parameters + a
+    # function-typed tool_choice.
+    tools, choice = mon._verdict_tool(mon.Wire.OPENAI)
+    assert choice == {"type": "function", "function": {"name": mon._VERDICT_TOOL}}
+    fn = tools[0]["function"]
+    assert fn["name"] == mon._VERDICT_TOOL
+    assert fn["parameters"] is mon._VERDICT_INPUT_SCHEMA
+
+
+def test_verdict_schema_enum_tracks_decision(mon):
+    # The forced-tool schema's allowed decisions must equal the Decision enum,
+    # so adding a verdict can't leave the tool unable to emit it.
+    schema_enum = mon._VERDICT_INPUT_SCHEMA["properties"]["decision"]["enum"]
+    assert set(schema_enum) == {d.value for d in mon.Decision}
+
+
+def test_every_provider_maps_to_a_known_wire(mon):
+    # Each PROVIDERS row must carry a real Wire and the fields call_api/resolve
+    # read — a new provider with a typo'd wire or a missing field fails here,
+    # not at runtime against a live key.
+    valid_wires = set(mon.Wire)
+    for provider, conf in mon.PROVIDERS.items():
+        assert conf["wire"] in valid_wires, f"{provider}: bad wire {conf['wire']!r}"
+        assert conf["url"].startswith("https://"), f"{provider}: {conf['url']!r}"
+        assert conf["model"] and conf["env_key"], provider
+
+
+def test_wires_table_covers_every_wire_member(mon):
+    # Each Wire member must have a build_request row, so adding a member without
+    # its request builder fails here rather than at call time.
+    assert set(mon.WIRES) == set(mon.Wire)
+    for spec in mon.WIRES.values():
+        assert callable(spec["build_request"])
+
+
+# --------------------------------------------------------------------------
+# keep-alive transport — _proxy_configured / _acquire_conn / _release_conn / _http_post
+# --------------------------------------------------------------------------
+
+
+def test_proxy_configured_true_when_proxy_and_not_bypassed(mon, monkeypatch):
+    monkeypatch.setattr(
+        mon.urllib.request, "getproxies", lambda: {"https": "http://p:3128"}
+    )
+    monkeypatch.setattr(mon.urllib.request, "proxy_bypass", lambda host: False)
+    assert mon._proxy_configured("https://api.anthropic.com/v1/messages") is True
+
+
+def test_proxy_configured_false_when_no_proxy(mon, monkeypatch):
+    monkeypatch.setattr(mon.urllib.request, "getproxies", lambda: {})
+    assert mon._proxy_configured("https://api.anthropic.com/v1/messages") is False
+
+
+def test_proxy_configured_false_when_bypassed(mon, monkeypatch):
+    monkeypatch.setattr(
+        mon.urllib.request, "getproxies", lambda: {"https": "http://p:3128"}
+    )
+    monkeypatch.setattr(mon.urllib.request, "proxy_bypass", lambda host: True)
+    assert mon._proxy_configured("https://api.anthropic.com/v1/messages") is False
+
+
+def test_acquire_conn_reuses_cached(mon):
+    mon._idle_conns.clear()
+    sentinel = _FakeConn()
+    key = ("https", "h", 443)
+    mon._release_conn(key, sentinel)
+    assert mon._acquire_conn(key, 5) is sentinel
+    assert mon._idle_conns == []  # popped on checkout
+
+
+def test_acquire_conn_opens_https_on_miss(mon):
+    import http.client as _http_client
+
+    mon._idle_conns.clear()
+    conn = mon._acquire_conn(("https", "h", 443), 5)
+    assert isinstance(conn, _http_client.HTTPSConnection)
+
+
+def test_acquire_conn_opens_http_on_miss(mon):
+    import http.client as _http_client
+
+    mon._idle_conns.clear()
+    conn = mon._acquire_conn(("http", "h", 80), 5)
+    assert isinstance(conn, _http_client.HTTPConnection)
+    assert not isinstance(conn, _http_client.HTTPSConnection)
+
+
+def test_acquire_conn_leaves_other_key_cached(mon):
+    mon._idle_conns.clear()
+    other = _FakeConn()
+    mon._release_conn(("https", "other", 443), other)
+    conn = mon._acquire_conn(("https", "h", 443), 5)
+    assert conn is not other
+    assert (("https", "other", 443), other) in mon._idle_conns
+
+
+def test_release_conn_closes_when_cache_full(mon):
+    mon._idle_conns.clear()
+    for i in range(mon._MAX_IDLE_CONNS):
+        mon._release_conn(("k", i, 0), _FakeConn())
+    extra = _FakeConn()
+    mon._release_conn(("k", "x", 0), extra)
+    assert extra.closed
+    assert len(mon._idle_conns) == mon._MAX_IDLE_CONNS
+
+
+def test_http_post_keepalive_success_caches_conn(mon, monkeypatch):
+    mon._idle_conns.clear()
+    conn = _FakeConn(raw=b'{"ok":1}')
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    out = mon._http_post("https://api.x/v1/messages", {"h": "1"}, b"body", 5)
+    assert out == b'{"ok":1}'
+    assert conn.sent["path"] == "/v1/messages"
+    assert conn.sent["body"] == b"body"
+    assert not conn.closed
+    assert any(c is conn for _, c in mon._idle_conns)  # returned for reuse
+    mon._idle_conns.clear()
+
+
+def test_http_post_includes_query_in_path(mon, monkeypatch):
+    conn = _FakeConn(raw=b"{}")
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    mon._http_post("https://api.x/v1/m?beta=1", {}, b"b", 5)
+    assert conn.sent["path"] == "/v1/m?beta=1"
+
+
+def test_http_post_status_error_closes_conn(mon, monkeypatch):
+    conn = _FakeConn(status=503, raw=b"down")
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    with pytest.raises(OSError):
+        mon._http_post("https://api.x/", {}, b"b", 5)
+    assert conn.closed
+
+
+def test_http_post_transport_error_closes_conn(mon, monkeypatch):
+    import http.client as _http_client
+
+    conn = _FakeConn(raise_on_getresponse=_http_client.BadStatusLine("stale"))
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: False)
+    monkeypatch.setattr(_api_mod(), "_acquire_conn", lambda key, timeout: conn)
+    with pytest.raises(_http_client.HTTPException):
+        mon._http_post("https://api.x/", {}, b"b", 5)
+    assert conn.closed
+
+
+def test_http_post_proxy_path_uses_urllib(mon, monkeypatch):
+    monkeypatch.setattr(_api_mod(), "_proxy_configured", lambda url: True)
+
+    def fake_urlopen(req, timeout=None):
+        assert req.data == b"body"
+        return _FakeResp({"ok": 1})
+
+    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
+    out = mon._http_post("https://api.x/", {"h": "1"}, b"body", 5)
+    assert json.loads(out) == {"ok": 1}
 
 
 # --------------------------------------------------------------------------
