@@ -45,6 +45,14 @@ ignore = ["S101", "S104", "S310", "S603", "S607", "E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Silence deprecations from third-party eval deps (only present when the eval
+# extra is installed); they are upstream's to fix, not ours, and otherwise
+# noise up the monitor-eval job. Scoped to the exact messages so our own
+# warnings still surface.
+filterwarnings = [
+    "ignore:.*__get_validators__.*:DeprecationWarning",
+    "ignore:path is deprecated. Use files\\(\\) instead.*:DeprecationWarning",
+]
 
 [tool.coverage.run]
 branch = true
