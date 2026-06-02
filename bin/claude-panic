@@ -148,16 +148,17 @@ fi
 
 image="$(claude_monitor_image)"
 
-# archive_volume <label> <volname> <archive_root> <latest_fn> <archive_fn> <out>
-# Common loop for the three forensic volumes (audit, egress, body): inspect →
-# archive → copy newest snapshot into the panic dir under <out>.
+# archive_volume <label> <volname> <archive_root> <latest_fn> <archive_fn> <out> <keep>
+# Common loop for the two archived forensic volumes (audit, egress): inspect →
+# archive (retaining <keep> host snapshots) → copy newest into the panic dir
+# under <out>. The body log has no host archive and is read inline below.
 archive_volume() {
-  local label="$1" vol="$2" root="$3" latest_fn="$4" archive_fn="$5" out="$6"
+  local label="$1" vol="$2" root="$3" latest_fn="$4" archive_fn="$5" out="$6" keep="$7"
   if ! docker volume inspect "$vol" >/dev/null 2>&1; then
     log_step WARN "archive $label" "volume $vol does not exist"
     return
   fi
-  step "archive $label" "$archive_fn" "$vol" "$image" "$root" "${CLAUDE_AUDIT_ARCHIVE_KEEP:-10}"
+  step "archive $label" "$archive_fn" "$vol" "$image" "$root" "$keep"
   local latest
   latest="$("$latest_fn" "$vol" "$root")"
   if [[ -z "$latest" || ! -f "$latest" ]]; then
@@ -174,10 +175,10 @@ archive_volume() {
 if $do_archive; then
   archive_volume "audit volume" "claude-audit-$ws_id" \
     "$(claude_audit_archive_dir)" claude_latest_audit_archive \
-    claude_archive_audit_volume audit.jsonl
+    claude_archive_audit_volume audit.jsonl "${CLAUDE_AUDIT_ARCHIVE_KEEP:-10}"
   archive_volume "egress volume" "claude-egress-$ws_id" \
     "$(claude_egress_archive_dir)" claude_latest_egress_archive \
-    claude_archive_egress_volume egress-access.log
+    claude_archive_egress_volume egress-access.log "${CLAUDE_EGRESS_ARCHIVE_KEEP:-10}"
 
   # Body log (opt-in MITM). Read off the volume directly — there is no host
   # archive for it — into the snapshot. Blobs stay on the (retained) volume.
