@@ -209,6 +209,16 @@ run_host_claude() {
 source "$(dirname "$SELF_CANONICAL")/lib/monitor-key.bash"
 resolve_monitor_key
 
+# No key resolved and the monitor isn't opted out: surface the setup guidance in
+# the user's terminal. This launcher runs before the session, so its output is
+# actually seen — unlike the in-session SessionStart hook, whose stderr goes to
+# the model's context. The monitor still fails closed per call; this only shows
+# how to fix it.
+if [[ "${MONITOR_DISABLED:-}" != "1" ]] &&
+  [[ -z "${MONITOR_API_KEY:-}${ANTHROPIC_API_KEY:-}${VENICE_INFERENCE_KEY:-}${OPENROUTER_API_KEY:-}" ]]; then
+  print_monitor_setup_help
+fi
+
 # --dangerously-skip-container: run on the host but keep exfiltration defense by
 # restricting network to the allowlist via the built-in sandbox — unless the
 # firewall is also explicitly skipped. Fail loudly rather than silently running

@@ -82,3 +82,22 @@ resolve_monitor_key() {
   done
   return 0
 }
+
+# Print the monitor-key decision tree to stderr. setup.bash and the bin/claude
+# launcher both run in the user's terminal (unlike the SessionStart hook, whose
+# output is injected into the model's context), so this is where the human-facing
+# guidance belongs. Mirrors README § Monitor setup.
+print_monitor_setup_help() {
+  cat >&2 <<'EOF'
+
+The AI safety monitor needs an API key. Pick one:
+  claude.ai subscription  ->  MONITOR_API_KEY  (monitor-only; keeps your subscription)
+  OK billing the API      ->  ANTHROPIC_API_KEY / VENICE_INFERENCE_KEY / OPENROUTER_API_KEY
+  using claude-paranoid   ->  VENICE_INFERENCE_KEY
+  no monitor wanted       ->  MONITOR_DISABLED=1
+
+Store it in env or envchain (scanned at startup, never written to disk), e.g.:
+  envchain --set claude-monitor MONITOR_API_KEY
+More: README § Monitor setup
+EOF
+}

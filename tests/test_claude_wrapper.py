@@ -397,8 +397,17 @@ def _stub_envchain(real_dir: Path, namespace: str, var: str, value: str) -> None
     envchain.chmod(envchain.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _stub_empty_envchain(real_dir: Path) -> None:
+    """A fake `envchain` whose `--list` names no namespaces, so the auto-scan
+    finds nothing and the launcher treats the monitor as unconfigured."""
+    envchain = real_dir / "envchain"
+    envchain.write_text("#!/bin/bash\nexit 0\n")
+    envchain.chmod(envchain.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 # Force the auto-scan onto envchain regardless of the host's own key env vars.
 _NO_KEY_ENV = dict(ANTHROPIC_API_KEY="", VENICE_INFERENCE_KEY="", OPENROUTER_API_KEY="")
+_HELP_MARKER = "The AI safety monitor needs an API key"
 
 
 def test_wrapper_passes_provider_key_through(tmp_path: Path) -> None:
@@ -505,6 +514,70 @@ def test_wrapper_resolves_monitor_key_from_envchain(tmp_path: Path) -> None:
     assert "MONITOR_API_KEY=sk-monitor-envchain" in r.stdout
     assert "ANTHROPIC_API_KEY=\n" in r.stdout
     assert "resolved from envchain namespace 'creds' (MONITOR_API_KEY)" in r.stderr
+
+
+def test_wrapper_prints_setup_help_when_no_key(tmp_path: Path) -> None:
+    """Host launch, no key resolved, monitor not opted out: the launcher prints
+    the setup decision tree to the user's terminal before the session starts."""
+    _init_repo(tmp_path)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    _stub_empty_envchain(real_dir)
+    r = _run(
+        tmp_path,
+        real_dir,
+        CLAUDE_NO_SANDBOX="1",
+        HOME=str(tmp_path),
+        MONITOR_API_KEY="",
+        MONITOR_DISABLED="",
+        **_NO_KEY_ENV,
+    )
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert _HELP_MARKER in r.stderr
+    assert "MONITOR_DISABLED=1" in r.stderr
+
+
+def test_wrapper_no_setup_help_when_disabled(tmp_path: Path) -> None:
+    """MONITOR_DISABLED=1 suppresses the setup help even with no key."""
+    _init_repo(tmp_path)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    _stub_empty_envchain(real_dir)
+    r = _run(
+        tmp_path,
+        real_dir,
+        CLAUDE_NO_SANDBOX="1",
+        HOME=str(tmp_path),
+        MONITOR_API_KEY="",
+        MONITOR_DISABLED="1",
+        **_NO_KEY_ENV,
+    )
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert _HELP_MARKER not in r.stderr
+
+
+def test_wrapper_no_setup_help_when_key_present(tmp_path: Path) -> None:
+    """A resolved key suppresses the setup help."""
+    _init_repo(tmp_path)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    _stub_empty_envchain(real_dir)
+    r = _run(
+        tmp_path,
+        real_dir,
+        CLAUDE_NO_SANDBOX="1",
+        HOME=str(tmp_path),
+        MONITOR_API_KEY="",
+        MONITOR_DISABLED="",
+        VENICE_INFERENCE_KEY="",
+        OPENROUTER_API_KEY="",
+        ANTHROPIC_API_KEY="sk-test",
+    )
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert _HELP_MARKER not in r.stderr
 
 
 def test_ccr_sidecar_exists() -> None:
