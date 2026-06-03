@@ -82,6 +82,23 @@ while IFS=$'\t' read -r domain access; do
   DOMAIN_ACCESS["$domain"]="$access"
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' "$ALLOWLIST_FILE")
 
+# === Per-project allowlist (from .claude/settings.json) ===
+# The launcher (bin/claude) reads the workspace's .claude/settings(.local).json
+# sandbox.network.allowedDomains (ro) and sandbox.network.allowedDomainsReadWrite
+# (rw) and passes them in here as newline-separated lists — the same per-project
+# keys host mode unions (one mechanism across both launch modes). This lets a
+# project reach an extra host without editing the global list, which is a
+# template propagated to every downstream repo. ro is the default; rw is an
+# explicit, separately-keyed escalation (full HTTP incl. POST/PUT — a write/exfil
+# channel) the launcher warns about at launch. Values are literal here, so they
+# merge straight into DOMAIN_ACCESS; IFS=$'\n\t' (set above) splits on newlines.
+for domain in ${PROJECT_ALLOWED_DOMAINS_RO:-}; do
+  DOMAIN_ACCESS["$domain"]="ro"
+done
+for domain in ${PROJECT_ALLOWED_DOMAINS_RW:-}; do
+  DOMAIN_ACCESS["$domain"]="rw"
+done
+
 # === Firewall reset ===
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
@@ -528,9 +545,25 @@ else
       if ! cmp -s "$new_conf" "$DNSMASQ_CONF"; then
         cp "$new_conf" "$DNSMASQ_CONF"
         chmod 640 "$DNSMASQ_CONF"
+        # Drain the running dnsmasq and WAIT for it to release UDP/53 before
+        # rebinding. Starting a new dnsmasq while the old one still holds the
+        # socket fails with EADDRINUSE — a restart race that bites on slower
+        # VM-backed Docker (Colima/macOS), where the old process exits a beat
+        # after SIGTERM. Polling for the port to free beats a fixed sleep; force
+        # a SIGKILL only if it refuses to die within the drain window.
         killall dnsmasq 2>/dev/null || true
+        local _drain=0
+        while pgrep -x dnsmasq >/dev/null 2>&1; do
+          _drain=$((_drain + 1))
+          if [[ "$_drain" -ge 40 ]]; then
+            killall -9 dnsmasq 2>/dev/null || true
+            sleep 0.5
+            break
+          fi
+          sleep 0.25
+        done
         local _retry _delay=1
-        for _retry in 1 2 3 4; do
+        for _retry in 1 2 3 4 5; do
           dnsmasq 2>/dev/null && break
           echo "WARNING: dnsmasq restart attempt $_retry failed, retrying in ${_delay}s..." >&2
           sleep "$_delay"
@@ -538,7 +571,12 @@ else
           killall dnsmasq 2>/dev/null || true
         done
         if ! pgrep -x dnsmasq >/dev/null; then
-          echo "CRITICAL: dnsmasq failed after 4 retries — killing container" >&2
+          # dnsmasq is down and won't return: the agent now has no resolver, so no
+          # new egress can be resolved (fail-closed for connections). Stop the
+          # refresh loop loudly; the static iptables ipset from initial setup still
+          # admits already-resolved IPs. (This runs backgrounded, so `exit` ends
+          # only the refresh subshell, not PID 1.)
+          echo "CRITICAL: dnsmasq failed to restart after 5 attempts — DNS refresh disabled; agent resolver is down (fail-closed)." >&2
           exit 1
         fi
       fi
