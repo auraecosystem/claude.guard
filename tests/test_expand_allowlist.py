@@ -4,10 +4,10 @@
 resetting it — no `iptables -F`, no `ipset destroy`. These tests drive it with
 stubbed firewall binaries (ipset/iptables/dig/dnsmasq/squid) on PATH and
 temp-file overrides for every path it writes, so the apply path runs hermetically
-off a real sandbox. `bin/claude-allow` is the host wrapper; its argument handling
+off a real sandbox. `bin/loosen-firewall` is the host wrapper; its argument handling
 runs before any docker call, so that part is unit-testable here too.
 
-# covers: .devcontainer/expand-allowlist.bash, bin/claude-allow, .devcontainer/firewall-lib.bash
+# covers: .devcontainer/expand-allowlist.bash, bin/loosen-firewall, .devcontainer/firewall-lib.bash
 """
 
 import os
@@ -20,7 +20,7 @@ import pytest
 from tests._helpers import REPO_ROOT, run_capture
 
 EXPAND = REPO_ROOT / ".devcontainer" / "expand-allowlist.bash"
-CLAUDE_ALLOW = REPO_ROOT / "bin" / "claude-allow"
+LOOSEN_FIREWALL = REPO_ROOT / "bin" / "loosen-firewall"
 INIT_FIREWALL = REPO_ROOT / ".devcontainer" / "init-firewall.bash"
 FIREWALL_LIB = REPO_ROOT / ".devcontainer" / "firewall-lib.bash"
 
@@ -288,22 +288,22 @@ def test_write_ro_domains_empty_truncates(tmp_path: Path) -> None:
     assert out.read_text() == ""
 
 
-# === bin/claude-allow argument handling (pre-docker, unit-testable) ===
+# === bin/loosen-firewall argument handling (pre-docker, unit-testable) ===
 
 
-def test_claude_allow_help() -> None:
-    r = run_capture(["bash", str(CLAUDE_ALLOW), "--help"])
+def test_loosen_firewall_help() -> None:
+    r = run_capture(["bash", str(LOOSEN_FIREWALL), "--help"])
     assert r.returncode == 0
     assert "widen" in r.stdout.lower()
 
 
-def test_claude_allow_requires_domains() -> None:
-    r = run_capture(["bash", str(CLAUDE_ALLOW)])
+def test_loosen_firewall_requires_domains() -> None:
+    r = run_capture(["bash", str(LOOSEN_FIREWALL)])
     assert r.returncode == 2
     assert "no domains" in r.stderr
 
 
-def test_claude_allow_rejects_unknown_option() -> None:
-    r = run_capture(["bash", str(CLAUDE_ALLOW), "--nope"])
+def test_loosen_firewall_rejects_unknown_option() -> None:
+    r = run_capture(["bash", str(LOOSEN_FIREWALL), "--nope"])
     assert r.returncode == 2
     assert "unknown option" in r.stderr
