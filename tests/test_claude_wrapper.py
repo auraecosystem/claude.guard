@@ -353,6 +353,79 @@ def test_wrapper_volume_gc_on_sandboxed_launch(
     assert ("volume ls" in docker_log) is expect_gc
 
 
+# A stable fragment of the first-launch expectation-setting line. It sets the
+# expectation that blocking is by-design; it must NOT coach widening the firewall
+# (that is a deliberate human decision, not a reflexive fix), so the tests also
+# assert the loosening command is absent.
+_FW_TIP_MARKER = "restricted to a small allowlist by design"
+
+
+def test_wrapper_firewall_tip_shown_once_then_suppressed(tmp_path: Path) -> None:
+    """A firewalled container launch explains once that egress is allowlisted by
+    design (so a later HuggingFace/wandb block reads as the firewall working, not
+    a bug), then a one-time marker under XDG_STATE_HOME keeps launches quiet. It
+    must not advertise loosen-firewall — blocking is the point."""
+    _init_repo(tmp_path)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    state = tmp_path / "state"
+
+    r1, _ = _run_sandboxed(tmp_path, stub, home, XDG_STATE_HOME=str(state))
+    assert r1.returncode == 0, f"stderr: {r1.stderr}"
+    assert _FW_TIP_MARKER in r1.stderr, "first launch should set the expectation"
+    assert "loosen-firewall" not in r1.stderr, "must not coach widening the firewall"
+
+    r2, _ = _run_sandboxed(tmp_path, stub, home, XDG_STATE_HOME=str(state))
+    assert r2.returncode == 0, f"stderr: {r2.stderr}"
+    assert _FW_TIP_MARKER not in r2.stderr, "marker should silence repeats"
+
+
+def test_wrapper_firewall_tip_absent_in_host_mode(tmp_path: Path) -> None:
+    """Host mode has no allowlist firewall in play, so the by-design-blocking tip
+    must not fire."""
+    _init_repo(tmp_path)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+
+    r = _run(
+        tmp_path,
+        real_dir,
+        CLAUDE_NO_SANDBOX="1",
+        HOME=str(tmp_path),
+        XDG_STATE_HOME=str(tmp_path / "state"),
+    )
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert _FW_TIP_MARKER not in r.stderr
+
+
+def test_wrapper_firewall_tip_absent_when_firewall_skipped_via_env(
+    tmp_path: Path,
+) -> None:
+    """DANGEROUSLY_SKIP_FIREWALL=1 disables the firewall without setting the
+    _skip_firewall flag, so the tip must consult the env var too — otherwise it
+    would point at loosen-firewall when there is no firewall to widen. Driven
+    through the container path (CLAUDE_NO_SANDBOX unset) to exercise that guard."""
+    _init_repo(tmp_path)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    r, _ = _run_sandboxed(
+        tmp_path,
+        stub,
+        home,
+        DANGEROUSLY_SKIP_FIREWALL="1",
+        XDG_STATE_HOME=str(tmp_path / "state"),
+    )
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert "LAUNCHED-CLAUDE" in r.stdout, "should still reach the container launch"
+    assert _FW_TIP_MARKER not in r.stderr
+
+
 def test_wrapper_shared_auth_overrides_volume_id() -> None:
     """CLAUDE_SHARED_AUTH=1 trades per-project isolation for persistent auth:
     it pins a fixed CLAUDE_VOLUME_ID (so all projects share one
