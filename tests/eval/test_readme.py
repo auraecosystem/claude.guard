@@ -40,7 +40,7 @@ def test_caption_names_and_links_tested_commit():
     assert "[`abc1234`](https://github.com/owner/repo/commit/abc1234def567)" in cap
     assert "(PR #42)" in cap
     assert (
-        "[auto-updated](https://github.com/owner/repo/blob/main/"
+        "[Auto-updated](https://github.com/owner/repo/blob/main/"
         ".github/workflows/monitor-eval.yaml) each push" in cap
     )
     assert "Monitor `claude-haiku-4-5-20251001`" in cap
@@ -59,6 +59,8 @@ def test_render_block_has_markers_caption_and_two_charts():
     assert block.startswith(readme.START) and block.endswith(readme.END)
     assert "Latest tested commit" in block
     assert block.count("![Monitor") == 2
+    # Caption sits after the charts.
+    assert block.index("![Monitor") < block.index("Latest tested commit")
 
 
 def test_render_block_empty_history_shows_placeholder():
