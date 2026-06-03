@@ -501,7 +501,9 @@ class TestFirewallConfig:
         assert "nf_conntrack_max" in self.content
 
     def test_squid_blocks_writes_to_ro_domains(self) -> None:
-        assert "deny !safe_methods readonly_domains" in self.content
+        # The squid.conf is rendered by firewall-lib.bash:write_squid_conf (so CI
+        # can parse it); the write-denying directive lives there now.
+        assert "deny !safe_methods readonly_domains" in FIREWALL_LIB.read_text()
 
     def _code_lines_matching(self, needle: str) -> list[int]:
         """Indices of non-comment lines containing needle, so substring checks
