@@ -265,6 +265,8 @@ async def run_audits(
     # epochs>1 only helps at temperature>0 (independent draws to average); a
     # single pass stays at temperature=0 so it is reproducible on its own.
     #
+    # remaining reads at 0.1× TPM cost, shrinking rate-limit pressure.
+    # max_connections aligns the HTTP pool with the asyncio fan-out below.
     # cache_prompt=True: inspect_ai sets top-level cache_control on the request
     # so Anthropic's automatic caching kicks in. Because the same paper is sent
     # `epochs` times, the full context (system + paper) is cached after the first
