@@ -82,38 +82,22 @@ while IFS=$'\t' read -r domain access; do
   DOMAIN_ACCESS["$domain"]="$access"
 done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' "$ALLOWLIST_FILE")
 
-# === Per-project domain allowlist overlay (optional) ===
-# A committed, PR-reviewed overlay lets one project reach an extra host (a
-# private artifact registry, a package CDN) without editing the global list or
-# dropping the firewall — and without putting a project-specific host in the
-# global list, which is a template propagated to every downstream repo. Entries
-# may be "ro" (GET/HEAD only) or "rw" (full HTTP incl. POST/PUT — a write/exfil
-# channel). "rw" is permitted but WARNED loudly: it widens this project's egress,
-# so it must be a deliberate, reviewed choice. Invalid values are rejected.
-# Entries merge into the same DOMAIN_ACCESS map, so DNS/ipset/squid treat them
-# identically. The file lives in .devcontainer/, which entrypoint.bash makes
-# root-owned and read-only to the agent, so the agent cannot widen its own live
-# allowlist by editing it mid-session.
-ALLOWLIST_LOCAL_FILE="$SCRIPT_DIR/domain-allowlist.local.json"
-if [[ -f "$ALLOWLIST_LOCAL_FILE" ]]; then
-  if ! jq empty "$ALLOWLIST_LOCAL_FILE" 2>/dev/null; then
-    echo "ERROR: per-project overlay $ALLOWLIST_LOCAL_FILE is not valid JSON" >&2
-    exit 1
-  fi
-  _overlay_count=0
-  while IFS=$'\t' read -r domain access; do
-    if [[ "$access" != "ro" && "$access" != "rw" ]]; then
-      echo "ERROR: per-project overlay $ALLOWLIST_LOCAL_FILE has invalid access '$access' for '$domain' (expected 'ro' or 'rw')" >&2
-      exit 1
-    fi
-    if [[ "$access" == "rw" ]]; then
-      echo "WARNING: per-project overlay grants READ-WRITE (POST/PUT — write/exfil-capable) egress to '$domain'. This widens this project's egress channel; confirm the overlay is reviewed." >&2
-    fi
-    DOMAIN_ACCESS["$domain"]="$access"
-    _overlay_count=$((_overlay_count + 1))
-  done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' "$ALLOWLIST_LOCAL_FILE")
-  echo "Loaded $_overlay_count domain(s) from per-project overlay $ALLOWLIST_LOCAL_FILE"
-fi
+# === Per-project allowlist (from .claude/settings.json) ===
+# The launcher (bin/claude) reads the workspace's .claude/settings(.local).json
+# sandbox.network.allowedDomains (ro) and sandbox.network.allowedDomainsReadWrite
+# (rw) and passes them in here as newline-separated lists — the same per-project
+# keys host mode unions (one mechanism across both launch modes). This lets a
+# project reach an extra host without editing the global list, which is a
+# template propagated to every downstream repo. ro is the default; rw is an
+# explicit, separately-keyed escalation (full HTTP incl. POST/PUT — a write/exfil
+# channel) the launcher warns about at launch. Values are literal here, so they
+# merge straight into DOMAIN_ACCESS; IFS=$'\n\t' (set above) splits on newlines.
+for domain in ${PROJECT_ALLOWED_DOMAINS_RO:-}; do
+  DOMAIN_ACCESS["$domain"]="ro"
+done
+for domain in ${PROJECT_ALLOWED_DOMAINS_RW:-}; do
+  DOMAIN_ACCESS["$domain"]="rw"
+done
 
 # === Firewall reset ===
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)

@@ -40,10 +40,6 @@ FIREWALL_LIB = REPO_ROOT / ".devcontainer" / "firewall-lib.bash"
 HARDEN_MONITOR = REPO_ROOT / ".devcontainer" / "harden-monitor.bash"
 SETUP_BASH = REPO_ROOT / "setup.bash"
 DOMAIN_ALLOWLIST = REPO_ROOT / ".devcontainer" / "domain-allowlist.json"
-DOMAIN_ALLOWLIST_LOCAL = REPO_ROOT / ".devcontainer" / "domain-allowlist.local.json"
-DOMAIN_ALLOWLIST_LOCAL_EXAMPLE = (
-    REPO_ROOT / ".devcontainer" / "domain-allowlist.local.json.example"
-)
 
 
 @pytest.fixture
@@ -337,63 +333,73 @@ def test_firewall_probe_hosts_bound_to_allowlist(allowlist: dict) -> None:
             )
 
 
-# ── Per-project allowlist overlay ───────────────────────────────────
-# The committed overlay (domain-allowlist.local.json) lets a project reach an
-# extra host without editing the global list (a template shared across repos).
-# It may use "ro" or "rw"; init-firewall.bash permits rw but WARNS loudly (rw
-# widens egress) and rejects any other value. These guard the example schema,
-# any real overlay, and the loader's validate-and-warn behavior.
+# ── Per-project allowlist (unified on .claude/settings.json) ─────────
+# A project lists extra hosts under sandbox.network in its own
+# .claude/settings(.local).json — allowedDomains (ro) and allowedDomainsReadWrite
+# (rw, an explicit escalation). The launcher (bin/claude) reads + validates them
+# and passes them to the firewall container via PROJECT_ALLOWED_DOMAINS_{RO,RW};
+# init-firewall.bash merges them. Same keys host mode reads (one mechanism across
+# both launch modes). These guard each link in that chain.
 
 
-def test_overlay_example_is_ro_only_json() -> None:
-    """The shipped example is the schema users copy, so it must be valid JSON and
-    model the least-privilege default — every value "ro". (rw is allowed in a
-    real overlay but shouldn't be the starting point people paste.) Asserts
-    non-empty so an emptied example doesn't vacuously pass."""
-    overlay = json.loads(DOMAIN_ALLOWLIST_LOCAL_EXAMPLE.read_text())
-    assert overlay, "example overlay is empty — nothing demonstrates the schema"
-    bad = {d: v for d, v in overlay.items() if v != "ro"}
-    assert not bad, f"overlay example has non-'ro' values: {bad}"
+def test_compose_passes_project_allowlist_to_firewall(compose: dict) -> None:
+    """The firewall container is where init-firewall merges per-project domains,
+    so compose must forward both env vars to it."""
+    env = compose["services"]["firewall"]["environment"]
+    for var in ("PROJECT_ALLOWED_DOMAINS_RO", "PROJECT_ALLOWED_DOMAINS_RW"):
+        assert var in env, f"firewall service missing {var}"
 
 
-def test_real_overlay_if_present_has_valid_access() -> None:
-    """A committed real overlay (optional, absent by default) may use "ro" or
-    "rw", but every value must be one of those — a typo'd access is a config bug
-    the loader would reject at launch. Absence is the legitimate default and
-    skips; when the file IS present the assertion runs for real."""
-    if not DOMAIN_ALLOWLIST_LOCAL.exists():
-        pytest.skip("no per-project overlay committed (the default)")
-    overlay = json.loads(DOMAIN_ALLOWLIST_LOCAL.read_text())
-    bad = {d: v for d, v in overlay.items() if v not in ("ro", "rw")}
-    assert not bad, f"committed overlay has invalid access values: {bad}"
-
-
-class TestOverlayWiring:
-    """init-firewall.bash must load the overlay, reject invalid access values,
-    and WARN (not silently widen) on rw. Guards against the merge being dropped,
-    the invalid-value guard being removed, or the rw warning disappearing."""
+class TestInitFirewallMergesProjectAllowlist:
+    """init-firewall.bash must merge the launcher-provided per-project domains
+    into DOMAIN_ACCESS — ro from one env var, rw from the other — so they get the
+    same DNS/ipset/squid treatment as the global list."""
 
     @pytest.fixture(autouse=True)
     def _load(self) -> None:
         self.content = INIT_FIREWALL.read_text()
-        start = self.content.index("ALLOWLIST_LOCAL_FILE")
-        end = self.content.index("# === Firewall reset ===")
-        self.section = self.content[start:end]
 
-    def test_references_overlay_file(self) -> None:
-        assert "domain-allowlist.local.json" in self.content
+    def test_merges_ro_domains_as_ro(self) -> None:
+        assert "PROJECT_ALLOWED_DOMAINS_RO" in self.content
+        assert 'DOMAIN_ACCESS["$domain"]="ro"' in self.content
 
-    def test_rejects_invalid_access_values(self) -> None:
-        """Anything other than ro/rw (a typo like 'rwx' or 'yes') must fail
-        closed with exit 1 rather than falling through to some default."""
-        assert '"$access" != "ro" && "$access" != "rw"' in self.section
-        assert "exit 1" in self.section
+    def test_merges_rw_domains_as_rw(self) -> None:
+        assert "PROJECT_ALLOWED_DOMAINS_RW" in self.content
+        assert 'DOMAIN_ACCESS["$domain"]="rw"' in self.content
 
-    def test_rw_is_warned_not_blocked(self) -> None:
-        """rw is permitted but must emit a loud warning — the overlay can widen
-        egress, so that has to be visible in the firewall log rather than silent."""
-        assert '"$access" == "rw"' in self.section
-        assert "WARNING" in self.section and "READ-WRITE" in self.section
+    def test_no_stale_overlay_file_reference(self) -> None:
+        """The old standalone overlay file is gone; nothing should still read it."""
+        assert "domain-allowlist.local.json" not in self.content
+
+
+class TestWrapperProjectAllowlist:
+    """bin/claude reads both per-project keys, exports them to the firewall, warns
+    on rw, and validates each host before it reaches the firewall config."""
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.wrapper = CLAUDE_WRAPPER.read_text()
+
+    def test_reads_both_keys(self) -> None:
+        # Closing paren pins each as a distinct read — "allowedDomains)" is not a
+        # substring of "allowedDomainsReadWrite)".
+        assert "project_domains allowedDomains)" in self.wrapper
+        assert "project_domains allowedDomainsReadWrite)" in self.wrapper
+
+    def test_exports_both_env_vars(self) -> None:
+        assert (
+            "export PROJECT_ALLOWED_DOMAINS_RO PROJECT_ALLOWED_DOMAINS_RW"
+            in self.wrapper
+        )
+
+    def test_warns_loudly_on_rw(self) -> None:
+        """rw widens egress; the launcher (on the host, seen at launch) must warn,
+        since the firewall-container log isn't read interactively."""
+        assert "READ-WRITE" in self.wrapper and "WARNING" in self.wrapper
+
+    def test_validates_domain_format(self) -> None:
+        """A junk/wildcard host must abort the launch rather than reach dnsmasq."""
+        assert "invalid per-project domain" in self.wrapper
 
 
 # ── Entrypoint hardening ────────────────────────────────────────────
