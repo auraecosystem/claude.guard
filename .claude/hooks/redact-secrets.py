@@ -59,13 +59,17 @@ _FIELD_NAMES = "|".join(
     ]
 )
 UNQUOTED_FIELD_RE = re.compile(
-    # No leading-letter lookbehind so "mypassword: ..." still matches. Value is
-    # non-whitespace/quote/backtick bytes: a special char (!@#) inside a secret
-    # must not truncate the capture below the length threshold, and the anchor
-    # avoids swallowing trailing prose. No nested quantifier -> no catastrophic
-    # backtracking.
+    # No leading-letter lookbehind so "mypassword: ..." still matches. The value
+    # is non-whitespace/quote/backtick bytes minus the structural delimiters
+    # {}() that open shell expansions ${VAR}, command substitutions $(...), and
+    # code calls foo(...) — none occur inside a contiguous secret token, so
+    # excluding them trims a class of source-code false positives without
+    # shortening a real secret. Other specials (!@#) stay allowed so a symbol
+    # inside a secret doesn't truncate the capture below the length threshold,
+    # and the anchor avoids swallowing trailing prose. No nested quantifier ->
+    # no catastrophic backtracking.
     rf"((?:{_FIELD_NAMES})\s*[:=]\s*(?:(?:Bearer|Token|Basic)\s+)?)"
-    r"([^\s\"'`]{20,})",
+    r"([^\s\"'`{}()]{20,})",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -100,6 +104,19 @@ def _is_benign_cursor(m: re.Match[str]) -> bool:
     while i > 0 and (text[i - 1].isalnum() or text[i - 1] in "_-"):
         i -= 1
     return _normalize_ident(text[i : m.start(1)]) in _BENIGN_TOKEN_PREFIXES
+
+
+# A value that is a bare shell variable reference ($API_KEY, $AUTH_TOKEN) is the
+# variable's *name*, not its value — redacting it corrupts shell/config source
+# for no security gain. Skip when the value opens with a variable sigil ($ + a
+# letter or underscore). crypt/bcrypt hashes open with "$<digit>" ($2b$, $6$),
+# so they are not matched here and stay redacted.
+_SHELL_VAR_RE = re.compile(r"^\$[A-Za-z_]")
+
+
+def _is_shell_var_ref(m: re.Match[str]) -> bool:
+    """True when the matched value is a shell variable reference, not a secret."""
+    return _SHELL_VAR_RE.match(m.group(2)) is not None
 
 
 # detect-secrets' PrivateKeyDetector only matches the "-----BEGIN-----" header
@@ -146,7 +163,7 @@ def main() -> None:
     rejoined = "\n".join(lines)
 
     def _replace_field(m: re.Match[str]) -> str:
-        if _is_benign_cursor(m):
+        if _is_benign_cursor(m) or _is_shell_var_ref(m):
             return m.group(0)
         found.append("named secret field")
         return m.group(1) + "[REDACTED]"

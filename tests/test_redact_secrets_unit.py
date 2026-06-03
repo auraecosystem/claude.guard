@@ -215,6 +215,54 @@ def test_credential_token_still_redacted(mod, monkeypatch, label, text, expected
     assert result["text"] == expected, label
 
 
+# ─── Shell var refs & code delimiters not redacted ───────────────────────────
+
+
+@pytest.mark.parametrize(
+    "label, value, expected",
+    [
+        ("bare $VAR", "$ANTHROPIC_AUTH_TOKEN", True),
+        ("underscore-led $_VAR", "$_INTERNAL_TOKEN_VALUE", True),
+        # crypt/bcrypt hashes open with "$<digit>", not a var sigil -> still redact.
+        ("bcrypt $2b", "$2b$12$R9hcIPz0giURNNX3kh2OPST", False),
+        ("sha512crypt $6", "$6$roundsalt$abcdefghij1234567890", False),
+        ("ordinary secret", "SuperSecretP4ssword123456", False),
+    ],
+)
+def test_is_shell_var_ref(mod, label, value, expected):
+    m = mod.UNQUOTED_FIELD_RE.search(f"token={value}")
+    assert m is not None, label
+    assert mod._is_shell_var_ref(m) is expected, label
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        # Shell ${VAR} expansion: the value opens with the excluded "}" so the
+        # 20-char run never forms -> nothing matches (the recurring false positive).
+        (
+            "shell expansion chain",
+            '[ -z "${MONITOR_API_KEY:-}${ANTHROPIC_API_KEY:-}" ]',
+        ),
+        # Bare $VAR reference: matches the field regex but is skipped as a var ref.
+        ("bare var ref", "ANTHROPIC_AUTH_TOKEN=$ANTHROPIC_AUTH_TOKEN"),
+        # A "(" inside the first 20 bytes terminates the value below threshold.
+        ("code call parens", 'secret = randomBytes(32).toString("hex")'),
+    ],
+)
+def test_code_constructs_not_redacted(mod, monkeypatch, label, text):
+    """Shell expansions, var refs, and code calls are not secrets -> untouched."""
+    assert run_main(mod, text, monkeypatch) is None, label
+
+
+def test_bcrypt_hash_still_redacted(mod, monkeypatch):
+    """A real crypt hash after a field name still redacts (no weakening)."""
+    result = run_main(mod, "password: $2b$12$R9hcIPz0giURNNX3kh2OPST", monkeypatch)
+    assert result is not None
+    assert "named secret field" in result["found"]
+    assert result["text"] == "password: [REDACTED]"
+
+
 @pytest.mark.parametrize(
     "label, text",
     [
