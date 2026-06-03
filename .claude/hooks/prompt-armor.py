@@ -96,6 +96,7 @@ def main() -> None:
             user_msg,
             cfg.timeout,
             max_tokens=1024,
+            force_verdict=False,
         )
         raw = raw or ""
     except RuntimeError as exc:  # fail OPEN, but loudly
