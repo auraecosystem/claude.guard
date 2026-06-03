@@ -39,6 +39,10 @@ INIT_FIREWALL = REPO_ROOT / ".devcontainer" / "init-firewall.bash"
 HARDEN_MONITOR = REPO_ROOT / ".devcontainer" / "harden-monitor.bash"
 SETUP_BASH = REPO_ROOT / "setup.bash"
 DOMAIN_ALLOWLIST = REPO_ROOT / ".devcontainer" / "domain-allowlist.json"
+DOMAIN_ALLOWLIST_LOCAL = REPO_ROOT / ".devcontainer" / "domain-allowlist.local.json"
+DOMAIN_ALLOWLIST_LOCAL_EXAMPLE = (
+    REPO_ROOT / ".devcontainer" / "domain-allowlist.local.json.example"
+)
 
 
 @pytest.fixture
@@ -330,6 +334,61 @@ def test_firewall_probe_hosts_bound_to_allowlist(allowlist: dict) -> None:
                 f"init-firewall.bash contacts {host} but it is not in the allowlist — "
                 "the firewall would block its own egress and exit during init"
             )
+
+
+# ── Per-project allowlist overlay (ro-only) ─────────────────────────
+# The committed overlay (domain-allowlist.local.json) lets a project reach an
+# extra host without editing the global list, but init-firewall.bash restricts
+# it to "ro" values only — a per-project file must not open a write/exfil (rw)
+# channel. These guard that the overlay stays ro-only at every layer: the
+# shipped example, any real overlay present, and the loader that enforces it.
+
+
+def test_overlay_example_is_ro_only_json() -> None:
+    """The shipped example must be valid JSON with every value exactly "ro" —
+    it doubles as the schema users copy, so an "rw" leaking in would model the
+    forbidden case as legitimate. Asserts non-empty so an emptied example (which
+    would vacuously pass the value check) is caught."""
+    overlay = json.loads(DOMAIN_ALLOWLIST_LOCAL_EXAMPLE.read_text())
+    assert overlay, "example overlay is empty — nothing demonstrates the schema"
+    bad = {d: v for d, v in overlay.items() if v != "ro"}
+    assert not bad, f"overlay example has non-'ro' values: {bad}"
+
+
+def test_real_overlay_if_present_is_ro_only() -> None:
+    """A committed real overlay (optional, absent by default) must be ro-only.
+    Absence is the legitimate default and passes; this is not a masked no-op
+    because when the file IS present the ro-only assertion runs for real."""
+    if not DOMAIN_ALLOWLIST_LOCAL.exists():
+        pytest.skip("no per-project overlay committed (the default)")
+    overlay = json.loads(DOMAIN_ALLOWLIST_LOCAL.read_text())
+    bad = {d: v for d, v in overlay.items() if v != "ro"}
+    assert not bad, f"committed overlay has non-'ro' values: {bad}"
+
+
+class TestOverlayWiring:
+    """init-firewall.bash must actually load the overlay AND enforce ro-only.
+    Guards against the merge being silently dropped or the ro-only rejection
+    being removed — either would let the overlay widen access undetected."""
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.content = INIT_FIREWALL.read_text()
+
+    def test_references_overlay_file(self) -> None:
+        assert "domain-allowlist.local.json" in self.content
+
+    def test_rejects_non_ro_values(self) -> None:
+        assert "allows only 'ro'" in self.content
+
+    def test_overlay_guard_aborts(self) -> None:
+        """The ro-only check must fail closed: the rejection branch exits
+        non-zero rather than logging and continuing with an rw overlay entry."""
+        start = self.content.index("ALLOWLIST_LOCAL_FILE")
+        end = self.content.index("# === Firewall reset ===")
+        section = self.content[start:end]
+        assert '"$access" != "ro"' in section
+        assert "exit 1" in section
 
 
 # ── Entrypoint hardening ────────────────────────────────────────────
