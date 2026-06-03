@@ -17,7 +17,9 @@
 # bytes we just pulled were signed by that workflow at this exact commit. Any
 # failure — cosign absent, bad signature, wrong identity/commit — falls back to
 # a local build from the checked-out source rather than running an unverified
-# image.
+# image. An image published while Rekor was down carries a TSA timestamp instead
+# of a tlog entry; we accept that too (still identity- and commit-pinned), so an
+# outage at publish time doesn't force every later consumer to rebuild.
 #
 # After verification, an opt-in SBOM diff (SCCD_SBOM_DIFF=1) downloads the SPDX
 # attestation cosign attached to each verified image and prints +/- package
@@ -112,10 +114,28 @@ _sccd_verify_image() {
   # their own name) but pinned to the publish-image workflow file and commit.
   # Case-insensitive ((?i)): $owner is lowercased for GHCR, but the OIDC cert
   # identity preserves GitHub's canonical org casing (e.g. Alexander-Turner).
-  cosign verify \
-    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    --certificate-identity-regexp "(?i)^https://github\\.com/${owner}/[^/]+/\\.github/workflows/publish-image\\.yaml@" \
-    --certificate-github-workflow-sha "$sha" \
+  local identity_re="(?i)^https://github\\.com/${owner}/[^/]+/\\.github/workflows/publish-image\\.yaml@"
+  # The identity + commit pins below are the load-bearing trust anchor; BOTH the
+  # strict and the fallback attempt apply them unchanged, so neither path lets a
+  # registry or PAT compromise forge a passing image.
+  local -a pins=(
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+    --certificate-identity-regexp "$identity_re"
+    --certificate-github-workflow-sha "$sha"
+  )
+
+  # Normal case: the image is recorded in Rekor (the public transparency log),
+  # so verify strictly — the tlog inclusion proof is required.
+  cosign verify "${pins[@]}" "$digest_ref" >/dev/null 2>&1 && return 0
+
+  # Fallback: published while Rekor was down, so the signature carries an
+  # RFC3161 TSA timestamp instead of a tlog entry (publish-image.yaml's
+  # --tlog-upload=false path). --use-signed-timestamps trusts the TSA via
+  # cosign's embedded sigstore root; --insecure-ignore-tlog drops the tlog
+  # requirement. Only the public-log auditability is absent for such a commit.
+  cosign verify "${pins[@]}" \
+    --insecure-ignore-tlog=true \
+    --use-signed-timestamps \
     "$digest_ref" >/dev/null 2>&1
 }
 
@@ -131,7 +151,10 @@ _sccd_maybe_sbom_diff() {
 
   local new_sbom old_sbom diff_out
   new_sbom="$(mktemp)"
-  trap 'rm -f "$new_sbom"' RETURN
+  # Disarm on fire: a RETURN trap is global, so without `trap - RETURN` it would
+  # outlive this function and re-run when the caller returns — where $new_sbom is
+  # out of scope and trips `set -u`. The `:-` guard keeps it safe regardless.
+  trap 'rm -f "${new_sbom:-}"; trap - RETURN' RETURN
 
   # cosign attest envelope: .payload is base64 of a DSSE that carries .predicate
   # (the SPDX). Unwrap to a bare SPDX doc — what claude_sbom_diff understands.
@@ -182,10 +205,14 @@ resolve_prebuilt_image() {
   sha="${ref_main##*:git-}"
 
   echo "claude: pulling prebuilt sandbox image (skips local build)..." >&2
-  local r pull_out digest digest_ref
+  local i r pull_out digest digest_ref
+  local -a refs=("$ref_main" "$ref_monitor" "$ref_ccr")
   local -a verified=() bases=("secure-claude-sandbox" "secure-claude-monitor" "secure-claude-ccr")
-  local i=0
-  for r in "$ref_main" "$ref_monitor" "$ref_ccr"; do
+  # Iterate by index so bases[i] stays aligned without a manual counter. (A bare
+  # `((i++))` would return 1 on the first iteration when i=0 and, under the
+  # caller's `set -e`, abort the whole launch.)
+  for i in "${!refs[@]}"; do
+    r="${refs[i]}"
     if ! pull_out="$(docker pull "$r" 2>&1)"; then
       echo "$pull_out" >&2
       echo "claude: prebuilt image pull failed — building locally instead." >&2
@@ -204,7 +231,6 @@ resolve_prebuilt_image() {
     fi
     verified+=("$digest_ref")
     _sccd_maybe_sbom_diff "$digest_ref" "${bases[i]}"
-    ((i++))
   done
 
   # Pin compose to the verified digests, not the mutable tags, so the bytes that

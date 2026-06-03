@@ -59,15 +59,87 @@ _FIELD_NAMES = "|".join(
     ]
 )
 UNQUOTED_FIELD_RE = re.compile(
-    # No leading-letter lookbehind so "mypassword: ..." still matches. Value is
-    # non-whitespace/quote/backtick bytes: a special char (!@#) inside a secret
-    # must not truncate the capture below the length threshold, and the anchor
-    # avoids swallowing trailing prose. No nested quantifier -> no catastrophic
-    # backtracking.
+    # No leading-letter lookbehind so "mypassword: ..." still matches. The value
+    # is non-whitespace/quote/backtick bytes minus the structural delimiters
+    # {}() that open shell expansions ${VAR}, command substitutions $(...), and
+    # code calls foo(...) — none occur inside a contiguous secret token, so
+    # excluding them trims a class of source-code false positives without
+    # shortening a real secret. Other specials (!@#) stay allowed so a symbol
+    # inside a secret doesn't truncate the capture below the length threshold,
+    # and the anchor avoids swallowing trailing prose. No nested quantifier ->
+    # no catastrophic backtracking.
     rf"((?:{_FIELD_NAMES})\s*[:=]\s*(?:(?:Bearer|Token|Basic)\s+)?)"
-    r"([^\s\"'`]{20,})",
+    r"([^\s\"'`{}()]{20,})",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Pagination/cursor fields named "<prefix>token" are opaque page cursors, not
+# credentials (Twitter/X next_token, GCP nextPageToken, AWS NextToken,
+# Elasticsearch scroll). Their values are long and high-entropy, so the field
+# regex above redacts them and corrupts ordinary paginated API output for no
+# security gain. Skip redaction when the bare "token" keyword carries one of
+# these prefixes. Credential tokens (access/auth/api/id/session/refresh/bearer)
+# are deliberately absent, so they still redact. This narrows a noisy false
+# positive, not a boundary: detect-secrets' prefix detectors and the firewall
+# remain the real floor.
+_BENIGN_TOKEN_PREFIXES = frozenset(
+    {"next", "page", "nextpage", "continuation", "scroll", "sync", "pagination"}
+)
+
+
+def _normalize_ident(s: str) -> str:
+    return s.lower().replace("_", "").replace("-", "")
+
+
+def _is_benign_cursor(m: re.Match[str]) -> bool:
+    """True when the matched field is a known non-secret pagination cursor."""
+    keyword = _normalize_ident(re.split(r"[:=]", m.group(1), maxsplit=1)[0].strip())
+    if keyword != "token":
+        return False
+    # Walk back over the identifier characters glued before the bare keyword to
+    # recover the full field name (e.g. "next" in "nextToken", "page_" in
+    # "page_token"), which the no-lookbehind regex leaves outside group(1).
+    text = m.string
+    i = m.start(1)
+    while i > 0 and (text[i - 1].isalnum() or text[i - 1] in "_-"):
+        i -= 1
+    return _normalize_ident(text[i : m.start(1)]) in _BENIGN_TOKEN_PREFIXES
+
+
+# A value that is *wholly* a shell variable reference ($API_KEY, $AUTH_TOKEN) is
+# the variable's name, not its value — redacting it corrupts shell/config source
+# for no security gain. Require the entire value to be "$" + a shell identifier
+# and nothing more, so crypt/shadow hashes that open with a letter scheme id and
+# embed further "$" separators ($apr1$… Apache, $y$… yescrypt) are NOT mistaken
+# for a variable reference and still redact. (Digit-led schemes like $6$/$2b$
+# already fail the leading [A-Za-z_] check.)
+_SHELL_VAR_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _is_shell_var_ref(m: re.Match[str]) -> bool:
+    """True when the value is wholly a shell variable reference, not a secret."""
+    return _SHELL_VAR_RE.fullmatch(m.group(2)) is not None
+
+
+# A value rooted at a conventional system/mount directory — optionally with a
+# trailing mount mode (":ro") — is a config path, not a credential. Docker/k8s/
+# systemd mounts like "...secret:/run/monitor-secret:ro" otherwise trip the field
+# regex when a path segment matches a secret keyword. Anchoring on the known
+# roots (not any "/...") keeps a high-entropy token that merely starts with "/"
+# — base64 can — from being skipped: such a value won't begin with "/run/" etc.
+# A genuine secret placed *under* a known root after a secret keyword would be
+# skipped, but the prefix detectors (AWS/Stripe/JWT/…) run before this regex and
+# remain the floor for those.
+_FS_PATH_RE = re.compile(
+    r"/(?:run|var|etc|home|root|opt|srv|mnt|media|tmp|usr|lib|proc|sys|dev|boot|data|workspace)"
+    r"/[\w./-]+(?::\w+)?"
+)
+
+
+def _is_filesystem_path(m: re.Match[str]) -> bool:
+    """True when the matched value is an absolute filesystem path, not a secret."""
+    return _FS_PATH_RE.fullmatch(m.group(2)) is not None
+
 
 # detect-secrets' PrivateKeyDetector only matches the "-----BEGIN-----" header
 # line, so a per-line scan leaves the base64 body unredacted. Match and collapse
@@ -113,6 +185,8 @@ def main() -> None:
     rejoined = "\n".join(lines)
 
     def _replace_field(m: re.Match[str]) -> str:
+        if _is_benign_cursor(m) or _is_shell_var_ref(m) or _is_filesystem_path(m):
+            return m.group(0)
         found.append("named secret field")
         return m.group(1) + "[REDACTED]"
 
