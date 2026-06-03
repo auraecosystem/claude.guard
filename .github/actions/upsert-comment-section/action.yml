@@ -43,7 +43,16 @@ runs:
           const section = process.env.SECTION;
           const body = fs.readFileSync(process.env.BODY_FILE, 'utf8').trim();
           const sha = (process.env.COMMIT_SHA || '').slice(0, 7);
-          const meta = `_Updated ${new Date().toISOString()}${sha ? ` · commit \`${sha}\`` : ''}._`;
+          // Readable Pacific time instead of a raw ISO/UTC stamp. Explicit
+          // fields (not dateStyle/timeStyle, which can't be combined with
+          // timeZoneName) so it renders across ICU builds.
+          const stamp = new Date().toLocaleString('en-US', {
+            timeZone: 'America/Los_Angeles',
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit', hour12: true,
+            timeZoneName: 'short',
+          });
+          const meta = `_Updated ${stamp}${sha ? ` · commit \`${sha}\`` : ''}._`;
           const { owner, repo } = context.repo;
           const issue_number = context.issue.number;
 

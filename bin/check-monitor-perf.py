@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH = REPO_ROOT / "bin" / "bench-monitor.py"
@@ -331,13 +332,13 @@ def compare(current, baseline, live=None, before=None):
             f"{calls} calls (baseline {base_conns})."
         )
 
-    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M UTC"
+    now_pt = datetime.datetime.now(ZoneInfo("America/Los_Angeles")).strftime(
+        "%b %-d, %Y, %-I:%M %p %Z"
     )
     report = (
         f"{MARKER}\n"
         f"### Monitor performance\n\n"
-        f"_Updated {now_utc}_\n\n"
+        f"_Updated {now_pt}_\n\n"
         f"**Gated** — TCP connections / {calls} calls: "
         f"baseline **{base_conns}**, this run **{cur_conns}**\n\n"
         f"{verdict}\n\n"

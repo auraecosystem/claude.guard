@@ -148,21 +148,16 @@ def _annotation(divider):
     }
 
 
-def _legend_labels():
-    # Band datasets carry an empty label; filter them out of the legend so only
-    # the real series show. quickchart evaluates the config as JS, so a function
-    # here is honored.
-    return {"filter": "function(item){return item.text;}"}
-
-
 def _config(labels, series, *, title="", begin_at_zero=False, divider=None):
-    """The Chart.js config object (type/data/options) for these series."""
+    """The Chart.js config object (type/data/options) for these series.
+
+    No JS in the config: quickchart rejects configs carrying a JS function at
+    render time (400), so band datasets are hidden from the legend by their empty
+    label + transparent border rather than a legend ``filter`` function.
+    """
     options = {
         "title": {"display": bool(title), "text": title},
-        "legend": {
-            "display": sum(1 for s in series if s.label) > 1,
-            "labels": _legend_labels(),
-        },
+        "legend": {"display": sum(1 for s in series if s.label) > 1},
         "scales": {"yAxes": [{"ticks": {"beginAtZero": begin_at_zero}}]},
     }
     if divider is not None:

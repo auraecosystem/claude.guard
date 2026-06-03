@@ -64,8 +64,9 @@ def test_legend_only_shows_with_multiple_labeled_series():
         )
     )
     assert two["options"]["legend"]["display"] is True
-    # Band datasets carry empty labels and are filtered out of the legend.
-    assert "function" in two["options"]["legend"]["labels"]["filter"]
+    # No JS in the config (quickchart 400s on functions at render); bands stay out
+    # of the legend via their empty label + transparent border, not a filter fn.
+    assert "labels" not in two["options"]["legend"]
 
 
 def test_divider_annotation_and_title_and_zero():
