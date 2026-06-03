@@ -12,8 +12,8 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 # The heavy installs run as background jobs, and a subshell can't mutate a
 # counter variable in the parent. Record each warning as a line in a shared temp
 # file (short appends are atomic under O_APPEND) and tally it at the end.
-WARN_LOG="$(mktemp)"
-trap 'rm -f "$WARN_LOG"' EXIT
+WARN_LOG="$(mktemp)" || WARN_LOG=/dev/null
+trap '[ "$WARN_LOG" = /dev/null ] || rm -f "$WARN_LOG"' EXIT
 warn() {
   echo "WARNING: $1" >&2
   echo x >>"$WARN_LOG"

@@ -287,6 +287,9 @@ def test_crypt_hash_still_redacted(mod, monkeypatch, label, value):
         ("single segment", "/wJalrXUtnFEMIK7MDENG", False),
         # No leading slash -> ordinary secret value.
         ("aws secret-shaped", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", False),
+        # Leading "/" + "/"-separators but NOT under a known root -> a base64
+        # token of this shape must still redact, not be mistaken for a path.
+        ("path-shaped token", "/abcdefghij/klmnopqrst/uvwxyz1234", False),
     ],
 )
 def test_is_filesystem_path(mod, label, value, expected):
@@ -300,11 +303,18 @@ def test_compose_mount_path_not_redacted(mod, monkeypatch):
     assert run_main(mod, "- monitor-secret:/run/monitor-secret:ro", monkeypatch) is None
 
 
-def test_path_shaped_secret_still_redacted(mod, monkeypatch):
-    """A secret value that merely contains '/' (not a path) still redacts."""
-    result = run_main(
-        mod, "secret = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", monkeypatch
-    )
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Contains "/" but no leading slash -> not a path.
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        # Leading slash + separators but not under a known mount root -> not a path.
+        "/abcdefghij/klmnopqrst/uvwxyz1234",
+    ],
+)
+def test_path_shaped_secret_still_redacted(mod, monkeypatch, value):
+    """A '/'-bearing value that isn't a system mount path still redacts."""
+    result = run_main(mod, f"secret = {value}", monkeypatch)
     assert result is not None
     assert result["text"] == "secret = [REDACTED]"
 

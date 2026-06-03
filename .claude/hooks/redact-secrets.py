@@ -121,13 +121,16 @@ def _is_shell_var_ref(m: re.Match[str]) -> bool:
     return _SHELL_VAR_RE.fullmatch(m.group(2)) is not None
 
 
-# A value that is an absolute filesystem path — optionally with a trailing mount
-# mode (":ro") — is a config path, not a credential. Docker/k8s/systemd mounts
-# like "...secret:/run/monitor-secret:ro" otherwise trip the field regex when a
-# path segment matches a secret keyword. Require >=2 "/"-separated segments so a
-# leading-slash base64 blob (one segment) still redacts; real secrets do not take
-# this shape (and never lead with "/").
-_FS_PATH_RE = re.compile(r"/[\w.-]+(?:/[\w.-]+)+(?::\w+)?")
+# A value rooted at a conventional system/mount directory — optionally with a
+# trailing mount mode (":ro") — is a config path, not a credential. Docker/k8s/
+# systemd mounts like "...secret:/run/monitor-secret:ro" otherwise trip the field
+# regex when a path segment matches a secret keyword. Anchoring on the known
+# roots (not any "/...") keeps a high-entropy token that merely starts with "/"
+# — base64 can — from being skipped: such a value won't begin with "/run/" etc.
+_FS_PATH_RE = re.compile(
+    r"/(?:run|var|etc|home|root|opt|srv|mnt|media|tmp|usr|lib|proc|sys|dev|boot|data|workspace)"
+    r"/[\w./-]+(?::\w+)?"
+)
 
 
 def _is_filesystem_path(m: re.Match[str]) -> bool:
