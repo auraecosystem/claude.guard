@@ -116,6 +116,29 @@ def test_charts_plot_percentages_on_fixed_0_100_axis():
     assert cfg["data"]["datasets"][-1]["data"] == [95.0]
 
 
+def test_commit_label_prefers_sha_then_pr():
+    assert report._commit_label(_row(git_sha="abc1234def")) == "abc1234"
+    # No real SHA falls back to the PR marker, then to "?".
+    assert report._commit_label(_row(git_sha="local", pr_number="42")) == "#42"
+    assert report._commit_label(_row(git_sha="", pr_number="0")) == "?"
+
+
+def test_readme_charts_safety_usefulness_only_labeled_by_commit():
+    md = report.readme_charts([_row(git_sha="deadbeef99")])
+    # Two metrics only — structured-output is dropped from the README view.
+    assert md.count("![Monitor") == 2
+    assert "![Monitor Safety chart]" in md and "![Monitor Usefulness chart]" in md
+    assert "Structured-output" not in md
+    # The x-axis names the tested commit (short SHA), not "now".
+    first_url = md.split("](", 1)[1].split(")", 1)[0]
+    cfg = json.loads(urllib.parse.parse_qs(first_url.split("?", 1)[1])["c"][0])
+    assert cfg["data"]["labels"] == ["deadbee"]
+
+
+def test_readme_charts_empty_history():
+    assert report.readme_charts([]) == ""
+
+
 def test_charts_empty_when_no_values():
     blank = _row(
         safety=None,
