@@ -24,7 +24,6 @@ This is a measurement tool, not part of the monitor's request path.
 """
 
 import argparse
-import http.client
 import importlib.util
 import json
 import socket
@@ -46,6 +45,9 @@ _LOCAL_REPLY = json.dumps({"content": [{"text": '{"decision":"allow"}'}]}).encod
 
 def load_monitor():
     """Import .claude/hooks/monitor.py as a module (it has no importable name)."""
+    # The facade resolves its sibling ``monitorlib`` package by name, which only
+    # works when the hooks dir is importable — true in place, not under an
+    # arbitrary CWD — so put it on sys.path before exec.
     hooks_dir = str(MONITOR_SRC.parent)
     if hooks_dir not in sys.path:
         sys.path.insert(0, hooks_dir)
@@ -118,13 +120,14 @@ def _make_local_server(response_delay_ms):
     return server, f"http://127.0.0.1:{server.server_address[1]}/v1/messages"
 
 
-def install_connect_counter(connect_delay_ms):
-    """Count real TCP connects and optionally delay each one to simulate a TLS
-    handshake. Patches http.client.HTTPConnection.connect directly (urllib uses
-    it internally). Returns (counter, restore): counter["n"] is the connection
-    count; call restore() to undo the patch."""
+def install_connect_counter(mon, connect_delay_ms):
+    """Count real TCP connects (mode-agnostic) and optionally delay each one to
+    simulate a TLS handshake. Returns (counter, restore): counter["n"] is the
+    connection count; call restore() to undo the global patch (so repeated runs
+    in one process don't stack wrappers)."""
     counter = {"n": 0}
-    original = http.client.HTTPConnection.connect
+    httpconn = mon.http.client.HTTPConnection
+    original = httpconn.connect
     delay_s = connect_delay_ms / 1000.0
 
     def counting_connect(self):
@@ -132,18 +135,31 @@ def install_connect_counter(connect_delay_ms):
         if delay_s:
             time.sleep(delay_s)
         result = original(self)
+        # Disable Nagle: on keep-alive loopback sockets the delayed-ACK/Nagle
+        # interaction adds a ~40ms stall per warm request that has nothing to do
+        # with the monitor and would swamp local timings. A real WAN link to the
+        # API doesn't exhibit it; live mode uses the monitor's own socket.
         try:
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except (OSError, AttributeError):
             pass
         return result
 
-    http.client.HTTPConnection.connect = counting_connect
+    httpconn.connect = counting_connect
 
     def restore():
-        http.client.HTTPConnection.connect = original
+        httpconn.connect = original
 
     return counter, restore
+
+
+def drop_idle_connections(mon):
+    """Close and forget every cached keep-alive connection (the --no-reuse knob
+    and live cold-call setup)."""
+    with mon._idle_lock:  # pylint: disable=protected-access
+        for entry in mon._idle_conns:  # pylint: disable=protected-access
+            entry.conn.close()
+        mon._idle_conns.clear()  # pylint: disable=protected-access
 
 
 def percentile(values, pct):
@@ -176,8 +192,11 @@ def run(mon, *, wire, api_key, model, api_url, calls, timeout, no_reuse, strict)
     wrap its JSON in prose, which is the monitor's problem to parse, not a
     reason to abort a latency measurement (the round trip still completed)."""
     system_prompt, user_msg = realistic_prompt(mon)
+    drop_idle_connections(mon)
     latencies = []
     for _ in range(calls):
+        if no_reuse:
+            drop_idle_connections(mon)
         start = time.perf_counter()
         text, _usage = mon.call_api(
             wire, api_key, model, api_url, system_prompt, user_msg, timeout
@@ -226,7 +245,12 @@ def main(argv=None):
     if args.calls < 1:
         sys.exit("--calls must be >= 1")
     mon = load_monitor()
-    counter, restore_connect = install_connect_counter(args.connect_delay_ms)
+    counter, restore_connect = install_connect_counter(mon, args.connect_delay_ms)
+    # _http_post resolves _proxy_configured in monitorlib.api's namespace, so the
+    # local-mode pin must land there (the facade re-export is patched too for any
+    # facade-level reader). monitorlib.api is a process-wide singleton, so the
+    # original is restored in finally to keep the pin from leaking across runs.
+    orig_proxy = mon.api._proxy_configured
 
     server = None
     try:
@@ -240,6 +264,11 @@ def main(argv=None):
             # transport, not verdict correctness.
             wire, api_key, model = "anthropic", "bench", args.model or "local"
             mode = "local"
+            # Pin the keep-alive path: localhost is never proxied, and an
+            # ambient HTTP_PROXY on a CI runner must not divert the loopback
+            # call onto the urllib path and skew the connection count.
+            mon.api._proxy_configured = lambda _url: False
+            mon._proxy_configured = lambda _url: False
         latencies = run(
             mon,
             wire=wire,
@@ -253,6 +282,7 @@ def main(argv=None):
         )
     finally:
         restore_connect()
+        mon.api._proxy_configured = orig_proxy
         if server is not None:
             server.shutdown()
 
