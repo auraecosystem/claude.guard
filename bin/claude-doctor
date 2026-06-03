@@ -56,9 +56,9 @@ errs = Console(stderr=True, highlight=False, force_terminal=_force, no_color=SUP
 degraded: list[str] = []
 unprotected: list[str] = []
 
-OK = Text("✓", style="bold green")  # check
-BAD = Text("✗", style="bold red")  # cross
-WARN = Text("⚠", style="bold yellow")  # warning
+OK_SYMBOL = Text("✓", style="bold green")
+BAD_SYMBOL = Text("✗", style="bold red")
+WARN_SYMBOL = Text("⚠", style="bold yellow")
 
 
 class Runtime(str, Enum):
@@ -89,9 +89,9 @@ class VerdictInfo:
 class Verdict(Enum):
     """Overall enforcement state; carries its presentation and exit code."""
 
-    PROTECTED = VerdictInfo("PROTECTED", "green", OK, 0)
-    DEGRADED = VerdictInfo("DEGRADED", "yellow", WARN, 1)
-    UNPROTECTED = VerdictInfo("UNPROTECTED", "red", BAD, 2)
+    PROTECTED = VerdictInfo("PROTECTED", "green", OK_SYMBOL, 0)
+    DEGRADED = VerdictInfo("DEGRADED", "yellow", WARN_SYMBOL, 1)
+    UNPROTECTED = VerdictInfo("UNPROTECTED", "red", BAD_SYMBOL, 2)
 
 
 def parse_enum(enum: type[Enum], value: str) -> Enum | None:
@@ -179,10 +179,12 @@ if (LIB / "runtime-detect.bash").is_file():
                 "runtime is runsc on a Docker Desktop daemon — Claude Code hangs in an epoll_pwait loop under runsc here (reproducible on macOS ARM64); use Colima or OrbStack"
             )
     else:
-        kv("isolation", mark(BAD, f"unrecognized runtime: {runtime_raw}", "red"))
+        kv("isolation", mark(BAD_SYMBOL, f"unrecognized runtime: {runtime_raw}", "red"))
         degraded.append(f"unrecognized container runtime: {runtime_raw}")
 else:
-    errs.print(mark(BAD, "lib/runtime-detect.bash not found — cannot detect runtime"))
+    errs.print(
+        mark(BAD_SYMBOL, "lib/runtime-detect.bash not found — cannot detect runtime")
+    )
     unprotected.append("runtime-detect.bash missing (broken install)")
 
 # ── Required tools on PATH ────────────────────────────────────────────────────
@@ -200,9 +202,9 @@ tools.add_column(style="dim", overflow="fold")
 for tool in (*CRITICAL, *ADVISORY):
     path = which(tool)
     if path:
-        tools.add_row(tool, mark(OK, "found", "green"), path)
+        tools.add_row(tool, mark(OK_SYMBOL, "found", "green"), path)
     else:
-        tools.add_row(tool, mark(BAD, "MISSING", "red"), "")
+        tools.add_row(tool, mark(BAD_SYMBOL, "MISSING", "red"), "")
         if tool in CRITICAL:
             unprotected.append(f"{tool} not on PATH (sandboxed launch cannot start)")
         else:
@@ -213,9 +215,12 @@ console.print(tools)
 section("Docker daemon")
 if which("docker"):
     if run_bash("docker ps").returncode == 0:
-        kv("reachable", mark(OK, "yes", "green"))
+        kv("reachable", mark(OK_SYMBOL, "yes", "green"))
     else:
-        kv("reachable", mark(BAD, "NO (daemon not running or no permission)", "red"))
+        kv(
+            "reachable",
+            mark(BAD_SYMBOL, "NO (daemon not running or no permission)", "red"),
+        )
         unprotected.append("Docker daemon not reachable — no container can launch")
 else:
     kv("reachable", Text("n/a (docker not installed)", style="dim"))
@@ -236,7 +241,7 @@ def canon(p: str) -> str:
 
 
 if not resolved:
-    kv("claude", mark(BAD, "not found on PATH", "red"))
+    kv("claude", mark(BAD_SYMBOL, "not found on PATH", "red"))
     degraded.append("no 'claude' on PATH — is ~/.local/bin on PATH? (run setup.bash)")
 elif canon(resolved) == canon(str(wrapper)):
     kv(
@@ -272,19 +277,23 @@ if managed.is_file():
     if any(c in "2367" for c in perms[1:]):
         issues.append(f"managed-settings.json is group/other-writable (mode={perms})")
     degraded.extend(issues)
-    symbol = WARN if issues else OK
+    symbol = WARN_SYMBOL if issues else OK_SYMBOL
     kv(str(managed), mark(symbol, f"present (uid={st.st_uid} mode={perms})"))
 else:
     kv(
         str(managed),
-        mark(BAD, "ABSENT — security defaults not enforced (run setup.bash)", "red"),
+        mark(
+            BAD_SYMBOL,
+            "ABSENT — security defaults not enforced (run setup.bash)",
+            "red",
+        ),
     )
     degraded.append("managed-settings.json missing — run setup.bash")
 
 # ── AI monitor ────────────────────────────────────────────────────────────────
 section("AI monitor")
 if os.environ.get("MONITOR_DISABLED") == "1":
-    console.print(mark(BAD, "MONITOR_DISABLED=1 — the AI monitor is OFF", "red"))
+    console.print(mark(BAD_SYMBOL, "MONITOR_DISABLED=1 — the AI monitor is OFF", "red"))
     degraded.append("monitor explicitly disabled (MONITOR_DISABLED=1)")
 else:
     # Reuse the launcher's auto-scan (env, then envchain) so the report reflects
@@ -305,9 +314,13 @@ else:
     if probe.stdout.strip():
         if origin:
             kv("source", Text(origin.replace("claude: ", ""), style="dim"))
-        console.print(mark(OK, "monitor API key available (env or envchain)", "green"))
+        console.print(
+            mark(OK_SYMBOL, "monitor API key available (env or envchain)", "green")
+        )
     else:
-        console.print(mark(BAD, "no monitor API key found (env or envchain)", "red"))
+        console.print(
+            mark(BAD_SYMBOL, "no monitor API key found (env or envchain)", "red")
+        )
         degraded.append("no monitor API key — tool calls run unmonitored")
 
 # ── Panic snapshots (informational; never changes the verdict) ────────────────
@@ -336,12 +349,12 @@ section("Prebuilt sandbox image")
 cosign = which("cosign")
 insecure = os.environ.get("SCCD_INSECURE_PULL") == "1"
 if cosign:
-    kv("cosign", mark(OK, f"found ({cosign})", "green"))
+    kv("cosign", mark(OK_SYMBOL, f"found ({cosign})", "green"))
 elif insecure:
     kv(
         "cosign",
         mark(
-            BAD,
+            BAD_SYMBOL,
             "MISSING — SCCD_INSECURE_PULL=1 set, pulls bypass signature verification",
             "red",
         ),
@@ -353,7 +366,7 @@ else:
     kv(
         "cosign",
         mark(
-            WARN,
+            WARN_SYMBOL,
             "MISSING — prebuilt pulls will build locally (install cosign or set SCCD_INSECURE_PULL=1)",
         ),
     )
@@ -368,7 +381,7 @@ if (LIB / "resolve-image.bash").is_file() and which("docker"):
     parts = (probe.stdout.strip().split("\t", 1) + [""])[:2]
     state, ref = parse_enum(Prebuilt, parts[0]), parts[1]
     if state is Prebuilt.AVAILABLE and (cosign or insecure):
-        plan = mark(OK, f"PULL prebuilt ({ref})", "green")
+        plan = mark(OK_SYMBOL, f"PULL prebuilt ({ref})", "green")
     elif state is Prebuilt.AVAILABLE:
         plan = Text(
             f"build locally — prebuilt available ({ref}) but cosign missing",
