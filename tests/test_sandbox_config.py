@@ -88,9 +88,35 @@ def test_service_capabilities(
         assert item in actual, f"{svc}.{key} missing {item}"
 
 
-@pytest.mark.parametrize("svc", ["app", "monitor", "ccr"])
+@pytest.mark.parametrize("svc", ["app", "monitor", "ccr", "firewall"])
 def test_no_new_privileges(compose: dict, svc: str) -> None:
     assert "no-new-privileges:true" in compose["services"][svc]["security_opt"]
+
+
+@pytest.mark.parametrize(
+    "cidr,accepted",
+    [
+        ("140.82.112.0/20", True),  # a real GitHub range
+        ("192.30.252.0/22", True),
+        ("20.205.243.166/32", True),
+        ("0.0.0.0/0", False),  # the whole Internet — must be rejected
+        ("1.2.3.4/0", False),
+        ("999.1.1.1/24", False),  # octet out of range
+        ("10.0.0.0/33", False),  # prefix out of range
+        ("10.0.0.0/7", False),  # overly broad for GitHub
+    ],
+)
+def test_github_cidr_validator(cidr: str, accepted: bool) -> None:
+    """init-firewall.bash must reject 0.0.0.0/0 and out-of-range octets/prefixes
+    from a (possibly spoofed) api.github.com/meta response, which could otherwise
+    widen the allowlist ipset to the whole Internet, while accepting GitHub's
+    real ranges. Exercises the actual regex lifted from the script."""
+    lines = INIT_FIREWALL.read_text().splitlines()
+    octet = next(ln for ln in lines if ln.strip().startswith("gh_octet="))
+    cidr_re = next(ln for ln in lines if ln.strip().startswith("gh_cidr_re="))
+    script = f'{octet.strip()}\n{cidr_re.strip()}\n[[ "{cidr}" =~ $gh_cidr_re ]]'
+    rc = subprocess.run(["bash", "-c", script], check=False).returncode
+    assert (rc == 0) is accepted
 
 
 def test_app_adds_no_caps(compose: dict) -> None:
