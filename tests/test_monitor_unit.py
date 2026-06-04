@@ -985,12 +985,9 @@ def test_call_api_anthropic_success(mon, monkeypatch):
     )
 
 
-def test_call_api_force_verdict_false_omits_tool_and_honors_max_tokens(
-    mon, monkeypatch
-):
-    # prompt-armor reuses call_api for free-form JSON (injection spans), not the
-    # allow/deny/ask verdict: force_verdict=False must drop the forced tool so
-    # the model answers in content, and a larger max_tokens must reach the wire.
+def test_generate_text_prompt_armor_omits_tool_and_honors_max_tokens(mon, monkeypatch):
+    # prompt-armor uses generate_text for free-form JSON (injection spans), not
+    # call_api: no forced verdict tool, and a larger max_tokens reaches the wire.
     captured = {}
 
     def fake_urlopen(req, timeout=None):
@@ -998,7 +995,7 @@ def test_call_api_force_verdict_false_omits_tool_and_honors_max_tokens(
         return _FakeResp({"content": [{"text": '{"injection":false}'}], "usage": {}})
 
     monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
-    content, _usage = mon.call_api(
+    content, _usage = mon.generate_text(
         "anthropic",
         "key",
         "m",
@@ -1006,8 +1003,8 @@ def test_call_api_force_verdict_false_omits_tool_and_honors_max_tokens(
         "sys",
         "msg",
         5,
-        max_tokens=1024,
-        force_verdict=False,
+        1024,
+        0,
     )
     assert content == '{"injection":false}'
     assert "tools" not in captured["body"]
