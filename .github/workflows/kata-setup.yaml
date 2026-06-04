@@ -18,6 +18,7 @@ jobs:
   # filter never reports on an unrelated PR and hangs the required check, while a
   # skipped job reports success. See decide-reusable.yaml.
   decide:
+    name: Decide (kata setup)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '^(setup\.bash|bin/check-kata-setup\.bash|\.devcontainer/|\.github/workflows/kata-setup\.yaml)'

@@ -19,6 +19,7 @@ jobs:
   # skipped job reports success. Decide runs on cheap ubuntu so an irrelevant PR
   # never boots the costly macOS runner. See decide-reusable.yaml.
   decide:
+    name: Decide (macOS setup)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '^(setup\.bash|bin/claude|bin/merge-user-settings\.sh|\.github/workflows/runc-macos\.yaml)$'

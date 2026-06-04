@@ -28,6 +28,7 @@ jobs:
   # filter never reports on an unrelated PR and hangs the required check, while a
   # skipped job reports success. See decide-reusable.yaml.
   decide:
+    name: Decide (JS)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '(\.(ts|tsx|js|jsx|mjs)$)|^(package\.json|tsconfig\.json|eslint\.config\.js|\.c8rc\.json|\.claude/hooks/redact-secrets\.py|pyproject\.toml|uv\.lock|\.github/workflows/js\.yaml)'

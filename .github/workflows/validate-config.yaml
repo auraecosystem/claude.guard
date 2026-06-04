@@ -24,6 +24,7 @@ jobs:
   # filter never reports on an unrelated PR and hangs the required check, while a
   # skipped job reports success. See decide-reusable.yaml.
   decide:
+    name: Decide (validate config)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '^(\.claude/|\.hooks/|\.github/workflows/validate-config\.yaml|\.github/scripts/validate-config\.sh|\.github/actions/setup-base-env/|\.github/actions/install-claude-cli/|\.devcontainer/|bin/|hooks/|setup\.bash|tests/|pyproject\.toml|uv\.lock)'

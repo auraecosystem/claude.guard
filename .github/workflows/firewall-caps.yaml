@@ -27,6 +27,7 @@ jobs:
   # filter never reports on an unrelated PR and hangs the required check, while a
   # skipped job reports success. See decide-reusable.yaml.
   decide:
+    name: Decide (firewall caps)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '^(\.devcontainer/docker-compose\.yml|\.devcontainer/init-firewall\.bash|\.devcontainer/firewall-lib\.bash|\.devcontainer/Dockerfile|bin/check-firewall-caps\.bash|\.github/workflows/firewall-caps\.yaml)'

@@ -23,6 +23,7 @@ jobs:
   # filter never reports on an unrelated PR and hangs the required check, while a
   # skipped job reports success. See decide-reusable.yaml.
   decide:
+    name: Decide (squid config)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '^(\.devcontainer/firewall-lib\.bash|\.devcontainer/init-firewall\.bash|\.devcontainer/Dockerfile|\.github/workflows/squid-config\.yaml)'

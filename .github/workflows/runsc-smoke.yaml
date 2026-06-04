@@ -21,6 +21,7 @@ jobs:
   # filter never reports on an unrelated PR and hangs the required check, while a
   # skipped job reports success. See decide-reusable.yaml.
   decide:
+    name: Decide (runsc smoke)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
       paths-regex: '^(bin/check-runsc-smoke\.bash|bin/check-kata-setup\.bash|setup\.bash|\.devcontainer/|tests/test_sandbox_config\.py|\.github/workflows/runsc-smoke\.yaml|\.github/actions/install-claude-cli/)'
