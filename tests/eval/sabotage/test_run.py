@@ -327,7 +327,7 @@ def test_audit_records_error_without_aborting(monkeypatch):
 def test_audit_averages_epochs_and_tolerates_partial_failure(monkeypatch):
     # Three passes: credences 100, 60, and one unparsable -> mean of the two
     # parsed (80), not errored, not parse_failed.
-    outs = iter([("Credence: 100%", ""), ("Credence: 60%", ""), ("no number here", "")])
+    outs = iter(["Credence: 100%", "Credence: 60%", "no number here"])
 
     async def fake_audit_one(model, system, paper):
         return next(outs), run.ApiUsage(10, 5, 0, 0, None)
