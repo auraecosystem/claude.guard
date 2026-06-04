@@ -30,10 +30,11 @@ jobs:
       paths-regex: '^(\.claude/hooks/monitor\.py|bin/bench-monitor\.py|bin/check-monitor-perf\.py|\.github/monitor-perf-baseline\.json|\.github/monitor-perf-history\.json|\.github/workflows/monitor-gates\.yaml)'
 
   # Mirrors the decide logic in monitor-eval.yaml (which serves the track job).
+  # Opt-in only via [monitor-eval] in the PR title — no paths-based auto-trigger.
+  # Commit message bodies are NOT checked (they may mention the tag in docs).
   decide-eval:
     uses: ./.github/workflows/decide-reusable.yaml
     with:
-      paths-regex: '^(\.claude/hooks/monitor\.py|\.claude/hooks/monitorlib/|\.devcontainer/monitor-policy\.txt|\.devcontainer/monitor-server\.py|tests/eval/|\.github/workflows/monitor-eval\.yaml)'
       trigger-keyword: "[monitor-eval]"
       heldout-keyword: "[monitor-eval-heldout]"
 

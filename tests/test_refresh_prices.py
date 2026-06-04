@@ -7,6 +7,7 @@ mocked; only the mapping/serialization logic is exercised.
 import importlib.util
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -51,6 +52,28 @@ def test_pricing_by_id_skips_malformed(rp):
         "garbage",  # not a dict -> skipped
     ]
     assert rp._pricing_by_id(models) == {"a/b": {"prompt": "0.000001"}}
+
+
+def test_fetch_openrouter_returns_data_list(rp):
+    payload = {"data": [{"id": "a/b", "pricing": {"prompt": "0.000001"}}]}
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(payload).encode()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = rp.fetch_openrouter("http://fake")
+    assert result == payload["data"]
+
+
+def test_fetch_openrouter_raises_on_non_list(rp):
+    payload = {"data": {"not": "a list"}}
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(payload).encode()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        with pytest.raises(RuntimeError, match="unexpected OpenRouter response shape"):
+            rp.fetch_openrouter("http://fake")
 
 
 def test_update_prices_refreshes_mapped_entries(rp):
