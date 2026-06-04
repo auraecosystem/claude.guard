@@ -20,8 +20,18 @@ permissions:
   contents: read
 
 jobs:
+  # Gate at the job level, not the pull_request trigger: a workflow-level paths
+  # filter never reports on an unrelated PR and hangs the required check, while a
+  # skipped job reports success. See decide-reusable.yaml.
+  decide:
+    uses: ./.github/workflows/decide-reusable.yaml
+    with:
+      paths-regex: '^(\.claude/|\.hooks/|\.github/workflows/validate-config\.yaml|\.github/scripts/validate-config\.sh|\.github/actions/setup-base-env/|\.github/actions/install-claude-cli/|\.devcontainer/|bin/|hooks/|setup\.bash|tests/|pyproject\.toml|uv\.lock)'
+
   validate:
     name: Validate shell config
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -31,6 +41,8 @@ jobs:
 
   pytest:
     name: Python tests (pytest)
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -49,6 +61,8 @@ jobs:
 
   mypy:
     name: Type check (mypy)
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -60,6 +74,8 @@ jobs:
 
   pylint:
     name: Lint (pylint)
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
