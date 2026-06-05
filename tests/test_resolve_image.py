@@ -429,21 +429,33 @@ def test_prewarm_no_compose_file_skips_build(tmp_path: Path) -> None:
     assert not _built_locally(args)
 
 
-def test_grep_e_uses_no_pcre_lookaround() -> None:
-    """`grep -E` is POSIX ERE; PCRE lookaround ((?!...)/(?=...)/(?<...)) is unsupported.
-    GNU grep (Linux/CI) only warns and keeps going, but BSD grep (macOS) aborts with
-    'repetition-operator operand invalid' — which, piped under `set -o pipefail`, killed
-    the prewarm `docker compose build` so the image silently never built. No CI job runs
-    that pipeline and Linux grep wouldn't fail on it, so guard the source directly:
-    lookaround in a grep -E is always a portability bug here."""
-    offenders = [
-        f"{i}: {line.strip()}"
-        for i, line in enumerate(LIB.read_text().splitlines(), 1)
-        if not line.lstrip().startswith("#")
-        and "grep" in line
-        and "-E" in line
-        and any(la in line for la in ("(?!", "(?=", "(?<"))
-    ]
-    assert not offenders, "PCRE lookaround in a grep -E (use plain ERE):\n" + "\n".join(
-        offenders
+def test_prewarm_build_filter_is_portable(tmp_path: Path) -> None:
+    """Run the real local-build prewarm and assert grep wrote nothing to stderr.
+
+    The prewarm pipes `docker compose build` through grep. grep only writes to stderr
+    when its pattern is non-portable: GNU grep (Linux/CI) emits 'grep: warning: ...' and
+    limps on, while BSD grep (macOS) emits 'grep: ...' and ERRORS — which, under
+    `set -o pipefail`, killed the build so the image silently never built. Asserting no
+    'grep:' line is the Linux-visible shadow of that macOS-fatal class of bug, and unlike
+    a source scan it exercises the actual pipeline against real BuildKit output."""
+    _fake_git(tmp_path)
+    # No prebuilt (manifest fails) → local-build path; `compose build` emits sample
+    # BuildKit progress so grep filters real input.
+    _write(
+        tmp_path / "docker",
+        "#!/usr/bin/env bash\n"
+        'case "$1" in\n'
+        "  manifest) exit 1 ;;\n"
+        '  compose) printf "#1 [internal] load\\n#5 [stage-0] RUN x\\n#5 DONE 0.1s\\n"; exit 0 ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n",
+    )
+    _make_compose(tmp_path)
+    script = f'set -euo pipefail\nsource {LIB}\nprewarm_sandbox_image "{tmp_path}"\n'
+    env = {"PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    res = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env, check=True
+    )
+    assert "grep:" not in res.stderr, (
+        f"grep warned/errored (non-portable regex?):\n{res.stderr}"
     )
