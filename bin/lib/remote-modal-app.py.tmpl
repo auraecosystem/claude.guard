@@ -11,6 +11,7 @@
 # Modal's gVisor isolation plus Claude Code's native sandbox — which is why the
 # agent runs WITHOUT --dangerously-skip-permissions (§7.2).
 
+import base64
 import json
 import os
 import subprocess
@@ -24,7 +25,8 @@ APP_NAME = "@@APP_NAME@@"
 TIMEOUT = @@TIMEOUT@@
 REPO_URL = "@@REPO_URL@@"  # empty string → operate on the mounted /workspace
 SECRET_NAME = "@@SECRET_NAME@@"
-CLAUDE_ARGS = json.loads(r"""@@CLAUDE_ARGS_JSON@@""")
+# base64-encoded JSON array, so no arg can break this literal (see claude-remote).
+CLAUDE_ARGS = json.loads(base64.b64decode("@@CLAUDE_ARGS_B64@@").decode())
 
 WORKSPACE = "/workspace"
 
@@ -56,15 +58,20 @@ def _setup_phase() -> None:
         )
     # Project-specific install steps belong here, e.g.:
     #   subprocess.run(["uv", "sync"], cwd=WORKSPACE, check=True)
-    # They run with the network and secrets still available.
+    # They run with the network and secrets still available. With --workdir
+    # (the mounted-tree path) there is nothing to clone or install, so this
+    # phase only matters for materializing setup secrets when there are any.
 
 
 def _agent_env() -> dict[str, str]:
     """Build the env for the AGENT phase, dropping every setup-only secret.
 
-    We forward only a curated allowlist, so secret-bearing env vars injected by
-    the Modal Secret never cross into the agent process (design brief §9.10:
-    secrets removed before the agent phase)."""
+    We forward only a curated allowlist, so the setup-only credentials injected
+    by the Modal Secret (git/wandb/HF tokens) never cross into the agent process
+    (design brief §9.10: secrets removed before the agent phase). ANTHROPIC_API_KEY
+    is the agent's OWN inference credential, not a setup secret — keep it out of
+    the Modal Secret (pass it via the environment) so this allowlist can't leak a
+    setup secret that happens to share the name."""
     keep = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "ANTHROPIC_API_KEY")
     return {k: os.environ[k] for k in keep if k in os.environ}
 

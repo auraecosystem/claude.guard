@@ -202,6 +202,11 @@ json_array() {
 }
 # Guard the empty-array expansion so it is safe under `set -u` on bash 3.2 (macOS).
 claude_args_json="$(json_array ${claude_args[@]+"${claude_args[@]}"})"
+# base64 the JSON before it reaches the template: the result is [A-Za-z0-9+/=]
+# only, so no claude arg — not even one containing `"""`, `&`, `|`, or `\` — can
+# break the template's Python string literal or the sed substitution below. The
+# pod decodes it back to JSON. tr drops the line wrapping GNU/BSD base64 add.
+claude_args_b64="$(printf '%s' "$claude_args_json" | base64 | tr -d '\n')"
 
 # Python None for "no GPU", else a quoted Modal GPU spec string.
 if [[ -z "$gpu" ]]; then
@@ -231,7 +236,7 @@ render() {
     -e "s|@@REPO_URL@@|$(sed_repl "$clone_repo")|g" \
     -e "s|@@WORKDIR@@|$(sed_repl "$workdir")|g" \
     -e "s|@@SECRET_NAME@@|$(sed_repl "$secret")|g" \
-    -e "s|@@CLAUDE_ARGS_JSON@@|$(sed_repl "$claude_args_json")|g" \
+    -e "s|@@CLAUDE_ARGS_B64@@|${claude_args_b64}|g" \
     "$template"
 }
 

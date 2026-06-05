@@ -8,8 +8,11 @@ compiled to prove the template substitution stays valid Python.
 """
 
 # covers: bin/claude-remote
+import base64
 import compileall
+import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -240,10 +243,28 @@ def test_unknown_option_fails(tmp_path: Path) -> None:
     assert "unknown option" in r.stderr
 
 
-def test_sed_metacharacters_in_prompt_survive(tmp_path: Path) -> None:
-    """A prompt containing sed-special chars (| & \\) must render verbatim into
-    valid Python, not corrupt the substitution."""
-    prompt = r"grep 'a|b' && echo \done"
+def _decode_rendered_args(stdout: str) -> list[str]:
+    """Extract and decode the base64-encoded CLAUDE_ARGS from a rendered app, so
+    a test can assert the args survived the round-trip into the pod verbatim."""
+    m = re.search(r'b64decode\("([^"]*)"\)', stdout)
+    assert m, "rendered app has no encoded CLAUDE_ARGS"
+    return json.loads(base64.b64decode(m.group(1)).decode())
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        r"grep 'a|b' && echo \done",  # sed-special chars | & \
+        'close the string """ here',  # would break a raw triple-quoted literal
+        "ampersand & backslash \\ pipe |",
+        'nested "quotes" and $vars',
+    ],
+)
+def test_hostile_prompt_renders_valid_python_and_round_trips(
+    prompt: str, tmp_path: Path
+) -> None:
+    """An arbitrary prompt must render into valid Python AND decode back to the
+    exact args on the pod — base64 makes both true regardless of metacharacters."""
     r = run_remote(
         [
             "modal",
@@ -262,6 +283,7 @@ def test_sed_metacharacters_in_prompt_survive(tmp_path: Path) -> None:
     app = tmp_path / "app.py"
     app.write_text(r.stdout)
     assert compileall.compile_file(str(app), quiet=1), "rendered app failed to compile"
+    assert _decode_rendered_args(r.stdout) == ["-p", prompt]
 
 
 def test_repo_clone_mounts_empty_workspace(tmp_path: Path) -> None:

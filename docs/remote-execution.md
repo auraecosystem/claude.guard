@@ -71,8 +71,10 @@ pip install modal && modal token new
 modal secret create claude-remote-setup GIT_TOKEN=… WANDB_API_KEY=…   # setup-phase creds
 ```
 
-Set `ANTHROPIC_API_KEY` in the env (it is forwarded into the agent phase; the
-setup-phase secret is not).
+Set `ANTHROPIC_API_KEY` in the env, **not** in the `claude-remote-setup` secret:
+it is the agent's own inference credential and is forwarded into the agent phase,
+whereas the setup-phase secret (git/wandb/HF tokens) is scrubbed before the agent
+runs.
 
 ## Credentials: minted narrow, never in the agent
 
