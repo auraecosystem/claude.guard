@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import REPO_ROOT, run_capture
+from tests._helpers import REPO_ROOT, run_capture, write_exe
 
 FIREWALL_LIB = REPO_ROOT / ".devcontainer" / "firewall-lib.bash"
 
@@ -214,3 +214,180 @@ def test_nonempty_resolver_arg_still_resolves(resolve_env: dict) -> None:
     r = run_resolve(resolve_env, "9.9.9.9", "2", "a.example.com")
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["a.example.com\t203.0.113.7"]
+
+
+# dig stub that records its argv to $ARGVLOG, used to prove the resilience flags
+# are actually passed. Still answers normally so the caller completes.
+_DIG_ARGV_STUB = (
+    "#!/bin/sh\n"
+    'echo "$*" >>"$ARGVLOG"\n'
+    'qfile=""\n'
+    "while [ $# -gt 0 ]; do\n"
+    '  if [ "$1" = "-f" ]; then qfile="$2"; shift 2; continue; fi\n'
+    "  shift\n"
+    "done\n"
+    '[ -n "$qfile" ] || exit 0\n'
+    "while IFS= read -r d; do\n"
+    '  [ -n "$d" ] || continue\n'
+    "  printf '%s.\\t300\\tIN\\tA\\t203.0.113.7\\n' \"$d\"\n"
+    'done <"$qfile"\n'
+)
+
+
+def test_batch_resolve_passes_hardened_dig_flags(tmp_path: Path) -> None:
+    # The resolver must keep dig's drop-resilience flags: +tries=2 (re-send a query
+    # the embedded resolver dropped) and +time=5. A regression to +tries=1 — the
+    # config that silently skipped ~18 domains at launch — must fail here.
+    stub_dir = tmp_path / "bin"
+    write_exe(stub_dir / "dig", _DIG_ARGV_STUB)
+    argvlog = tmp_path / "argv"
+    env = {
+        **os.environ,
+        "PATH": f"{stub_dir}:{os.environ['PATH']}",
+        "ARGVLOG": str(argvlog),
+    }
+    r = run_capture(
+        ["bash", "-c", f"source '{FIREWALL_LIB}'; batch_resolve_a '' 30 a.example.com"],
+        env=env,
+    )
+    assert r.returncode == 0, r.stderr
+    recorded = argvlog.read_text()
+    assert "+tries=2" in recorded
+    assert "+time=5" in recorded
+
+
+# === resolve_a_with_retries ===
+
+# dig stub with a persistent call counter ($CALLCOUNT) so a domain can be made to
+# "drop" on early invocations and answer later — modelling the embedded resolver
+# shedding a query under burst load. A domain named in $FLAKY produces no answer
+# while the cumulative dig-call count is <= $FLAKY_FAIL_CALLS (default 1), then
+# resolves like any other. Every other domain always resolves.
+_DIG_FLAKY_STUB = (
+    "#!/bin/sh\n"
+    'n=$(cat "$CALLCOUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$CALLCOUNT"\n'
+    'qfile=""\n'
+    "while [ $# -gt 0 ]; do\n"
+    '  if [ "$1" = "-f" ]; then qfile="$2"; shift 2; continue; fi\n'
+    "  shift\n"
+    "done\n"
+    '[ -n "$qfile" ] || exit 0\n'
+    ': "${FLAKY_FAIL_CALLS:=1}"\n'
+    "while IFS= read -r d; do\n"
+    '  [ -n "$d" ] || continue\n'
+    '  case " $FLAKY " in\n'
+    '  *" $d "*) [ "$n" -le "$FLAKY_FAIL_CALLS" ] && continue ;;\n'
+    "  esac\n"
+    "  printf '%s.\\t300\\tIN\\tA\\t203.0.113.7\\n' \"$d\"\n"
+    # Domains in $MULTI carry a second A record, exercising multi-IP dedup.
+    '  case " $MULTI " in\n'
+    '  *" $d "*) printf \'%s.\\t300\\tIN\\tA\\t203.0.113.8\\n\' "$d" ;;\n'
+    "  esac\n"
+    'done <"$qfile"\n'
+)
+
+
+@pytest.fixture
+def retry_env(tmp_path: Path) -> dict:
+    """Env with the call-counting flaky `dig` stub and a zeroed counter file."""
+    stub_dir = tmp_path / "bin"
+    write_exe(stub_dir / "dig", _DIG_FLAKY_STUB)
+    counter = tmp_path / "callcount"
+    counter.write_text("0")
+    return {
+        **os.environ,
+        "PATH": f"{stub_dir}:{os.environ['PATH']}",
+        "CALLCOUNT": str(counter),
+        "FLAKY": "",
+        "MULTI": "",
+    }
+
+
+def run_retries(env: dict, *args: str) -> subprocess.CompletedProcess[str]:
+    """Invoke resolve_a_with_retries with `sleep` stubbed so backoff is instant."""
+    quoted = " ".join(f"'{a}'" for a in args)
+    return run_capture(
+        [
+            "bash",
+            "-c",
+            f"source '{FIREWALL_LIB}'; sleep() {{ :; }}; resolve_a_with_retries {quoted}",
+        ],
+        env=env,
+    )
+
+
+def _calls(env: dict) -> int:
+    return int(Path(env["CALLCOUNT"]).read_text())
+
+
+def test_retry_recovers_transiently_dropped_domain(retry_env: dict) -> None:
+    # flaky drops on the first dig call, answers on the second — exactly the
+    # transient burst-loss the retry exists for. It must end up in the output.
+    env = {**retry_env, "FLAKY": "flaky.example.com"}
+    r = run_retries(env, "", "30", "a.example.com", "flaky.example.com")
+    assert r.returncode == 0, r.stderr
+    assert set(r.stdout.splitlines()) == {
+        "a.example.com\t203.0.113.7",
+        "flaky.example.com\t203.0.113.7",
+    }
+    # Recovery required a second pass over just the straggler.
+    assert _calls(env) == 2
+
+
+def test_no_retry_passes_when_first_resolves_everything(retry_env: dict) -> None:
+    # Clean first pass → exactly one dig invocation; the loop must not burn extra
+    # passes (or backoff sleeps) when nothing is pending.
+    r = run_retries(retry_env, "", "30", "a.example.com", "b.example.com")
+    assert r.returncode == 0, r.stderr
+    assert set(r.stdout.splitlines()) == {
+        "a.example.com\t203.0.113.7",
+        "b.example.com\t203.0.113.7",
+    }
+    assert _calls(retry_env) == 1
+
+
+def test_each_domain_emitted_once_despite_retries(retry_env: dict) -> None:
+    # A domain resolved on pass 1 must not be re-resolved or re-emitted on later
+    # passes (it drops out of the pending set), so no duplicate ipset/DNS entries.
+    env = {**retry_env, "FLAKY": "flaky.example.com"}
+    r = run_retries(env, "", "30", "ok.example.com", "flaky.example.com")
+    out = r.stdout.splitlines()
+    assert sorted(out) == [
+        "flaky.example.com\t203.0.113.7",
+        "ok.example.com\t203.0.113.7",
+    ]
+    assert len(out) == len(set(out))
+
+
+def test_permanently_unresolvable_domain_skipped_after_bounded_retries(
+    retry_env: dict,
+) -> None:
+    # A domain that never answers is skipped (not allowlisted) after a BOUNDED 3
+    # attempts — initial + 2 retries — while a resolvable peer still comes through
+    # and the function exits 0. Proves the loop terminates rather than spinning.
+    env = {**retry_env, "FLAKY": "dead.example.com", "FLAKY_FAIL_CALLS": "99"}
+    r = run_retries(env, "", "30", "live.example.com", "dead.example.com")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["live.example.com\t203.0.113.7"]
+    assert _calls(env) == 3
+
+
+def test_multiple_a_records_all_emitted_once_across_retries(retry_env: dict) -> None:
+    # A domain with several A records must yield one line per IP, each exactly once —
+    # dedup is per-domain, not per-line — even when it is recovered on a retry pass.
+    env = {**retry_env, "FLAKY": "multi.example.com", "MULTI": "multi.example.com"}
+    r = run_retries(env, "", "30", "multi.example.com")
+    assert r.returncode == 0, r.stderr
+    out = sorted(r.stdout.splitlines())
+    assert out == ["multi.example.com\t203.0.113.7", "multi.example.com\t203.0.113.8"]
+
+
+def test_empty_domain_list_resolves_nothing_without_calling_dig(
+    retry_env: dict,
+) -> None:
+    # Zero domains: the guarded empty-array expansion must not error under `set -u`,
+    # and dig is never invoked (nothing to resolve, no wasted retry passes).
+    r = run_retries(retry_env, "", "30")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ""
+    assert _calls(retry_env) == 0

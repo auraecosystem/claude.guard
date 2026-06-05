@@ -68,10 +68,13 @@ set_mode_then_owner() {
 # Batching is load-bearing, not cosmetic: Docker's embedded resolver silently
 # drops queries when ~150 arrive at once, so a single bulk `dig -f` over the whole
 # allowlist loses ~10% of domains. Capping each dig at BATCH_SIZE keeps every
-# request in flight. Shared by the initial build and the refresh loop so the two
-# resolve identically; the tier (ro/rw) is deliberately NOT a parameter — this
-# function populates the ipset/DNS view, which must admit every allowlisted domain
-# regardless of tier, and a tier-blind signature makes ro/rw-gating impossible here.
+# request in flight. `+tries=2` lets dig itself re-send a query the resolver
+# dropped within one batch (matching expand-allowlist.bash); resolve_a_with_retries
+# below layers a second, cross-batch retry on top. Shared by the initial build and
+# the refresh loop so the two resolve identically; the tier (ro/rw) is deliberately
+# NOT a parameter — this function populates the ipset/DNS view, which must admit
+# every allowlisted domain regardless of tier, and a tier-blind signature makes
+# ro/rw-gating impossible here.
 batch_resolve_a() {
   local resolver="$1" batch_size="$2"
   shift 2
@@ -89,8 +92,43 @@ batch_resolve_a() {
         continue
       fi
       printf '%s\t%s\n' "${name%.}" "$ip"
-    done < <(dig +noall +answer +time=5 +tries=1 ${server[@]+"${server[@]}"} -f "$query" 2>/dev/null)
+    done < <(dig +noall +answer +time=5 +tries=2 ${server[@]+"${server[@]}"} -f "$query" 2>/dev/null)
     rm -f "$query"
+  done
+}
+
+# resolve_a_with_retries RESOLVER BATCH_SIZE DOMAIN... — batch_resolve_a wrapped in a
+# bounded retry loop. Docker's embedded resolver sheds queries under bursts, so a
+# domain that yields no A record on one pass usually answers on the next; re-resolve
+# ONLY the still-unanswered domains, up to 3 attempts with exponential backoff (1s,
+# 2s), mirroring the GitHub-meta and dnsmasq-restart retry idioms in init-firewall.
+# Used by both the initial build and the refresh loop (one resolver, one retry
+# policy), so a transient drop no longer silently denies a domain for a whole
+# refresh interval. Emits `domain<TAB>ip` like batch_resolve_a — a domain with
+# several A records still yields one line per IP, and each domain is emitted at most
+# once across attempts (resolved domains drop out of the pending set). The backoff
+# sleeps run while the refresh loop's DNS window is open, but are bounded (<=3s total)
+# and the window only permits :53 to the resolver, so the exposure does not widen.
+resolve_a_with_retries() {
+  local resolver="$1" batch_size="$2"
+  shift 2
+  local -A seen=()
+  local pending=("$@")
+  local attempt delay=1 name ip d next
+  for attempt in 1 2 3; do
+    while IFS=$'\t' read -r name ip; do
+      [[ -n "$name" ]] || continue
+      seen["$name"]=1
+      printf '%s\t%s\n' "$name" "$ip"
+    done < <(batch_resolve_a "$resolver" "$batch_size" ${pending[@]+"${pending[@]}"})
+    next=()
+    for d in ${pending[@]+"${pending[@]}"}; do
+      [[ -z "${seen[$d]:-}" ]] && next+=("$d")
+    done
+    pending=(${next[@]+"${next[@]}"})
+    [[ ${#pending[@]} -eq 0 || "$attempt" -eq 3 ]] && break
+    sleep "$delay"
+    delay=$((delay * 2))
   done
 }
 
