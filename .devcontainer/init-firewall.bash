@@ -1,6 +1,23 @@
 #!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 IFS=$'\n\t'
+
+# Fail loudly and locatably. With set -e a denied syscall — e.g. a chmod that
+# needs a capability the firewall service dropped — aborts with only the failing
+# tool's terse stderr and no context, which surfaces downstream as an opaque
+# launch hang (the firewall healthcheck never flips, so every dependent service
+# waits out the timeout). Name the script, line, and command so `docker logs
+# <firewall>` shows the real cause. set -E propagates the trap into functions.
+trap 'echo "init-firewall.bash: FAILED at line ${LINENO} running: ${BASH_COMMAND}" >&2' ERR
+
+# Where there is no controlled external egress (CI runners, the cap check), the
+# reachability self-tests — curl example.com must be BLOCKED, api.github.com must
+# be REACHABLE, and the "allowed domain resolves" DNS probe — cannot be asserted.
+# This flag skips ONLY those network-dependent checks; every privileged setup
+# step (ipset, iptables, chown, chmod, dnsmasq, squid) still runs for real, so a
+# missing capability is still caught by the healthcheck never going green. The
+# purely local "blocked domain → NXDOMAIN" exfil check always runs.
+SKIP_VERIFY="${SCCD_FIREWALL_SKIP_VERIFY:-0}"
 
 # === Monitor sidecar HMAC secret bootstrap ===
 # Generate a fresh per-session secret the dispatch wrapper signs requests with
@@ -372,19 +389,23 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 echo "Firewall configuration complete"
-echo "Verifying firewall rules..."
-if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
-  echo "ERROR: Firewall verification failed - was able to reach https://example.com"
-  exit 1
+if [[ "$SKIP_VERIFY" == "1" ]]; then
+  echo "Skipping egress reachability verification (SCCD_FIREWALL_SKIP_VERIFY=1 — no controlled external egress here)"
 else
-  echo "Firewall verification passed - unable to reach https://example.com as expected"
-fi
+  echo "Verifying firewall rules..."
+  if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
+    echo "ERROR: Firewall verification failed - was able to reach https://example.com"
+    exit 1
+  else
+    echo "Firewall verification passed - unable to reach https://example.com as expected"
+  fi
 
-if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
-  echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"
-  exit 1
-else
-  echo "Firewall verification passed - able to reach https://api.github.com as expected"
+  if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
+    echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"
+    exit 1
+  else
+    echo "Firewall verification passed - able to reach https://api.github.com as expected"
+  fi
 fi
 
 # === DNS lockdown ===
@@ -417,12 +438,18 @@ echo "nameserver 127.0.0.1" >/etc/resolv.conf
 chmod 444 /etc/resolv.conf
 
 echo "Verifying DNS allowlist..."
-if dig +short +timeout=2 @127.0.0.1 api.github.com A | grep -q '^[0-9]'; then
-  echo "DNS allowlist passed — allowed domain resolves"
-else
-  echo "ERROR: DNS allowlist failed — allowed domain did not resolve"
-  cat /etc/resolv.conf.docker >/etc/resolv.conf
-  exit 1
+# "allowed domain resolves" depends on api.github.com having resolved during
+# setup (live DNS), so skip it where external DNS is unreliable. The
+# "blocked domain → NXDOMAIN" check below is purely local to dnsmasq — the
+# load-bearing exfil assertion — and always runs.
+if [[ "$SKIP_VERIFY" != "1" ]]; then
+  if dig +short +timeout=2 @127.0.0.1 api.github.com A | grep -q '^[0-9]'; then
+    echo "DNS allowlist passed — allowed domain resolves"
+  else
+    echo "ERROR: DNS allowlist failed — allowed domain did not resolve"
+    cat /etc/resolv.conf.docker >/etc/resolv.conf
+    exit 1
+  fi
 fi
 if dig +short +timeout=2 @127.0.0.1 evil-exfil.example.com A 2>/dev/null | grep -q '^[0-9]'; then
   echo "ERROR: DNS allowlist failed — blocked domain resolved"

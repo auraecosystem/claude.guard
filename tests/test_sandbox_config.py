@@ -87,11 +87,11 @@ def test_service_capabilities(
 
 
 # Capabilities no hardened service should ever hold, whatever it legitimately
-# adds. The firewall's exact cap_add is read from compose (the single source
-# bin/check-firewall-caps.bash also derives from and proves *sufficient* by
-# running the real ops), so this asserts the security invariant — netfilter is
-# kept, nothing dangerous is added — instead of duplicating that list here where
-# it would silently drift.
+# adds. The firewall's exact cap_add is read from compose (the single source the
+# compose-lifecycle smoke proves *sufficient* by running the real init-firewall,
+# and bin/check-firewall-caps.bash proves *load-bearing* per cap), so this asserts
+# the security invariant — netfilter is kept, nothing dangerous is added —
+# instead of duplicating that list here where it would silently drift.
 _DANGEROUS_CAPS = frozenset(
     {
         "SYS_ADMIN",
