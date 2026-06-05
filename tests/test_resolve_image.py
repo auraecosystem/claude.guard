@@ -241,6 +241,51 @@ def test_dirty_check_scoped_to_image_inputs(
     assert _probe_real(bindir, repo, git_env).split("\t")[0] == expected_state
 
 
+# Boundary of the no-stale-image guarantee: operations that change the build
+# context in non-obvious ways (a staged-only edit, a rename moving a file across
+# the context edge, a deletion) must still be caught. These guard against a
+# future refactor to a narrower pathspec/`-uno` that silently stops seeing them.
+def test_dirty_check_catches_context_mutations(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _fake_docker(bindir, manifest_ok=True)
+
+    def fresh_probe(mutate) -> str:
+        repo = tmp_path / f"repo-{mutate.__name__}"
+        git_env = _init_real_repo(repo)
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-C", str(repo), *args],
+                check=True,
+                capture_output=True,
+                env=git_env,
+            )
+
+        mutate(repo, git)
+        return _probe_real(bindir, repo, git_env).split("\t")[0]
+
+    def staged_in_context(repo: Path, git) -> None:
+        (repo / ".devcontainer" / "Dockerfile").write_text("x\n")
+        git("add", ".devcontainer/Dockerfile")  # index-only, no working-tree delta
+
+    def rename_out_of_context(repo: Path, git) -> None:
+        git("mv", ".devcontainer/Dockerfile", "bin/Dockerfile")  # context loses a file
+
+    def delete_in_context(repo: Path, git) -> None:
+        (repo / ".devcontainer" / "Dockerfile").unlink()
+
+    def staged_out_of_context(repo: Path, git) -> None:
+        (repo / "bin" / "tool").write_text("x\n")
+        git("add", "bin/tool")
+
+    assert fresh_probe(staged_in_context) == "dirty"
+    assert fresh_probe(rename_out_of_context) == "dirty"
+    assert fresh_probe(delete_in_context) == "dirty"
+    # A staged change wholly outside the context must NOT force a local build.
+    assert fresh_probe(staged_out_of_context) == "available"
+
+
 def test_success_path_exports_verified_tags(tmp_path: Path) -> None:
     _fake_git(tmp_path)
     _fake_docker(tmp_path, manifest_ok=True)
