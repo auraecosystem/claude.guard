@@ -22,7 +22,7 @@ FAILED=0
 run_check() {
   local name="$1" cmd="$2"
   local output
-  if ! output=$($cmd 2>&1); then
+  if ! output=$("$cmd" 2>&1); then
     echo "=== $name FAILED ===" >&2
     echo "$output" >&2
     FAILED=1
@@ -32,7 +32,7 @@ run_check() {
 # Node.js checks
 has_script lint && run_check "lint" "pnpm lint"
 
-if ! $IS_DRAFT; then
+if ! "$IS_DRAFT"; then
   has_script build && run_check "build" "pnpm build"
   has_script check && run_check "typecheck" "pnpm check"
   has_script test && run_check "tests" "pnpm test"
@@ -46,7 +46,7 @@ if [[ -f pyproject.toml ]] || [[ -f uv.lock ]]; then
   { exists ruff || [[ -n "$PREFIX" ]]; } && run_check "ruff" "${PREFIX}ruff check ."
 fi
 
-if $IS_DRAFT; then
+if "$IS_DRAFT"; then
   echo "Draft PR — skipped build/typecheck/tests (lint still ran)." >&2
 fi
 

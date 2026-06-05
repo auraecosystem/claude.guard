@@ -41,6 +41,14 @@ repos:
       - id: shfmt
         args: [-i, "2", -w]
 
+  - repo: local
+    hooks:
+      - id: shellharden
+        name: shellharden (bash quoting)
+        entry: shellharden --replace
+        language: system
+        types: [shell]
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.5
     hooks:
