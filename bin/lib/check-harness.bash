@@ -5,6 +5,8 @@
 # invariants per run, not just the first — turning a one-bug-per-run loop into a
 # whole batch per run.
 #
+# Portable to bash 3.2 (macOS /bin/bash): indexed arrays only, no `declare -A`.
+#
 # RESTRICTION — DIAGNOSTIC USE ONLY. This belongs in health checks and smoke
 # tests. Do NOT use it to soften a production code path (e.g. init-firewall.bash):
 # a real launch must fail loud at the first error. Collecting failures is correct
@@ -35,23 +37,39 @@
 # can't tell "absent (ok)" from "the probe itself errored (bad)" — gate those
 # with --needs on a liveness check.
 
-# Associative arrays and the `$(set -e; ...)` capture below need bash >= 4. macOS
-# ships /bin/bash 3.2, so fail loud with a fix rather than a cryptic
-# `declare: -A: invalid option`. The guard precedes any bash-4 syntax so it can
-# actually report on the old shell. (return when sourced; exit if run directly.)
-if ((BASH_VERSINFO[0] < 4)); then
-  echo "check-harness.bash requires bash >= 4 (have ${BASH_VERSION}); on macOS: brew install bash" >&2
-  # `return` succeeds when sourced; the `exit` is the run-directly fallback.
-  # shellcheck disable=SC2317  # reachable only when this file is executed, not sourced
-  return 1 2>/dev/null || exit 1
-fi
-
-# Results keyed by check name: pass | fail | skip. A later check can gate on an
-# earlier one's name via --needs.
-declare -A HARNESS_RESULT=()
+# Per-outcome name registries (gating + harness_result) and the description lists
+# the summary prints. Indexed arrays so this sources cleanly on bash 3.2.
+HARNESS_PASSED=()
+HARNESS_FAILED=()
+HARNESS_SKIPPED=()
 HARNESS_FAILURES=()
 HARNESS_SKIPS=()
-HARNESS_PASSES=0
+
+# Echo a check's recorded outcome: pass | fail | skip | "" (not run). The length
+# guards keep `"${arr[@]}"` from tripping set -u on an empty array under bash 3.2.
+harness_result() {
+  local name="$1" x
+  if ((${#HARNESS_PASSED[@]})); then
+    for x in "${HARNESS_PASSED[@]}"; do [[ "$x" == "$name" ]] && {
+      echo pass
+      return 0
+    }; done
+  fi
+  if ((${#HARNESS_FAILED[@]})); then
+    for x in "${HARNESS_FAILED[@]}"; do [[ "$x" == "$name" ]] && {
+      echo fail
+      return 0
+    }; done
+  fi
+  if ((${#HARNESS_SKIPPED[@]})); then
+    for x in "${HARNESS_SKIPPED[@]}"; do [[ "$x" == "$name" ]] && {
+      echo skip
+      return 0
+    }; done
+  fi
+  echo ""
+  return 1
+}
 
 run_check() {
   local needs=()
@@ -62,10 +80,11 @@ run_check() {
   local name="$1" desc="$2"
   shift 2
 
-  # A duplicate name silently corrupts --needs gating (later result overwrites
-  # the earlier one), so reject it loudly — it's a harness-usage bug, not a check
-  # failure. Returning nonzero aborts the batch under the caller's set -e.
-  if [[ -n "${HARNESS_RESULT[$name]+set}" ]]; then
+  # A duplicate name silently corrupts --needs gating (one outcome overwrites the
+  # other), so reject it loudly — a harness-usage bug, not a check failure. Any
+  # recorded outcome means the name was already used. Returning nonzero aborts the
+  # batch under the caller's set -e.
+  if [[ -n "$(harness_result "$name")" ]]; then
     echo "run_check: duplicate check name '$name' — names must be unique" >&2
     return 2
   fi
@@ -75,8 +94,8 @@ run_check() {
   local need
   if ((${#needs[@]})); then
     for need in "${needs[@]}"; do
-      if [[ "${HARNESS_RESULT[$need]:-}" != pass ]]; then
-        HARNESS_RESULT["$name"]=skip
+      if [[ "$(harness_result "$need")" != pass ]]; then
+        HARNESS_SKIPPED+=("$name")
         HARNESS_SKIPS+=("$desc — prerequisite '$need' did not pass")
         echo "SKIP $desc (needs $need)"
         return 0
@@ -105,8 +124,7 @@ run_check() {
   ((had_e)) && set -e
 
   if ((status == 0)); then
-    HARNESS_RESULT["$name"]=pass
-    HARNESS_PASSES=$((HARNESS_PASSES + 1))
+    HARNESS_PASSED+=("$name")
     echo "PASS $desc"
     return 0
   fi
@@ -116,7 +134,7 @@ run_check() {
   local reason
   reason=$(awk 'NF{last=$0} END{print last}' <<<"$output")
   [[ -n "$reason" ]] || reason="exit status $status"
-  HARNESS_RESULT["$name"]=fail
+  HARNESS_FAILED+=("$name")
   HARNESS_FAILURES+=("$desc — $reason")
   echo "FAIL $desc" >&2
   [[ -n "$output" ]] && printf '     %s\n' "$output" >&2
@@ -128,11 +146,11 @@ run_check() {
 # failure (e.g. dump container logs before teardown).
 harness_summary() {
   echo
-  if ((${#HARNESS_RESULT[@]} == 0)); then
+  if ((${#HARNESS_PASSED[@]} + ${#HARNESS_FAILED[@]} + ${#HARNESS_SKIPPED[@]} == 0)); then
     echo "harness_summary: no checks ran — nothing was registered via run_check" >&2
     return 1
   fi
-  echo "==> Summary: ${HARNESS_PASSES} passed, ${#HARNESS_FAILURES[@]} failed, ${#HARNESS_SKIPS[@]} skipped"
+  echo "==> Summary: ${#HARNESS_PASSED[@]} passed, ${#HARNESS_FAILURES[@]} failed, ${#HARNESS_SKIPS[@]} skipped"
   if ((${#HARNESS_SKIPS[@]})); then
     printf '  SKIP: %s\n' "${HARNESS_SKIPS[@]}"
   fi

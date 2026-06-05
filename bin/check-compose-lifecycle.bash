@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Test the four-container devcontainer lifecycle:
 #   firewall (netns owner) → app (Claude Code) → monitor (sidecar) → ccr (Venice router)
 # A smoke override runs the REAL init-firewall.bash with only its network

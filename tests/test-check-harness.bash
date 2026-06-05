@@ -50,7 +50,7 @@ trap 'rm -rf "$TMP"' EXIT
 # 1. A passing check is recorded pass.
 ck_pass() { return 0; }
 run_check pass_check "passing check" ck_pass >/dev/null
-assert_eq "${HARNESS_RESULT[pass_check]}" pass "passing check recorded pass"
+assert_eq "$(harness_result pass_check)" pass "passing check recorded pass"
 
 # 2. A check returning nonzero is recorded fail and the batch keeps going.
 ck_fail() {
@@ -58,7 +58,7 @@ ck_fail() {
   return 1
 }
 run_check fail_check "failing check" ck_fail >/dev/null 2>&1
-assert_eq "${HARNESS_RESULT[fail_check]}" fail "failing check recorded fail"
+assert_eq "$(harness_result fail_check)" fail "failing check recorded fail"
 
 # 3. set -e isolation: an UNEXPECTED command failure mid-check aborts the check
 #    (the command after `false` must NOT run) and is recorded as a failure — not
@@ -69,7 +69,7 @@ ck_midfail() {
   return 0
 }
 run_check midfail_check "mid-function failure" ck_midfail >/dev/null 2>&1
-assert_eq "${HARNESS_RESULT[midfail_check]}" fail "unexpected error recorded fail (not pass)"
+assert_eq "$(harness_result midfail_check)" fail "unexpected error recorded fail (not pass)"
 assert_absent "$TMP/ran_past_false" "set -e aborted the check at the failing command"
 
 # 4. run_check must not abort the caller even though checks failed under the
@@ -86,16 +86,16 @@ ck_records_run() {
   return 0
 }
 run_check --needs fail_check skipped_check "gated on a failure" ck_records_run >/dev/null
-assert_eq "${HARNESS_RESULT[skipped_check]}" skip "gated check skipped when prereq failed"
+assert_eq "$(harness_result skipped_check)" skip "gated check skipped when prereq failed"
 assert_absent "$TMP/skip_body_ran" "skipped check body did not run"
 
 # 6. --needs passes through when every prerequisite passed.
 run_check --needs pass_check gated_ok "gated on a pass" ck_pass >/dev/null
-assert_eq "${HARNESS_RESULT[gated_ok]}" pass "gated check runs when prereq passed"
+assert_eq "$(harness_result gated_ok)" pass "gated check runs when prereq passed"
 
 # 7. multiple --needs: any unmet prerequisite skips.
 run_check --needs pass_check --needs fail_check multi_gated "two prereqs, one failed" ck_pass >/dev/null
-assert_eq "${HARNESS_RESULT[multi_gated]}" skip "multi-needs skips when any prereq failed"
+assert_eq "$(harness_result multi_gated)" skip "multi-needs skips when any prereq failed"
 
 # 8. The check's reason (its last output line) is captured into the failure
 #    record, so the summary is self-contained.
