@@ -297,28 +297,18 @@ fi
 mapfile -t _domains_arr < <(printf '%s\n' "${!DOMAIN_ACCESS[@]}")
 declare -A _resolved
 
+# resolve_a_with_retries (firewall-lib.bash) re-resolves stragglers the embedded
+# resolver dropped, so transient burst losses don't silently deny a domain.
 _populate_from_resolve() {
   local domain ip
   while IFS=$'\t' read -r domain ip; do
     ipset add allowed-domains "$ip" 2>/dev/null || true
     echo "address=/$domain/$ip" >>"$DNSMASQ_CONF"
     _resolved["$domain"]=1
-  done < <(batch_resolve_a "" "$DNS_BATCH_SIZE" "$@")
+  done < <(resolve_a_with_retries "" "$DNS_BATCH_SIZE" "$@")
 }
 
 _populate_from_resolve "${_domains_arr[@]}"
-
-# Retry domains the first pass missed. Batching makes resolver drops rare, not
-# impossible; a single sequential retry of just the stragglers recovers the
-# transient ones without re-resolving the whole list.
-_missed=()
-for domain in "${!DOMAIN_ACCESS[@]}"; do
-  [[ -z "${_resolved[$domain]:-}" ]] && _missed+=("$domain")
-done
-if [[ ${#_missed[@]} -gt 0 ]]; then
-  echo "Retrying ${#_missed[@]} domain(s) the batch pass missed..."
-  _populate_from_resolve "${_missed[@]}"
-fi
 
 _failed=0
 for domain in "${!DOMAIN_ACCESS[@]}"; do
@@ -605,13 +595,14 @@ else
           [[ -n "$d" ]] && _cycle_access["$d"]="$a"
         done <"$ALLOWLIST_OVERLAY"
       fi
-      # Same batched resolver as the initial build (firewall-lib.bash), pointed at
-      # the Docker resolver while the window is open, so both paths resolve alike.
+      # Same resolver+retry path as the initial build (firewall-lib.bash), pointed
+      # at the Docker resolver while the window is open, so both paths resolve alike
+      # and a transient drop here is retried this cycle instead of waiting the next.
       local _rdomain _rip
       while IFS=$'\t' read -r _rdomain _rip; do
         ipset add "$new_set" "$_rip" 2>/dev/null || true
         echo "address=/$_rdomain/$_rip" >>"$new_conf"
-      done < <(batch_resolve_a "$DOCKER_DNS" "${DNS_BATCH_SIZE:-30}" "${!_cycle_access[@]}")
+      done < <(resolve_a_with_retries "$DOCKER_DNS" "${DNS_BATCH_SIZE:-30}" "${!_cycle_access[@]}")
       close_dns_window
 
       # Atomic swap, then destroy the now-old set. Skip the swap on an empty set
