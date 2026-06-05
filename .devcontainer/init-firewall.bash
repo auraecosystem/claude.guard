@@ -282,6 +282,26 @@ while IFS=$'\t' read -r name _ _ type ip; do
 done < <(dig +noall +answer +time=5 -f "$_dns_query" 2>/dev/null)
 rm -f "$_dns_query"
 
+# Retry domains dropped by the batch pass. Docker's embedded resolver silently
+# discards some queries when 150+ arrive concurrently; sequential retries with a
+# brief pause clear the queue and almost always succeed on the second attempt.
+_batch_missed=()
+for domain in "${!DOMAIN_ACCESS[@]}"; do
+  [[ -z "${_resolved[$domain]:-}" ]] && _batch_missed+=("$domain")
+done
+if [[ ${#_batch_missed[@]} -gt 0 ]]; then
+  echo "Retrying ${#_batch_missed[@]} domain(s) missed in batch pass..."
+  sleep 1
+  for domain in "${_batch_missed[@]}"; do
+    while IFS= read -r ip; do
+      [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || continue
+      ipset add allowed-domains "$ip" 2>/dev/null || true
+      echo "address=/$domain/$ip" >>"$DNSMASQ_CONF"
+      _resolved["$domain"]=1
+    done < <(dig +short +time=5 +tries=1 "$domain" A 2>/dev/null)
+  done
+fi
+
 _failed=0
 for domain in "${!DOMAIN_ACCESS[@]}"; do
   if [[ -z "${_resolved[$domain]:-}" ]]; then

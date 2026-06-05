@@ -15,12 +15,14 @@ services:
         TZ: ${TZ:-America/Los_Angeles}
     user: root
     # Minimal capability set for what init-firewall.bash, squid and dnsmasq
-    # actually do — everything else (MKNOD, SYS_CHROOT, SETFCAP, FOWNER,
+    # actually do — everything else (MKNOD, SYS_CHROOT, SETFCAP,
     # FSETID, AUDIT_WRITE) is dropped. Each cap maps to a concrete operation:
     #   NET_ADMIN/NET_RAW  iptables, ip6tables, ipset
     #   NET_BIND_SERVICE   dnsmasq binds :53 (squid's :3128 needs no cap)
     #   CHOWN              chown the monitor secret (root:1000) and squid log dir
     #   DAC_OVERRIDE       cross-owner file access during firewall setup
+    #   FOWNER             chmod /var/log/squid (owned by proxy, not root, on
+    #                      volume init — without this cap chmod EPERM even as root)
     #   SETUID/SETGID      squid and dnsmasq drop to their service users
     #   SETPCAP            dnsmasq adjusts its capability set when it changes uid
     #   KILL               the DNS-refresh loop signals the dnsmasq it restarts
@@ -35,6 +37,7 @@ services:
       - NET_BIND_SERVICE
       - CHOWN
       - DAC_OVERRIDE
+      - FOWNER
       - SETUID
       - SETGID
       - SETPCAP
