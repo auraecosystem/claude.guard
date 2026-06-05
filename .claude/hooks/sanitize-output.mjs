@@ -308,7 +308,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href)
       try {
         const armor = filterInjection(cleaned);
         if (armor) {
-          if (Object.hasOwn(armor, "cleaned")) cleaned = armor.cleaned;
+          if ("cleaned" in armor) cleaned = armor.cleaned;
           modified = true;
           warnings.push(armor.warning);
         }
