@@ -25,7 +25,7 @@ cd ~/.local/share/secure-claude-code-defaults
 bash setup.bash
 ```
 
-**Prerequisites:** `git`, a POSIX shell, a **Docker daemon**, and the [`uv`](https://docs.astral.sh/uv/) and [`@devcontainers/cli`](https://github.com/devcontainers/cli) tools. `setup.bash` installs claude-code and what it can package safely and points you at install docs for the rest, but a few pieces are on you: on Linux you install Docker yourself first (setup configures the Kata/gVisor runtime, not the daemon); on macOS, if you have neither Colima nor a running Docker, setup offers to install and start [Colima](https://github.com/abiosoft/colima). `claude-doctor` tells you exactly what's still missing.
+That's it — `setup.bash` installs and configures everything (Docker, the sandbox runtime, and supporting tools), prompting before each install and for `sudo` on system-level changes (or run non-interactively with `SCCD_ASSUME_YES=1`). It finishes by running `claude-doctor` to confirm your setup is fully protected.
 
 `--hooks-only` installs just the hooks + deny rules (no Docker/sandbox); `--uninstall` reverses the install (keeps your API keys).
 
