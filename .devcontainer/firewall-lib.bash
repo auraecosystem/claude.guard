@@ -61,43 +61,26 @@ set_mode_then_owner() {
   chmod "$mode" "$@" && chown "$owner" "$@"
 }
 
-# prepare_squid_log_dir DIR — make DIR writable by squid (which runs as proxy) so it
-# can append access.log, without depending on a privileged chmod the firewall service
-# can't always perform. The egress-log volume is mounted here: a fresh one is seeded
-# from the image's proxy-owned /var/log/squid, and a persisted one is proxy-owned from
-# the prior init — so DIR is normally already proxy-owned and squid can write as-is.
+# prepare_squid_log_dir DIR — verify squid (which runs as proxy) can write access.log
+# into DIR, the egress-log volume mount. The image bakes /var/log/squid as proxy:proxy
+# 750, so Docker seeds a fresh volume proxy-owned and a persisted one stays proxy-owned
+# from the prior init — DIR is already writable, so this only checks and never touches.
 #
-# In that common case we do NOTHING. The firewall holds no CAP_FOWNER, so root cannot
-# chmod a proxy-owned dir; the old "reclaim to root, then chmod" depended on an
-# in-container `chown root:root` taking effect, which some volume backends (e.g. Colima
-# named volumes) silently ignore — the chown returns 0, the dir stays proxy-owned, and
-# the chmod EPERMs with a bare "Operation not permitted" that surfaces only as a
-# firewall healthcheck that never goes green. Skipping a dir squid can already write is
-# both correct and backend-agnostic.
-#
-# Only when DIR is NOT proxy-owned (a volume not seeded from the image) do we set it:
-# reclaim to root if needed so the chmod runs while root owns the path (no FOWNER),
-# set mode+owner, then verify the handoff actually stuck — a backend that ignores chown
-# would otherwise leave squid unable to write, which we surface loudly with a remedy.
+# We deliberately never chmod/chown DIR: the firewall holds no CAP_FOWNER (so root can't
+# chmod a proxy-owned dir), and some volume backends (e.g. Colima named volumes) silently
+# ignore an in-container chown — so any re-permissioning would EPERM or no-op and hang the
+# launch on a firewall healthcheck that never goes green. The image owns the permission
+# contract; this guards it, failing loud with a remedy if DIR somehow isn't proxy-owned
+# (a volume created before the image baked it, or by another tool).
 prepare_squid_log_dir() {
   local dir="$1" owner
-  mkdir -p "$dir"
   owner="$(stat -c '%U' "$dir")"
-  if [[ "$owner" == proxy ]]; then
-    return 0
-  fi
-  if [[ "$owner" != root ]]; then
-    chown root:root "$dir"
-  fi
-  set_mode_then_owner 750 proxy:proxy "$dir"
-  owner="$(stat -c '%U' "$dir")"
-  if [[ "$owner" != proxy ]]; then
-    echo "init-firewall: handed $dir to proxy but it is still owned by '$owner' —" \
-      "this volume's filesystem is ignoring chown, so squid cannot be given its log" \
-      "dir. Remove the stale egress-log volume ('docker volume rm' the claude-egress-*" \
-      "volume) and relaunch, or use an ephemeral session." >&2
-    return 1
-  fi
+  [[ "$owner" == proxy ]] && return 0
+  echo "init-firewall: $dir is owned by '$owner', not proxy, so squid cannot write its" \
+    "access log. The image bakes it proxy-owned; a volume created before that (or by" \
+    "another tool) is stale — remove it ('docker volume rm' the claude-egress-* volume)" \
+    "and relaunch, or use an ephemeral session." >&2
+  return 1
 }
 
 # batch_resolve_a RESOLVER BATCH_SIZE DOMAIN... — resolve A records for DOMAIN...
