@@ -177,12 +177,10 @@ fi
 workdir="$(cd "$workdir" && pwd)"
 
 # ── render the provider app from the template ─────────────────────────────────
-# Encode claude args as a JSON array so the template can json.loads() them
-# without any shell re-quoting on the pod. Handles the backslash and
-# double-quote that appear in real CLI args. A literal newline or control char
-# in an arg would break both the JSON and the sed substitution below, so we
-# reject it loudly rather than emit a corrupt app (pass a multi-line prompt via
-# a file instead).
+# Encode claude args as a JSON array (escaping \ and ") so the pod can
+# json.loads() them with no shell re-quoting. Control chars are the one thing
+# JSON can't carry unescaped, so reject them loudly rather than emit a corrupt
+# array (pass a multi-line prompt via a file instead).
 json_array() {
   local out="[" first=1 arg esc
   for arg in "$@"; do

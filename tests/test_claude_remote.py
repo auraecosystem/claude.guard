@@ -36,9 +36,22 @@ def run_remote(
     return run_capture([str(launcher), *args], env=env, cwd=str(cwd))
 
 
+def _modal(*extra: str, workdir: Path) -> list[str]:
+    """The common `modal --image … --workdir …` argv, plus per-test extras."""
+    return ["modal", "--image", IMAGE, "--workdir", str(workdir), *extra]
+
+
 def _plan(stdout: str) -> dict[str, str]:
     """Parse the KEY=VALUE plan the dry run prints into a dict."""
     return dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+
+
+def _assert_valid_python(stdout: str, tmp_path: Path) -> None:
+    """A rendered app must have no leftover placeholders and must compile."""
+    assert "@@" not in stdout, "unsubstituted placeholder left in rendered app"
+    app = tmp_path / "app.py"
+    app.write_text(stdout)
+    assert compileall.compile_file(str(app), quiet=1), "rendered app failed to compile"
 
 
 # ── plan resolution ───────────────────────────────────────────────────────────
@@ -46,9 +59,7 @@ def _plan(stdout: str) -> dict[str, str]:
 
 def test_dry_run_emits_plan(tmp_path: Path) -> None:
     r = run_remote(
-        ["modal", "--image", IMAGE, "--gpu", "a10g", "--workdir", str(tmp_path)],
-        tmp_path,
-        CLAUDE_REMOTE_DRY_RUN="1",
+        _modal("--gpu", "a10g", workdir=tmp_path), tmp_path, CLAUDE_REMOTE_DRY_RUN="1"
     )
     assert r.returncode == 0, r.stderr
     plan = _plan(r.stdout)
@@ -60,32 +71,28 @@ def test_dry_run_emits_plan(tmp_path: Path) -> None:
 
 
 def test_no_gpu_defaults_to_cpu(tmp_path: Path) -> None:
-    r = run_remote(
-        ["modal", "--image", IMAGE, "--workdir", str(tmp_path)],
-        tmp_path,
-        CLAUDE_REMOTE_DRY_RUN="1",
-    )
+    r = run_remote(_modal(workdir=tmp_path), tmp_path, CLAUDE_REMOTE_DRY_RUN="1")
     assert _plan(r.stdout)["gpu"] == "none"
 
 
-def test_claude_args_json_encoded_after_double_dash(tmp_path: Path) -> None:
-    """Args after -- are JSON-encoded so the pod needs no shell re-quoting; the
-    embedded double quote must survive as an escaped JSON string."""
+@pytest.mark.parametrize(
+    "after_dashes, expected",
+    [
+        (["-p", 'say "hi"'], '["-p", "say \\"hi\\""]'),
+        ([], "[]"),
+    ],
+)
+def test_claude_args_json_encoded(
+    after_dashes: list[str], expected: str, tmp_path: Path
+) -> None:
+    """Args after -- are JSON-encoded for the plan/template; the embedded double
+    quote survives as an escaped JSON string."""
     r = run_remote(
-        ["modal", "--image", IMAGE, "--workdir", str(tmp_path), "--", "-p", 'say "hi"'],
+        _modal("--", *after_dashes, workdir=tmp_path),
         tmp_path,
         CLAUDE_REMOTE_DRY_RUN="1",
     )
-    assert _plan(r.stdout)["claude_args"] == '["-p", "say \\"hi\\""]'
-
-
-def test_no_claude_args_is_empty_list(tmp_path: Path) -> None:
-    r = run_remote(
-        ["modal", "--image", IMAGE, "--workdir", str(tmp_path)],
-        tmp_path,
-        CLAUDE_REMOTE_DRY_RUN="1",
-    )
-    assert _plan(r.stdout)["claude_args"] == "[]"
+    assert _plan(r.stdout)["claude_args"] == expected
 
 
 # ── default image resolution (needs a github.com origin) ──────────────────────
@@ -110,15 +117,19 @@ def _fake_install(tmp_path: Path) -> Path:
     return root
 
 
-def test_default_image_pins_clean_head_to_git_sha(tmp_path: Path) -> None:
-    root = _fake_install(tmp_path)
-    sha = commit_all(root, "init")
-    r = run_remote(
+def _default_image(root: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    return run_remote(
         ["modal", "--workdir", str(tmp_path)],
         root,
         launcher=root / "bin" / "claude-remote",
         CLAUDE_REMOTE_DRY_RUN="1",
     )
+
+
+def test_default_image_pins_clean_head_to_git_sha(tmp_path: Path) -> None:
+    root = _fake_install(tmp_path)
+    sha = commit_all(root, "init")
+    r = _default_image(root, tmp_path)
     assert r.returncode == 0, r.stderr
     # Owner is lowercased per GHCR's lowercase-path rule.
     assert _plan(r.stdout)["image"] == f"ghcr.io/acme/secure-claude-sandbox:git-{sha}"
@@ -128,12 +139,7 @@ def test_default_image_falls_back_to_latest_when_dirty(tmp_path: Path) -> None:
     root = _fake_install(tmp_path)
     commit_all(root, "init")
     (root / "dirty.txt").write_text("uncommitted\n")
-    r = run_remote(
-        ["modal", "--workdir", str(tmp_path)],
-        root,
-        launcher=root / "bin" / "claude-remote",
-        CLAUDE_REMOTE_DRY_RUN="1",
-    )
+    r = _default_image(root, tmp_path)
     assert r.returncode == 0, r.stderr
     assert _plan(r.stdout)["image"] == "ghcr.io/acme/secure-claude-sandbox:latest"
     assert "dirty" in r.stderr
@@ -142,38 +148,11 @@ def test_default_image_falls_back_to_latest_when_dirty(tmp_path: Path) -> None:
 # ── rendered app correctness ──────────────────────────────────────────────────
 
 
-def test_rendered_app_is_valid_python(tmp_path: Path) -> None:
-    r = run_remote(
-        [
-            "modal",
-            "--image",
-            IMAGE,
-            "--gpu",
-            "h100",
-            "--workdir",
-            str(tmp_path),
-            "--print-app",
-            "--",
-            "-p",
-            "do the thing",
-        ],
-        tmp_path,
-    )
-    assert r.returncode == 0, r.stderr
-    assert "@@" not in r.stdout, "unsubstituted placeholder left in rendered app"
-    app = tmp_path / "app.py"
-    app.write_text(r.stdout)
-    assert compileall.compile_file(str(app), quiet=1), "rendered app failed to compile"
-
-
 def test_agent_phase_keeps_native_sandbox_boundary(tmp_path: Path) -> None:
     """The security-critical invariant (design brief §7.2): the agent runs with a
     non-bypass permission mode and never with --dangerously-skip-permissions, so
     Claude Code's native sandbox stays a real boundary inside the pod."""
-    r = run_remote(
-        ["modal", "--image", IMAGE, "--workdir", str(tmp_path), "--print-app"],
-        tmp_path,
-    )
+    r = run_remote(_modal("--print-app", workdir=tmp_path), tmp_path)
     assert '"--permission-mode", "default"' in r.stdout
     # The flag must never appear as an actual argv entry (the design comment
     # mentions it in prose, hence the quoted-arg form here).
@@ -181,66 +160,10 @@ def test_agent_phase_keeps_native_sandbox_boundary(tmp_path: Path) -> None:
 
 
 def test_gpu_renders_as_python_literal(tmp_path: Path) -> None:
-    cpu = run_remote(
-        ["modal", "--image", IMAGE, "--workdir", str(tmp_path), "--print-app"], tmp_path
-    )
+    cpu = run_remote(_modal("--print-app", workdir=tmp_path), tmp_path)
     assert "GPU = None" in cpu.stdout
-    gpu = run_remote(
-        [
-            "modal",
-            "--image",
-            IMAGE,
-            "--gpu",
-            "a10g",
-            "--workdir",
-            str(tmp_path),
-            "--print-app",
-        ],
-        tmp_path,
-    )
+    gpu = run_remote(_modal("--gpu", "a10g", "--print-app", workdir=tmp_path), tmp_path)
     assert 'GPU = "a10g"' in gpu.stdout
-
-
-# ── failure modes (fail loudly) ───────────────────────────────────────────────
-
-
-def test_unknown_provider_fails(tmp_path: Path) -> None:
-    r = run_remote(
-        ["frobnicate", "--image", IMAGE], tmp_path, CLAUDE_REMOTE_DRY_RUN="1"
-    )
-    assert r.returncode != 0
-    assert "unknown provider" in r.stderr
-
-
-@pytest.mark.parametrize("provider", ["runpod", "lambda"])
-def test_planned_providers_fail_loudly(provider: str, tmp_path: Path) -> None:
-    r = run_remote([provider, "--image", IMAGE], tmp_path, CLAUDE_REMOTE_DRY_RUN="1")
-    assert r.returncode != 0
-    assert "not yet wired" in r.stderr
-
-
-def test_missing_provider_fails(tmp_path: Path) -> None:
-    r = run_remote([], tmp_path, CLAUDE_REMOTE_DRY_RUN="1")
-    assert r.returncode != 0
-    assert "no provider" in r.stderr
-
-
-def test_non_integer_timeout_rejected(tmp_path: Path) -> None:
-    r = run_remote(
-        ["modal", "--image", IMAGE, "--timeout", "soon", "--workdir", str(tmp_path)],
-        tmp_path,
-        CLAUDE_REMOTE_DRY_RUN="1",
-    )
-    assert r.returncode != 0
-    assert "--timeout" in r.stderr
-
-
-def test_unknown_option_fails(tmp_path: Path) -> None:
-    r = run_remote(
-        ["modal", "--image", IMAGE, "--bogus"], tmp_path, CLAUDE_REMOTE_DRY_RUN="1"
-    )
-    assert r.returncode != 0
-    assert "unknown option" in r.stderr
 
 
 def _decode_rendered_args(stdout: str) -> list[str]:
@@ -254,9 +177,9 @@ def _decode_rendered_args(stdout: str) -> list[str]:
 @pytest.mark.parametrize(
     "prompt",
     [
+        "do the thing",  # ordinary
         r"grep 'a|b' && echo \done",  # sed-special chars | & \
         'close the string """ here',  # would break a raw triple-quoted literal
-        "ampersand & backslash \\ pipe |",
         'nested "quotes" and $vars',
     ],
 )
@@ -266,23 +189,10 @@ def test_hostile_prompt_renders_valid_python_and_round_trips(
     """An arbitrary prompt must render into valid Python AND decode back to the
     exact args on the pod — base64 makes both true regardless of metacharacters."""
     r = run_remote(
-        [
-            "modal",
-            "--image",
-            IMAGE,
-            "--workdir",
-            str(tmp_path),
-            "--print-app",
-            "--",
-            "-p",
-            prompt,
-        ],
-        tmp_path,
+        _modal("--print-app", "--", "-p", prompt, workdir=tmp_path), tmp_path
     )
     assert r.returncode == 0, r.stderr
-    app = tmp_path / "app.py"
-    app.write_text(r.stdout)
-    assert compileall.compile_file(str(app), quiet=1), "rendered app failed to compile"
+    _assert_valid_python(r.stdout, tmp_path)
     assert _decode_rendered_args(r.stdout) == ["-p", prompt]
 
 
@@ -302,36 +212,32 @@ def test_repo_clone_mounts_empty_workspace(tmp_path: Path) -> None:
     )
     assert r.returncode == 0, r.stderr
     assert 'REPO_URL = "https://github.com/me/exp"' in r.stdout
-    # The mounted dir is a fresh empty temp dir, never the invocation cwd.
-    assert f'"{tmp_path}", WORKSPACE' not in r.stdout
-    app = tmp_path / "app.py"
-    app.write_text(r.stdout)
-    assert compileall.compile_file(str(app), quiet=1)
+    assert f'"{tmp_path}", WORKSPACE' not in r.stdout  # never the invocation cwd
+    _assert_valid_python(r.stdout, tmp_path)
 
 
-def test_repo_and_workdir_are_mutually_exclusive(tmp_path: Path) -> None:
-    r = run_remote(
-        [
-            "modal",
-            "--image",
-            IMAGE,
-            "--repo",
-            "https://x/y",
-            "--workdir",
-            str(tmp_path),
-        ],
-        tmp_path,
-        CLAUDE_REMOTE_DRY_RUN="1",
-    )
+# ── failure modes (fail loudly) ───────────────────────────────────────────────
+
+# "@WD@" is replaced with the test's tmp_path; cases that die before the workdir
+# check leave it out entirely.
+_FAILURES = [
+    ([], "no provider"),
+    (["frobnicate", "--image", IMAGE], "unknown provider"),
+    (["runpod", "--image", IMAGE], "not yet wired"),
+    (["lambda", "--image", IMAGE], "not yet wired"),
+    (["modal", "--image", IMAGE, "--bogus"], "unknown option"),
+    (["modal", "--image", IMAGE, "--timeout", "soon"], "--timeout"),
+    (
+        ["modal", "--image", IMAGE, "--repo", "https://x/y", "--workdir", "@WD@"],
+        "not both",
+    ),
+    (["modal", "--image", IMAGE, "--", "-p", "a\nb"], "control characters"),
+]
+
+
+@pytest.mark.parametrize("args, needle", _FAILURES, ids=[n for _, n in _FAILURES])
+def test_fails_loudly(args: list[str], needle: str, tmp_path: Path) -> None:
+    args = [str(tmp_path) if a == "@WD@" else a for a in args]
+    r = run_remote(args, tmp_path, CLAUDE_REMOTE_DRY_RUN="1")
     assert r.returncode != 0
-    assert "not both" in r.stderr
-
-
-def test_control_char_in_arg_rejected(tmp_path: Path) -> None:
-    r = run_remote(
-        ["modal", "--image", IMAGE, "--workdir", str(tmp_path), "--", "-p", "a\nb"],
-        tmp_path,
-        CLAUDE_REMOTE_DRY_RUN="1",
-    )
-    assert r.returncode != 0
-    assert "control characters" in r.stderr
+    assert needle in r.stderr
