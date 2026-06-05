@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-guard doctor — read-only health check for the secure-claude-code-defaults stack.
+"""claude-guard doctor — read-only health check for the claude-guard stack.
 
 Reports the REAL enforcement state so you can tell whether `claude-guard` will run
 sandboxed or has silently degraded to host execution. Strictly read-only: it
@@ -617,7 +617,9 @@ def report_prebuilt_image() -> None:
     if state is Prebuilt.AVAILABLE and cosign:
         if on_disk:
             status: Text = mark(
-                OK_SYMBOL, f"prebuilt cached ({local_tag}) — launch is instant", "green"
+                OK_SYMBOL,
+                f"prebuilt cached ({local_tag}) — no build needed on next launch",
+                "green",
             )
         else:
             status = mark(OK_SYMBOL, f"pull prebuilt ({ref}) on launch", "green")

@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup.bash — install secure-claude-code-defaults system-wide.
+# setup.bash — install claude-guard system-wide.
 # Idempotent. Run again after pulling to pick up new defaults.
 #
 # Flags:
@@ -28,7 +28,7 @@ usage() {
   cat <<'USAGE'
 Usage: setup.bash [--hooks-only] [--uninstall] [--help]
 
-Install secure-claude-code-defaults system-wide. Idempotent — safe to re-run
+Install claude-guard system-wide. Idempotent — safe to re-run
 after pulling to pick up new defaults.
 
 Options:
@@ -281,10 +281,10 @@ uninstall_kata_runtime() {
 }
 
 run_uninstall() {
-  status "Uninstalling secure-claude-code-defaults..."
+  status "Uninstalling claude-guard..."
 
   # Wrapper symlinks (only ours).
-  for script in claude claude-private claude-paranoid claude-remote claude-create-worktree claude-doctor claude-audit claude-panic loosen-firewall; do
+  for script in claude-guard claude-guard-private claude-guard-paranoid claude-guard-remote claude-guard-create-worktree claude-guard-doctor claude-guard-audit claude-guard-panic loosen-firewall; do
     remove_repo_symlink "$HOME/.local/bin/$script" "$script"
   done
   # The commands dir symlinks into this repo's skills.
@@ -400,7 +400,7 @@ if ! command_exists uv; then
 fi
 
 # dig backs host-mode firewall/monitor DNS checks. macOS ships it; on Linux it is
-# split into a separate package (optional — claude-doctor only degrades without it).
+# split into a separate package (optional — claude-guard doctor only degrades without it).
 if ! command_exists dig && ! $IS_MAC; then
   offer_install dig dig "$(dig_pkg_name)" ||
     warn "dig not installed (optional — host-mode firewall/monitor DNS helper)."
@@ -417,7 +417,7 @@ fi
 status "Linking wrapper scripts into ~/.local/bin/..."
 
 mkdir -p "$HOME/.local/bin"
-for script in claude claude-private claude-paranoid claude-remote claude-create-worktree claude-doctor claude-audit claude-panic loosen-firewall; do
+for script in claude-guard claude-guard-private claude-guard-paranoid claude-guard-remote claude-guard-create-worktree claude-guard-doctor claude-guard-audit claude-guard-panic loosen-firewall; do
   safe_symlink "$SCRIPT_DIR/bin/$script" \
     "$HOME/.local/bin/$script" "$script"
 done
@@ -996,12 +996,12 @@ else
 fi
 
 # ── PATH precedence ─────────────────────────────────────────────────────────
-# The wrapper only protects you if typing `claude` resolves to ~/.local/bin
-# ahead of any other `claude` (e.g. a global npm install). Prepend ~/.local/bin
-# to PATH in the user's shell profile (idempotent) so the wrapper wins in new
-# shells. Skips writing when `claude` already resolves to our wrapper.
+# The wrapper only protects you if typing `claude-guard` resolves to ~/.local/bin
+# ahead of any other `claude-guard`. Prepend ~/.local/bin to PATH in the user's
+# shell profile (idempotent) so the wrapper wins in new shells. Skips writing
+# when `claude-guard` already resolves to our wrapper.
 ensure_path_precedence() {
-  local marker="# secure-claude-code-defaults: ~/.local/bin on PATH"
+  local marker="# claude-guard: ~/.local/bin on PATH"
   local profile line resolved
   # fish reads neither .profile nor POSIX `export` syntax, so it needs a
   # fish-native line in its own config; the POSIX `export` form serves the rest.
@@ -1019,9 +1019,9 @@ ensure_path_precedence() {
   *) profile="$HOME/.profile" line='export PATH="$HOME/.local/bin:$PATH"' ;;
   esac
 
-  resolved="$(command -v claude 2>/dev/null || true)"
-  if [[ "$resolved" == "$HOME/.local/bin/claude" ]]; then
-    status "PATH OK — 'claude' resolves to ~/.local/bin/claude"
+  resolved="$(command -v claude-guard 2>/dev/null || true)"
+  if [[ "$resolved" == "$HOME/.local/bin/claude-guard" ]]; then
+    status "PATH OK — 'claude-guard' resolves to ~/.local/bin/claude-guard"
     return 0
   fi
 
@@ -1057,7 +1057,7 @@ else
   status "Setup complete."
 fi
 echo "   Managed settings: /etc/claude-code/managed-settings.json"
-echo "   Wrappers:       ~/.local/bin/{claude,claude-private,claude-paranoid,claude-audit}"
+echo "   Wrappers:       ~/.local/bin/{claude-guard,claude-guard-private,claude-guard-paranoid,claude-guard-audit}"
 if $IS_MAC && [[ -L "${CCR_PLIST_DEST:-}" ]]; then
   echo "   ccr daemon:     launchd (com.turntrout.ccr)"
 fi
@@ -1083,9 +1083,9 @@ if ! $sandbox_ok; then
   exit 1
 fi
 
-# Final health check: show the user their real protection state. claude-doctor
+# Final health check: show the user their real protection state. claude-guard-doctor
 # is read-only and exits non-zero when DEGRADED/UNPROTECTED, so never let its
 # status abort setup.
 echo ""
-status "Verifying your protection state with claude-doctor..."
-"$SCRIPT_DIR/bin/claude-doctor" || true
+status "Verifying your protection state with claude-guard doctor..."
+"$SCRIPT_DIR/bin/claude-guard-doctor" || true

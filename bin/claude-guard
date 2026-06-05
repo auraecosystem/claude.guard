@@ -83,9 +83,9 @@ canonicalize() {
 
 SELF_CANONICAL=$(canonicalize "$0")
 
-# First `claude` on PATH that isn't this wrapper. We install ourselves as
-# `claude`, so without the SELF_CANONICAL skip we'd re-exec back into the
-# wrapper and loop.
+# First `claude` (the inner Claude CLI) on PATH that isn't this wrapper. The
+# SELF_CANONICAL skip prevents accidental re-exec if a `claude` symlink somehow
+# resolves back to this file.
 find_real_claude() {
   local IFS=:
   local p candidate cand
@@ -170,6 +170,15 @@ case "${1:-}" in
 -h | --help | help)
   claude_wrapper_usage
   exit 0
+  ;;
+esac
+
+# Subcommand dispatch: claude-guard <subcommand> [args...]
+case "${1:-}" in
+doctor | audit | panic | private | paranoid | remote)
+  _subcmd="$1"
+  shift
+  exec "$(dirname "$SELF_CANONICAL")/claude-guard-${_subcmd}" "$@"
   ;;
 esac
 
@@ -658,18 +667,18 @@ if [[ -z "$container_id" ]]; then
       2>/dev/null | awk -F'\t' -v wf="$workspace_folder" 'index($3, wf)' |
       while IFS=$'\t' read -r svc cid _; do
         echo "claude-guard: --- last 25 log lines from the '$svc' sidecar ($cid) ---" >&2
-        docker logs --tail 25 "$cid" 2>&1 | sed 's/^/claude:   /' >&2
+        docker logs --tail 25 "$cid" 2>&1 | sed 's/^/claude-guard:   /' >&2
       done
   }
   if [[ $dc_exit -eq 124 ]]; then
     echo "claude-guard: 'devcontainer up' timed out after ${devcontainer_timeout}s." >&2
     _dump_sidecar_logs
     echo "claude-guard: a first-run image build (or its dependency install) is the usual cause; re-run with --debug to see build progress." >&2
-    echo "claude-guard: increase CLAUDE_DEVCONTAINER_TIMEOUT and retry, or run claude-guard doctor to diagnose." >&2
+    echo "claude-guard: increase CLAUDE_DEVCONTAINER_TIMEOUT and retry, or run 'claude-guard doctor' to diagnose." >&2
     echo "claude-guard: (intentional bypass: --dangerously-skip-container runs on the host without the sandbox.)" >&2
     exit 1
   elif [[ $dc_exit -ne 0 ]]; then
-    echo "claude-guard: 'devcontainer up' failed (exit $dc_exit) — check the output above; run claude-guard doctor to diagnose." >&2
+    echo "claude-guard: 'devcontainer up' failed (exit $dc_exit) — check the output above; run 'claude-guard doctor' to diagnose." >&2
     _dump_sidecar_logs
     echo "claude-guard: (intentional bypass: --dangerously-skip-container runs on the host without the sandbox.)" >&2
     exit 1
@@ -679,7 +688,7 @@ fi
 
 if [[ -z "$container_id" ]]; then
   echo "claude-guard: container not found via label devcontainer.local_folder=$workspace_folder after 'devcontainer up'." >&2
-  echo "claude-guard: retry, or run claude-guard doctor to diagnose." >&2
+  echo "claude-guard: retry, or run 'claude-guard doctor' to diagnose." >&2
   echo "claude-guard: (intentional bypass: --dangerously-skip-container runs on the host without the sandbox.)" >&2
   exit 1
 fi
