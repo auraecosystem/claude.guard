@@ -2,10 +2,10 @@
 # Layer 1 of the three-layer sandbox (container isolation); Layers 2-3
 # (OS-level sandbox + permission rules) come from ai/prompting/settings.json.
 #
-# Base image is pinned by digest so a silent retag of node:20 upstream
+# Base image is pinned by digest so a silent retag of node:22 upstream
 # doesn't change the build out from under us. Dependabot's docker
 # ecosystem keeps the digest fresh; see .github/dependabot.yml.
-FROM node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5
+FROM node:22@sha256:1031993481795705055273f2eef0c24597abdcb277d6e058c82f78cbbdef92a6
 
 ARG TZ
 ENV TZ="$TZ"
