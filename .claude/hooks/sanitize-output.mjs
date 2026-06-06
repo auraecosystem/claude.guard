@@ -23,7 +23,6 @@ import {
   errMessage,
   HookEvent,
 } from "./lib-hook-io.mjs";
-import stripAnsi from "strip-ansi";
 import {
   CHECKS,
   stripInvisible,
@@ -250,7 +249,12 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href)
     const warnings = [];
     let modified = false;
 
-    // Layer 1
+    // Layer 1. strip-ansi is loaded lazily (not a top-level import) so a missing
+    // node_modules on a cold start routes into the fail-closed catch below — which
+    // suppresses the original output — instead of crashing at import time and
+    // letting unsanitized output reach the model (fail open). Mirrors the lazy load
+    // of the remark/rehype graph below.
+    const { default: stripAnsi } = await import("strip-ansi");
     const deAnsi = stripAnsi(text);
     const hasAnsi = deAnsi.length !== text.length;
     // Detect against the same view stripInvisible acts on: a preserved leading

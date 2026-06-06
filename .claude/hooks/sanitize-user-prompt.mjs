@@ -11,7 +11,6 @@
  * a payload is to block. Thresholds match scan-invisible-chars (SessionStart)
  * for UX consistency.
  */
-import stripAnsi from "strip-ansi";
 import { readStdinJson, errMessage, HookEvent } from "./lib-hook-io.mjs";
 import {
   CHECKS,
@@ -79,7 +78,16 @@ try {
 
   // Cheap pre-check: most prompts have no ESC, skip the full stripAnsi walk.
   const hasAnsi = ESC.test(prompt);
-  const deAnsi = hasAnsi ? stripAnsi(prompt) : prompt;
+  // strip-ansi is this hook's only npm dependency. Load it lazily inside the try
+  // (not as a top-level import) so a not-yet-installed node_modules on a cold
+  // container start routes a missing dep into the fail-closed catch below instead
+  // of crashing at import time — a static import that throws would slip the prompt
+  // through UNSANITIZED (fail open). Only loaded when ANSI is actually present, so
+  // a benign prompt during the install window still passes via the local invisible-
+  // char detection, which needs no npm deps.
+  const deAnsi = hasAnsi
+    ? (await import("strip-ansi")).default(prompt)
+    : prompt;
 
   const longRunSample = deAnsi.match(LONG_RUN_RE)?.[0] ?? null;
   const invisibleCount = deAnsi.match(STRIP)?.length ?? 0;
