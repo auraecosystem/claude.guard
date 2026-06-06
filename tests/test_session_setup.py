@@ -6,7 +6,6 @@ proxy-URL remote detection that exports GH_REPO into $CLAUDE_ENV_FILE. Tool
 installation is via apt and never asserted on.
 """
 
-import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -159,24 +158,15 @@ def test_pins_and_fetches_modern_gh_from_official_release() -> None:
     assert text.count("_install_modern_gh") >= 2
 
 
-def _make_fake_gh(bindir: Path, version: str) -> None:
-    gh = bindir / "gh"
-    gh.write_text(f'#!/bin/bash\necho "gh version {version} (2025-01-01)"\n')
-    gh.chmod(0o755)
-
-
-def test_modern_gh_already_present_is_not_reinstalled(
+def test_local_gh_already_installed_is_left_untouched(
     repo: Path, env_file: Path, tmp_path: Path
 ) -> None:
-    """When a gh new enough to have dropped the projectCards query is already on
-    PATH, the installer skips the download — nothing is fetched into ~/.local/bin."""
-    fakebin = tmp_path / "fakebin"
-    fakebin.mkdir()
-    _make_fake_gh(fakebin, "2.99.0")
-    home = tmp_path / "home"
-    home.mkdir()
-    r = _run_setup(
-        repo, env_file, HOME=str(home), PATH=f"{fakebin}:{os.environ['PATH']}"
-    )
+    """The installer is idempotent: an existing ~/.local/bin/gh is not re-fetched
+    (the gate the other installers use), so it survives a re-run byte-for-byte."""
+    gh = tmp_path / "home" / ".local" / "bin" / "gh"
+    gh.parent.mkdir(parents=True)
+    gh.write_text("#!/bin/bash\necho sentinel\n")
+    gh.chmod(0o755)
+    r = _run_setup(repo, env_file, HOME=str(tmp_path / "home"))
     assert r.returncode == 0, r.stderr
-    assert not (home / ".local" / "bin" / "gh").exists()
+    assert gh.read_text() == "#!/bin/bash\necho sentinel\n"
