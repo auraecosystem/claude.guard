@@ -17,7 +17,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from tests._helpers import run_capture, write_exe
+from tests._helpers import mirror_path_excluding, run_capture, write_exe
 from tests.test_claude_wrapper import (
     WRAPPER,
     _init_repo,
@@ -148,25 +148,6 @@ def _container_env(tmp_path: Path, **overrides: str) -> tuple[Path, Path, dict]:
 def _run_container(repo: Path, env: dict, *args: str):
     """Run the wrapper down the container path from inside git repo `repo`."""
     return run_capture([str(WRAPPER), *args], env=env, cwd=repo)
-
-
-def _mirror_path_excluding(tmp_path: Path, *exclude: str) -> Path:
-    """A dir that symlinks every executable on the current PATH *except* the
-    named tools. Lets a test make a standard tool (docker, realpath, ...) appear
-    'not installed' without disturbing the others the wrapper needs."""
-    mirror = tmp_path / ("mirror_" + "_".join(exclude))
-    mirror.mkdir()
-    seen: set[str] = set()
-    for d in os.environ.get("PATH", "").split(":"):
-        if not d or not Path(d).is_dir():
-            continue
-        for entry in Path(d).iterdir():
-            if entry.name in seen or entry.name in exclude:
-                continue
-            if os.access(entry, os.X_OK):
-                (mirror / entry.name).symlink_to(entry)
-                seen.add(entry.name)
-    return mirror
 
 
 def _run_guard(cwd: Path, args: list[str], path_dir: Path, **env: str):
@@ -551,7 +532,7 @@ def test_docker_cli_missing_aborts(tmp_path: Path) -> None:
     """With the devcontainer CLI present but docker absent, the sandbox can't
     launch and the wrapper fails closed naming docker."""
     _init_repo(tmp_path)
-    mirror = _mirror_path_excluding(tmp_path, "docker")
+    mirror = mirror_path_excluding(tmp_path, "docker")
     stub = tmp_path / "stub"
     stub.mkdir()
     write_exe(stub / "devcontainer", _FAKE_DEVCONTAINER)
@@ -711,7 +692,7 @@ def test_canonicalize_uses_readlink_when_realpath_absent(tmp_path: Path) -> None
     stub = tmp_path / "fakeclaude"
     stub.mkdir()
     _make_fake_claude(stub)
-    mirror = _mirror_path_excluding(tmp_path, "realpath")
+    mirror = mirror_path_excluding(tmp_path, "realpath")
     env = {**os.environ, "PATH": f"{stub}:{mirror}", "DEVCONTAINER": "1"}
     r = subprocess.run(
         [str(WRAPPER)],
@@ -732,7 +713,7 @@ def test_canonicalize_echoes_input_without_realpath_or_readlink(tmp_path: Path) 
     stub = tmp_path / "fakeclaude"
     stub.mkdir()
     _make_fake_claude(stub)
-    mirror = _mirror_path_excluding(tmp_path, "realpath", "readlink")
+    mirror = mirror_path_excluding(tmp_path, "realpath", "readlink")
     env = {**os.environ, "PATH": f"{stub}:{mirror}", "DEVCONTAINER": "1"}
     r = subprocess.run(
         [str(WRAPPER)],

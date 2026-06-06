@@ -32,6 +32,17 @@ uv_install_if_missing() {
   fi
 }
 
+# Install $cmd (crate $2) via cargo if missing; no-op when cargo is unavailable.
+cargo_install_if_missing() {
+  local cmd="$1" crate="${2:-$1}"
+  command -v "$cmd" &>/dev/null && return
+  if ! command -v cargo &>/dev/null; then
+    warn "Cannot install $crate: cargo not found"
+    return
+  fi
+  cargo install --quiet "$crate" || warn "Failed to install $crate"
+}
+
 # Install apt packages we rely on (signed by the distro keyring). No-op
 # when the package is already present or apt isn't available.
 apt_install_if_missing() {

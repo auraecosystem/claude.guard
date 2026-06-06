@@ -4,6 +4,7 @@ These decide whether the bash-coverage CI gate passes, so they are tested in
 process rather than only exercised end-to-end by run-kcov.sh.
 """
 
+import os
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -18,8 +19,17 @@ def test_wrap_argv_wraps_enrolled_script(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("SCCD_KCOV_OUT", str(tmp_path))
     enrolled = str(REPO_ROOT / _kcov.KCOV_ENROLLED[0])
     wrapped = _kcov.wrap_argv([enrolled, "--flag"])
-    assert wrapped[0] == "kcov"
+    # The kcov call is wrapped in `timeout` so a hung kcov can't stall the shard,
+    # so argv[0] is timeout; kcov appears right after it. Both are resolved to
+    # absolute paths when on PATH (the CI kcov job), else bare names — match the
+    # basename either way.
+    basenames = [os.path.basename(a) for a in wrapped]
+    assert basenames[0] == "timeout"
+    assert "kcov" in basenames
     assert "--bash-method=DEBUG" in wrapped
+    # Children (the fake docker/devcontainer/claude stubs) must not be traced, or
+    # a few container-heavy shards balloon past the timeout.
+    assert "--bash-tracefd-cloexec" in wrapped
     assert wrapped[-2:] == [enrolled, "--flag"]
     # The exclusion flags must be present so kcov-ignore markers are honored.
     assert any(a.startswith("--exclude-region=") for a in wrapped)
@@ -76,7 +86,7 @@ def test_wrap_argv_accepts_tuple(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("SCCD_KCOV_OUT", str(tmp_path))
     enrolled = str(REPO_ROOT / _kcov.KCOV_ENROLLED[0])
     wrapped = _kcov.wrap_argv((enrolled,))
-    assert wrapped[0] == "kcov"
+    assert "kcov" in [os.path.basename(a) for a in wrapped]
     assert wrapped[-1] == enrolled
 
 
@@ -98,7 +108,7 @@ def test_wrap_argv_symlink_to_enrolled_is_wrapped(monkeypatch, tmp_path) -> None
     link = tmp_path / "link-to-guard"
     link.symlink_to(enrolled_abs)
     wrapped = _kcov.wrap_argv([str(link)])
-    assert wrapped[0] == "kcov"
+    assert "kcov" in [os.path.basename(a) for a in wrapped]
 
 
 def test_wrap_argv_produces_unique_rundirs(monkeypatch, tmp_path) -> None:
@@ -232,19 +242,45 @@ def test_uncovered_by_file_absolute_path_normalized(tmp_path: Path) -> None:
     assert kcov_gate._uncovered_by_file(xml)[enrolled_rel] == [2]
 
 
+def test_uncovered_by_file_source_dir_plus_basename(tmp_path: Path) -> None:
+    """The real kcov format: a <source> dir plus a bare-basename `filename`. The
+    enrolled relpath is `<source>/<filename>` made repo-relative — matching the
+    filename alone (the basename) would miss every script (the bug that made the
+    whole merged report read NOT TRACED)."""
+    enrolled_rel = _kcov.KCOV_ENROLLED[0]  # e.g. "bin/claude-guard"
+    src_dir = str((REPO_ROOT / enrolled_rel).parent) + "/"  # ".../bin/"
+    basename = Path(enrolled_rel).name  # "claude-guard"
+    root = ET.Element("coverage")
+    ET.SubElement(ET.SubElement(root, "sources"), "source").text = src_dir
+    classes_el = ET.SubElement(
+        ET.SubElement(ET.SubElement(root, "packages"), "package"), "classes"
+    )
+    cls = ET.SubElement(classes_el, "class")
+    cls.set("filename", basename)
+    lines_el = ET.SubElement(cls, "lines")
+    for num, hits in ((1, 1), (2, 0)):
+        ln = ET.SubElement(lines_el, "line")
+        ln.set("number", str(num))
+        ln.set("hits", str(hits))
+    p = tmp_path / "cobertura.xml"
+    ET.ElementTree(root).write(str(p))
+    assert kcov_gate._uncovered_by_file(p)[enrolled_rel] == [2]
+
+
 # ---------------------------------------------------------------------------
 # kcov_gate._exclusion_markers
 # ---------------------------------------------------------------------------
 
 
 def test_exclusion_markers_real_script_has_correct_format() -> None:
-    """bin/claude-guard carries kcov-ignore markers; each returned item must be
-    'rel-path:line-number: <text>' and the text must contain 'kcov-ignore'."""
+    """Several enrolled scripts carry kcov-ignore markers; each returned item must
+    be 'rel-path:line-number: <text>', name an enrolled script, and the text must
+    contain 'kcov-ignore'."""
     markers = kcov_gate._exclusion_markers()
-    assert markers, "bin/claude-guard must have at least one kcov-ignore marker"
+    assert markers, "enrolled scripts must have at least one kcov-ignore marker"
     for m in markers:
         rel, rest = m.split(":", 1)
-        assert rel == _kcov.KCOV_ENROLLED[0]
+        assert rel in _kcov.KCOV_ENROLLED
         lineno_str, text = rest.split(":", 1)
         assert lineno_str.strip().isdigit(), (
             f"expected line number, got: {lineno_str!r}"
@@ -257,12 +293,13 @@ def test_exclusion_markers_real_script_has_correct_format() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("enrolled_rel", _kcov.KCOV_ENROLLED)
 def test_gate_main_all_covered_returns_0(
-    enrolled_rel: str, tmp_path: Path, capsys: pytest.CaptureFixture
+    tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    """100% coverage → main returns 0 and prints the success banner."""
-    xml = _cobertura(tmp_path, [(enrolled_rel, {1: 1, 2: 1})])
+    """Every enrolled script fully covered → main returns 0 and prints the success
+    banner. The gate requires *all* enrolled scripts present, so the report must
+    carry each one, not just a single script."""
+    xml = _cobertura(tmp_path, [(rel, {1: 1, 2: 1}) for rel in _kcov.KCOV_ENROLLED])
     assert kcov_gate.main(["kcov_gate.py", str(xml)]) == 0
     assert "100%" in capsys.readouterr().out
 
