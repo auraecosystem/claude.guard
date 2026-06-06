@@ -147,24 +147,26 @@ def test_non_proxy_remote_leaves_commit_signing_untouched(
     assert _local_gpgsign(repo) == ""
 
 
-def test_installs_gh_from_official_apt_repo() -> None:
+def test_installs_gh_via_official_apt_repo() -> None:
     """apt's gh is too old — it still requests the deprecated classic-Projects
-    `projectCards` field and breaks `gh pr edit`. The setup must add GitHub's official
-    apt repo and let apt install/verify gh (not hand-download a binary), and actually
-    call the installer (definition + call → the name appears at least twice)."""
+    `projectCards` field and breaks `gh pr edit`. On apt the setup must add GitHub's
+    official repo and let apt install/verify gh (not hand-download a binary), and
+    actually call the installer (definition + call → the name appears at least twice)."""
     text = SESSION_SETUP.read_text()
     assert "cli.github.com/packages" in text
     assert "sources.list.d/github-cli.list" in text
     assert "apt-get install -y -qq gh" in text
-    assert text.count("_install_current_gh") >= 2
+    assert text.count("_install_gh") >= 2
 
 
-def test_gh_install_skips_quietly_without_apt() -> None:
-    """The stale-gh problem is apt-only; on macOS/other distros the platform manager
-    already ships a current gh. The installer must short-circuit on a missing apt-get
-    BEFORE the root check, so a non-apt session start emits no spurious warning."""
+def test_gh_install_is_unified_across_package_managers() -> None:
+    """One install path for gh on every OS: apt (Debian/Ubuntu, where the distro gh is
+    too old) and Homebrew (macOS). The root check lives inside the apt branch, so a
+    macOS/brew session never trips a spurious "needs root" warning."""
     text = SESSION_SETUP.read_text()
-    body = text.split("_install_current_gh() {", 1)[1]
-    apt_gate = body.index("command -v apt-get &>/dev/null || return 0")
-    needs_root = body.index('warn "Cannot install gh: needs root"')
-    assert apt_gate < needs_root
+    body = text.split("_install_gh() {", 1)[1].split("\n}\n", 1)[0]
+    assert "command -v apt-get" in body and "command -v brew" in body
+    assert "brew install gh" in body
+    assert body.index("command -v apt-get") < body.index(
+        "Cannot install gh: needs root"
+    )
