@@ -51,9 +51,9 @@ for _arg in "$@"; do
   *) _wrapper_args+=("$_arg") ;;
   esac
 done
-set -- ${_wrapper_args[@]+"${_wrapper_args[@]}"}
+set -- "${_wrapper_args[@]+"${_wrapper_args[@]}"}"
 
-if $_skip_firewall || [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]]; then
+if "$_skip_firewall" || [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]]; then
   export DANGEROUSLY_SKIP_FIREWALL=1
   echo "claude-guard: WARNING — firewall disabled. The model has unrestricted internet access." >&2
 fi
@@ -62,7 +62,7 @@ if [[ "${DANGEROUSLY_SKIP_CONTAINER:-}" == "1" ]]; then
   _skip_container=true
 fi
 
-if $_skip_monitor || [[ "${DANGEROUSLY_SKIP_MONITOR:-}" == "1" ]]; then
+if "$_skip_monitor" || [[ "${DANGEROUSLY_SKIP_MONITOR:-}" == "1" ]]; then
   export DANGEROUSLY_SKIP_MONITOR=1
 fi
 
@@ -90,7 +90,7 @@ _self_dir="$(dirname "$SELF_CANONICAL")"
 # Exits before any devcontainer/passthrough logic — the ccr_exec re-invokes
 # this wrapper without --private so the normal sandbox launch fires on the
 # second pass with the resolved --model injected.
-if $_private; then
+if "$_private"; then
   _strict=0
   _pi_passthrough=()
   for _arg in "$@"; do
@@ -100,7 +100,7 @@ if $_private; then
       _pi_passthrough+=("$_arg")
     fi
   done
-  set -- ${_pi_passthrough[@]+"${_pi_passthrough[@]}"}
+  set -- "${_pi_passthrough[@]+"${_pi_passthrough[@]}"}"
 
   # shellcheck source=lib/venice-resolve.bash disable=SC1091
   source "$_self_dir/lib/venice-resolve.bash"
@@ -153,9 +153,10 @@ fi
 # SELF_CANONICAL skip prevents accidental re-exec if a `claude` symlink somehow
 # resolves back to this file.
 find_real_claude() {
-  local IFS=:
   local p candidate cand
-  for p in $PATH; do
+  local -a path_dirs
+  IFS=: read -ra path_dirs <<<"$PATH"
+  for p in "${path_dirs[@]}"; do
     candidate="$p/claude"
     [[ -x "$candidate" && ! -d "$candidate" ]] || continue
     cand=$(canonicalize "$candidate")
@@ -289,7 +290,7 @@ elif [[ "$_target_canon" == "$_ws_canon"/* ]]; then
   container_cwd="/workspace/${_target_canon#"$_ws_canon"/}"
 else
   container_cwd="/workspace"
-  if ! $_skip_container; then
+  if ! "$_skip_container"; then
     echo "claude-guard: CWD is outside workspace ($workspace_folder) — container will start at /workspace." >&2
   fi
 fi
@@ -373,7 +374,7 @@ run_host_claude() {
     exit 127
   }
   cd "$target_cwd"
-  exec "$real" ${_host_extra_args[@]+"${_host_extra_args[@]}"} "$@"
+  exec "$real" "${_host_extra_args[@]+"${_host_extra_args[@]}"}" "$@"
 }
 
 # Auto-scan for the monitor's provider key (env, then envchain) and export it so
@@ -431,7 +432,7 @@ if [[ "$PROTECTION_SEVERITY" == "ok" ]]; then
   echo "claude-guard: protection: $PROTECTION_LABEL (sandbox + egress firewall + monitor)." >&2
 else
   echo "claude-guard: protection: $PROTECTION_LABEL — DEGRADED:" >&2
-  for _prot_line in ${PROTECTION_LINES[@]+"${PROTECTION_LINES[@]}"}; do
+  for _prot_line in "${PROTECTION_LINES[@]+"${PROTECTION_LINES[@]}"}"; do
     echo "claude-guard:   - $_prot_line" >&2
   done
 fi
@@ -446,7 +447,7 @@ fi
 # deliberate human decision, not a reflexive fix. Skipped in host/skip-firewall
 # modes (no allowlist in play). A marker write that fails (read-only HOME) just
 # re-shows the tip next launch — it must never abort the launch.
-if ! $_skip_container && ! $_skip_firewall &&
+if ! "$_skip_container" && ! "$_skip_firewall" &&
   [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" != "1" ]]; then
   _fw_tip_marker="${XDG_STATE_HOME:-$HOME/.local/state}/claude-monitor/firewall-tip-seen"
   if [[ ! -f "$_fw_tip_marker" ]]; then
@@ -461,7 +462,7 @@ fi
 # restricting network to the allowlist via the built-in sandbox — unless the
 # firewall is also explicitly skipped. Fail loudly rather than silently running
 # unrestricted when the allowlist can't be built.
-if $_skip_container && [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" != "1" ]]; then
+if "$_skip_container" && [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" != "1" ]]; then
   if ! _host_fw=$(build_host_firewall_settings); then
     echo "claude-guard: ERROR — could not build the host-mode firewall allowlist (needs jq + repo config)." >&2
     echo "claude-guard: install jq and run from the repo checkout, then retry." >&2
@@ -472,7 +473,7 @@ if $_skip_container && [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" != "1" ]]; then
   echo "claude-guard: host mode — no container/VM or monitor sidecar; network restricted to the allowlist via the built-in sandbox (OS-level, Bash tool only)." >&2
 fi
 
-if $_skip_container; then
+if "$_skip_container"; then
   run_host_claude "$@"
 fi
 
@@ -552,7 +553,7 @@ fi
 #  - ephemeral: GC is keyed by the workspace dir and never tracks an ephemeral
 #    id; pinning it off keeps a concurrent prune from racing the explicit
 #    teardown. Don't clobber an explicit user choice.
-if $_ephemeral || [[ "${CLAUDE_SHARED_AUTH:-}" == "1" ]]; then
+if "$_ephemeral" || [[ "${CLAUDE_SHARED_AUTH:-}" == "1" ]]; then
   : "${CLAUDE_NO_VOLUME_GC:=1}"
   export CLAUDE_NO_VOLUME_GC
 fi
@@ -594,7 +595,7 @@ fi
 # never drift.
 # shellcheck source=lib/volume-id.bash disable=SC1091
 source "$(dirname "$SELF_CANONICAL")/lib/volume-id.bash"
-if $_ephemeral; then
+if "$_ephemeral"; then
   # Unique throwaway id, clear of the persistent per-workspace set and trivial to
   # find and delete on teardown (see the EXIT trap below).
   CLAUDE_VOLUME_ID="$(ephemeral_volume_id)"
@@ -623,8 +624,8 @@ fi
 # between here and launch still cleans up whatever came up.
 _ephemeral_done=false
 _ephemeral_cleanup() {
-  $_ephemeral || return 0
-  $_ephemeral_done && return 0
+  "$_ephemeral" || return 0
+  "$_ephemeral_done" && return 0
   _ephemeral_done=true
   echo "claude-guard: ephemeral — tearing down throwaway volumes for this session..." >&2
   if [[ "${CLAUDE_NO_AUDIT_ARCHIVE:-}" != "1" ]]; then
@@ -640,7 +641,7 @@ _ephemeral_cleanup() {
   fi
   ephemeral_teardown "$workspace_folder" "$CLAUDE_VOLUME_ID" "${container_id:-}" || true
 }
-if $_ephemeral; then
+if "$_ephemeral"; then
   trap _ephemeral_cleanup EXIT INT TERM
 fi
 
@@ -712,7 +713,7 @@ if [[ -z "$container_id" ]]; then
     devcontainer_timeout="${CLAUDE_DEVCONTAINER_BUILD_TIMEOUT:-600}"
     echo "claude-guard: building the sandbox image locally — the first build can take several minutes (timeout ${devcontainer_timeout}s; set CLAUDE_DEVCONTAINER_TIMEOUT to change)." >&2
   fi
-  devcontainer_args=(--workspace-folder "$workspace_folder" ${cfg_args[@]+"${cfg_args[@]}"})
+  devcontainer_args=(--workspace-folder "$workspace_folder" "${cfg_args[@]+"${cfg_args[@]}"}")
   # `|| dc_exit=$?` keeps `set -e` from aborting before we can branch on the
   # exit code — otherwise the timeout/failure diagnostics below are dead code.
   dc_exit=0
@@ -721,7 +722,7 @@ if [[ -z "$container_id" ]]; then
   # and leaving only a bare exit code with nothing to diagnose. Debug mode streams
   # stderr live, so it needs no capture.
   dc_err=""
-  if $_debug; then
+  if "$_debug"; then
     timeout "$devcontainer_timeout" devcontainer up "${devcontainer_args[@]}" || dc_exit=$?
   else
     dc_err="$(mktemp)"
@@ -806,7 +807,7 @@ fi
 # there is nothing to archive pre-session), and the teardown archives it after
 # the session — running it here too would only spawn a background reader that
 # could pin the volume against teardown.
-if ! $_ephemeral && [[ "${CLAUDE_NO_AUDIT_ARCHIVE:-}" != "1" ]]; then
+if ! "$_ephemeral" && [[ "${CLAUDE_NO_AUDIT_ARCHIVE:-}" != "1" ]]; then
   # shellcheck source=lib/audit-archive.bash disable=SC1091
   source "$(dirname "$SELF_CANONICAL")/lib/audit-archive.bash"
   (claude_archive_audit_volume "claude-audit-${CLAUDE_VOLUME_ID}" \
@@ -875,22 +876,22 @@ done <<<"$_auth_raw"
 # then cleans up. `|| _rc=$?` keeps set -e from aborting before we record a
 # non-zero session exit. The persistent path keeps the leaner `exec` — replacing
 # the process is cheaper and there is nothing to tear down.
-if $_ephemeral; then
+if "$_ephemeral"; then
   _rc=0
   docker exec "${docker_flags[@]}" -e "CLAUDE_PROTECTION_TIER=$CLAUDE_PROTECTION_TIER" \
-    ${ccr_flags[@]+"${ccr_flags[@]}"} \
-    ${claude_auth_flags[@]+"${claude_auth_flags[@]}"} \
-    ${noproxy_flags[@]+"${noproxy_flags[@]}"} \
-    ${scrub_allow_flags[@]+"${scrub_allow_flags[@]}"} \
+    "${ccr_flags[@]+"${ccr_flags[@]}"}" \
+    "${claude_auth_flags[@]+"${claude_auth_flags[@]}"}" \
+    "${noproxy_flags[@]+"${noproxy_flags[@]}"}" \
+    "${scrub_allow_flags[@]+"${scrub_allow_flags[@]}"}" \
     -w "$container_cwd" -u node "$container_id" \
     claude --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}" "$@" || _rc=$?
   exit "$_rc"
 fi
 
 exec docker exec "${docker_flags[@]}" -e "CLAUDE_PROTECTION_TIER=$CLAUDE_PROTECTION_TIER" \
-  ${ccr_flags[@]+"${ccr_flags[@]}"} \
-  ${claude_auth_flags[@]+"${claude_auth_flags[@]}"} \
-  ${noproxy_flags[@]+"${noproxy_flags[@]}"} \
-  ${scrub_allow_flags[@]+"${scrub_allow_flags[@]}"} \
+  "${ccr_flags[@]+"${ccr_flags[@]}"}" \
+  "${claude_auth_flags[@]+"${claude_auth_flags[@]}"}" \
+  "${noproxy_flags[@]+"${noproxy_flags[@]}"}" \
+  "${scrub_allow_flags[@]+"${scrub_allow_flags[@]}"}" \
   -w "$container_cwd" -u node "$container_id" \
   claude --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}" "$@"
