@@ -29,8 +29,6 @@ pre-commit run --all-files   # shellcheck/shfmt + wider hygiene checks
 
 Commits **must** follow [Conventional Commits](https://www.conventionalcommits.org/) (`<type>(<scope>): <desc>`; types `feat fix refactor docs test chore ci style perf build`, `!` for breaking). The `commit-msg` hook enforces this.
 
-**Never rewrite published history** — once pushed, don't rebase, amend, or force-push. Resolve conflicts with a merge commit, not a rebase. Multi-commit branches are fine; don't squash to tidy the count.
-
 ## Tests
 
 Don't skip or weaken tests unless a maintainer asks. New JS hooks and bash wrappers are coverage-gated at **100% per file**; see [CLAUDE.md](CLAUDE.md) for how the c8 and kcov gates are wired before adding either.

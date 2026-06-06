@@ -31,7 +31,6 @@ None.
 ## Checklist
 
 - [ ] Commits use Conventional Commits (`<type>(<scope>): <desc>`)
-- [ ] No published history rewritten (no force-push / rebase of pushed commits)
 - [ ] Tests added/updated and not skipped or weakened
 - [ ] README/SECURITY.md touched **only** if a user-facing or boundary change requires it
 - [ ] `[monitor-eval]` added to the title **only** if the monitor/eval harness changed
