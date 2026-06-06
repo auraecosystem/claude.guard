@@ -345,10 +345,17 @@ _install_node_deps() {
   fi
 }
 
+# Node deps gate the .mjs guardrail hooks (UserPromptSubmit/PreToolUse/PostToolUse),
+# which can fire before this SessionStart hook returns. Install them FIRST and
+# synchronously so node_modules is ready as early as possible — not racing the
+# slower apt/cargo/cosign jobs below for CPU and network. The hooks also fail closed
+# on a missing dep, so this shrinks the cold-start window rather than being the sole
+# guard.
+_install_node_deps
+
 _install_apt_tools &
 _install_uv_toolchain &
 _install_cargo_tools &
-_install_node_deps &
 _install_devcontainer_cli &
 _install_cosign &
 wait

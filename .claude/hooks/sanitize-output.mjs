@@ -23,7 +23,6 @@ import {
   errMessage,
   HookEvent,
 } from "./lib-hook-io.mjs";
-import stripAnsi from "strip-ansi";
 import {
   CHECKS,
   stripInvisible,
@@ -250,7 +249,8 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href)
     const warnings = [];
     let modified = false;
 
-    // Layer 1
+    // Layer 1. Lazy: a missing node_modules on cold start must route into the fail-closed catch below.
+    const { default: stripAnsi } = await import("strip-ansi");
     const deAnsi = stripAnsi(text);
     const hasAnsi = deAnsi.length !== text.length;
     // Detect against the same view stripInvisible acts on: a preserved leading
