@@ -22,11 +22,26 @@ at heredocs (kcov#116), and these wrappers use several.
 """
 
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
 
 from tests._helpers import REPO_ROOT
+
+
+def _kcov_bin() -> str:
+    """Absolute path to the kcov binary. Resolved via PATH once, not passed as a
+    bare 'kcov', so the wrapped subprocess finds it even when a test sets a
+    restricted PATH that omits kcov's install dir (e.g. the doctor/remote tests
+    that pin PATH to '<stubs>:/usr/bin:/bin')."""
+    kcov = shutil.which("kcov")
+    if kcov is None:
+        raise FileNotFoundError(
+            "kcov is enrolled but not on PATH; tests/run-kcov.sh installs it in CI."
+        )
+    return kcov
+
 
 # Scripts whose real line coverage is gated at 100% by `kcov_gate.py`. Adding a
 # path here enrolls it: its subprocess invocations get traced and the gate then
@@ -65,7 +80,7 @@ def wrap_argv(argv: object) -> object:
         return argv
     rundir = _outdir() / "runs" / uuid.uuid4().hex
     return [
-        "kcov",
+        _kcov_bin(),
         "--bash-method=DEBUG",
         f"--include-pattern={resolved}",
         # Inline exclusion markers. Every use of these must be surfaced and
