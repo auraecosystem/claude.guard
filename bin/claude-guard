@@ -148,8 +148,8 @@ USAGE:
   claude-guard --help | -h | help        show this message
 
 VARIANTS:
-  claude-guard --privacy private   route inference through Venice (no lab sees requests); Opus fallback
-  claude-guard --privacy e2ee      Venice E2EE, open-weights only; never escalates to a closed model
+  claude-guard --privacy private   route inference through Venice open-weights (no lab sees requests); Opus fallback
+  claude-guard --privacy e2ee      Venice end-to-end-encrypted model; strongest privacy, no escalation
   claude-guard doctor        report the live protection state (PROTECTED / DEGRADED / UNPROTECTED)
   claude-guard audit         read the tamper-evident audit log (-f to stream; --verify to reconcile vs egress)
   claude-guard panic         incident response: snapshot audit/egress/logs, then stop the session's containers
@@ -201,11 +201,9 @@ gh-app)
   ;;
 esac
 
-# --privacy {default,private,e2ee}: the inference/privacy tier. `default` (or
-# absent) is the standard Anthropic + auto-mode launch below; private/e2ee route
-# inference through Venice, lock egress to Venice, and pin the monitor to Venice.
-# Exits before any devcontainer/passthrough logic — ccr_exec re-invokes this
-# wrapper without --privacy so the normal sandbox launch fires on the second pass.
+# --privacy {default,private,e2ee}: the inference/privacy tier.
+# default (or absent): standard Anthropic launch below.
+# private/e2ee: Venice-routed, egress locked to Venice, monitor pinned to Venice.
 if [[ "${1:-}" == --privacy || "${1:-}" == --privacy=* ]]; then
   case "$1" in
   --privacy=*)
@@ -213,38 +211,27 @@ if [[ "${1:-}" == --privacy || "${1:-}" == --privacy=* ]]; then
     shift
     ;;
   *)
-    if [[ -z "${2:-}" ]]; then
-      echo "claude-guard: --privacy requires an argument: default, private, or e2ee" >&2
-      exit 2
-    fi
-    _privacy_mode="$2"
-    shift 2
+    _privacy_mode="${2:-}"
+    shift 2 2>/dev/null || shift
     ;;
   esac
   case "$_privacy_mode" in
-  # kcov-ignore-start kcov cannot instrument an empty case arm (no statements between pattern and ;;)
-  default) ;; # fall through to the normal launch below
-  # kcov-ignore-end
+  default) : ;; # fall through to the normal launch below
   private | e2ee)
     # shellcheck source=lib/venice-resolve.bash disable=SC1091
     source "$_self_dir/lib/venice-resolve.bash"
     # shellcheck source=lib/ccr-launch.bash disable=SC1091
     source "$_self_dir/lib/ccr-launch.bash"
     if [[ "$_privacy_mode" == "e2ee" ]]; then
-      export CLAUDE_PRIVACY_MODE=e2ee
-      ccr_pin_monitor_venice e2ee
-      ccr_warn_perf e2ee
       _pi_model="${CLAUDE_PRIVATE_INFERENCE_STRICT_MODEL:-venice,$(read_cached_trait strict_private "$VENICE_STRICT_FALLBACK")}"
+    elif [[ "${CLAUDE_PRIVATE_THINK:-0}" == "1" ]]; then
+      _pi_model="${CLAUDE_PRIVATE_INFERENCE_NON_STRICT_THINK_MODEL:-venice,$(read_cached_trait newest_opus "$VENICE_THINK_FALLBACK")}"
     else
-      export CLAUDE_PRIVACY_MODE=private
-      ccr_pin_monitor_venice private
-      ccr_warn_perf private
-      if [[ "${CLAUDE_PRIVATE_THINK:-0}" == "1" ]]; then
-        _pi_model="${CLAUDE_PRIVATE_INFERENCE_THINK_MODEL:-venice,$(read_cached_trait newest_opus "$VENICE_THINK_FALLBACK")}"
-      else
-        _pi_model="${CLAUDE_PRIVATE_INFERENCE_DEFAULT_MODEL:-venice,$(read_cached_trait default_code "$VENICE_DEFAULT_CODE_FALLBACK")}"
-      fi
+      _pi_model="${CLAUDE_PRIVATE_INFERENCE_NON_STRICT_DEFAULT_MODEL:-venice,$(read_cached_trait default_code "$VENICE_DEFAULT_CODE_FALLBACK")}"
     fi
+    export CLAUDE_PRIVACY_MODE="$_privacy_mode"
+    ccr_pin_monitor_venice "$_privacy_mode"
+    ccr_warn_perf "$_privacy_mode"
     ccr_export_common
     ccr_maybe_dry_run "$_self_dir" "$_pi_model" "$@"
     if [[ "$_privacy_mode" == "e2ee" ]] && [[ "${DANGEROUSLY_SKIP_CONTAINER:-}" == "1" ]]; then
@@ -749,7 +736,7 @@ if [[ -z "$container_id" ]]; then
     timeout "$devcontainer_timeout" devcontainer up "${devcontainer_args[@]}" || dc_exit=$?
   else
     dc_err="$(mktemp)"
-    timeout "$devcontainer_timeout" devcontainer up "${devcontainer_args[@]}" --log-level error 2>"$dc_err" || dc_exit=$?
+    timeout "$devcontainer_timeout" devcontainer up "${devcontainer_args[@]}" --log-level info 2>"$dc_err" || dc_exit=$?
   fi
   # A hung or failed 'up' is almost always a sidecar whose healthcheck never goes
   # green — most often init-firewall aborting on a denied syscall. The devcontainer
