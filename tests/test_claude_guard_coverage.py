@@ -84,10 +84,17 @@ esac
 # ps` finds it) unless told to fail or hang:
 #   FAKE_DC_EXIT=<n>   `devcontainer up` exits n (non-zero → build-failed branch).
 #   FAKE_DC_SLEEP=<s>  `devcontainer up` sleeps s seconds (to trip `timeout`).
+# A real failing `devcontainer up` writes its build/compose error to stderr before
+# exiting non-zero; the wrapper captures that stream and dumps it on failure. The
+# fake mirrors that — it emits a BuildKit-style error on the non-zero path — so the
+# stderr-capture/dump branch is exercised by the same failure the operator hits.
 _FAKE_DEVCONTAINER = r"""#!/bin/bash
 if [ "$1" = up ]; then
   sleep "${FAKE_DC_SLEEP:-0}"
-  [ "${FAKE_DC_EXIT:-0}" -ne 0 ] && exit "${FAKE_DC_EXIT}"
+  if [ "${FAKE_DC_EXIT:-0}" -ne 0 ]; then
+    echo "ERROR: failed to solve: process \"/bin/sh -c install-deps\" did not complete successfully: exit code: ${FAKE_DC_EXIT}" >&2
+    exit "${FAKE_DC_EXIT}"
+  fi
   touch "$FAKE_STATE/up-done"
 fi
 exit 0
@@ -586,12 +593,16 @@ def test_cold_start_up_timeout_dumps_sidecar_logs(tmp_path: Path) -> None:
 
 
 def test_cold_start_up_failure_aborts(tmp_path: Path) -> None:
-    """A non-zero `devcontainer up` (build failure) aborts with the exit code."""
+    """A non-zero `devcontainer up` (build failure) aborts with the exit code AND
+    surfaces the captured stderr, so the real cause is visible — not just a bare
+    exit code. Mirrors a real failing build, which writes its error to stderr."""
     _init_repo(tmp_path)
     _, _, env = _container_env(tmp_path, FAKE_COLD="1", FAKE_DC_EXIT="3")
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
     assert "'devcontainer up' failed (exit 3)" in r.stderr
+    assert "last 40 lines of 'devcontainer up' stderr" in r.stderr
+    assert "ERROR: failed to solve" in r.stderr
 
 
 # ---------------------------------------------------------------------------
