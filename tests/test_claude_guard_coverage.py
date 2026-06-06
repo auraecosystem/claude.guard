@@ -210,7 +210,7 @@ def test_skip_monitor_and_debug_flags_are_stripped(tmp_path: Path) -> None:
 
 
 def test_experimental_redact_flag_exports_env_and_is_stripped(tmp_path: Path) -> None:
-    """--experimental-redact-auto-mode-reason is consumed by the wrapper (not
+    """--experimental-redact-monitor-reason is consumed by the wrapper (not
     forwarded to claude) and exports MONITOR_REDACT_DENY_REASON so the monitor
     withholds its reason on a policy deny."""
     _init_repo(tmp_path)
@@ -223,13 +223,13 @@ def test_experimental_redact_flag_exports_env_and_is_stripped(tmp_path: Path) ->
 
     r = _run_guard(
         tmp_path,
-        ["--experimental-redact-auto-mode-reason", "hello"],
+        ["--experimental-redact-monitor-reason", "hello"],
         real_dir,
         DANGEROUSLY_SKIP_CONTAINER="1",
     )
     assert r.returncode == 0, r.stderr
     args_line = next(ln for ln in r.stdout.splitlines() if ln.startswith("args:"))
-    assert "--experimental-redact-auto-mode-reason" not in args_line
+    assert "--experimental-redact-monitor-reason" not in args_line
     assert "hello" in args_line
     assert "redact:1" in r.stdout
 
