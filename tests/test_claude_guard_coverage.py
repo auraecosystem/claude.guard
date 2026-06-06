@@ -66,6 +66,8 @@ run | build)
   [ -n "${FAKE_AUDIT_CONTENT:-}" ] && [ "$1" = run ] && printf '%s\n' '{"audit":"entry"}'
   exit 0 ;;
 exec)
+  # The fail-closed guardrail write-probe must be REJECTED (read-only overmount).
+  case "$*" in *sccd_wcheck*) exit 1 ;; esac
   for a in "$@"; do [ "$a" = "claude" ] && { echo LAUNCHED-CLAUDE; exit 0; }; done
   for a in "$@"; do [ "$a" = "tar" ] && { [ -n "${FAKE_TAR_FAIL:-}" ] && exit 1; exit 0; }; done
   for a in "$@"; do [ "$a" = "-d" ] || continue

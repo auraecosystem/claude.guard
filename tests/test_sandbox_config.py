@@ -329,15 +329,6 @@ def test_hardener_has_no_healthcheck(compose: dict) -> None:
     assert "healthcheck" not in compose["services"]["hardener"]
 
 
-def test_hardener_forwards_devcontainer_unlock_flag(compose: dict) -> None:
-    """The maintainer dev hatch reaches the in-container hardener only if compose
-    forwards CLAUDE_UNLOCK_DEVCONTAINER to it — otherwise setting it on the host
-    would silently do nothing and .devcontainer would stay locked."""
-    env = compose["services"]["hardener"].get("environment", [])
-    keys = env if isinstance(env, dict) else [e.split("=", 1)[0] for e in env]
-    assert "CLAUDE_UNLOCK_DEVCONTAINER" in keys
-
-
 # ── Credential scrubbing ────────────────────────────────────────────
 
 
@@ -512,30 +503,40 @@ class TestWrapperProjectAllowlist:
         assert "invalid per-project domain" in self.wrapper
 
 
-class TestProtectiveConfigAlwaysEnforced:
-    """bin/claude-guard must always launch with the dotfiles' devcontainer config,
-    never the target repo's own (which would bypass the sandbox), and must wire the
-    maintainer dev-unlock hatch."""
+class TestReadOnlyGuardrailOvermounts:
+    """bin/claude-guard always launches with our protective config (a per-workspace
+    devcontainer.json derived from the dotfiles one) and protects the workspace
+    guardrails with read-only bind overmounts instead of chowning them — verified
+    fail-closed before the agent runs."""
 
     @pytest.fixture(autouse=True)
     def _load(self) -> None:
         self.wrapper = CLAUDE_WRAPPER.read_text()
 
-    def test_config_is_unconditional(self) -> None:
-        """--config must not be gated on the workspace lacking its own devcontainer
-        (the old behavior that let a repo's devcontainer take over the sandbox)."""
+    def test_sources_and_uses_overmount_lib(self) -> None:
+        assert "lib/overmounts.bash" in self.wrapper
+        assert "write_overmount_compose" in self.wrapper
+        assert "write_session_devcontainer_config" in self.wrapper
+
+    def test_config_points_at_generated_session_config(self) -> None:
+        """--config points at the derived per-workspace config (base stack + override),
+        always — the old gate that let a repo's own devcontainer take over is gone."""
         assert (
-            'cfg_args=(--config "$my_dotfiles/.devcontainer/devcontainer.json")'
-            in self.wrapper
+            'cfg_args=(--config "$session_cfg_dir/devcontainer.json")' in self.wrapper
         )
         assert (
             'if [[ ! -e "$workspace_folder/.devcontainer/devcontainer.json" ]]'
             not in self.wrapper
-        ), "the guard that let a repo's own devcontainer take over must be gone"
+        )
 
-    def test_exports_and_announces_unlock_flag(self) -> None:
-        assert "export CLAUDE_UNLOCK_DEVCONTAINER=" in self.wrapper
-        assert 'CLAUDE_UNLOCK_DEVCONTAINER" == "1"' in self.wrapper  # the warn branch
+    def test_verifies_guardrails_readonly_fail_closed(self) -> None:
+        """The read-only overmounts are a security control, so the launcher proves
+        the agent can't write them and refuses to launch otherwise."""
+        assert "verify_guardrails_readonly" in self.wrapper
+        assert "Refusing to launch unprotected" in self.wrapper
+
+    def test_dev_hatch_omits_devcontainer_mount(self) -> None:
+        assert 'overmount_omit=".devcontainer"' in self.wrapper
 
 
 # ── Entrypoint hardening ────────────────────────────────────────────
@@ -546,9 +547,20 @@ class TestEntrypointHardening:
     def _load(self) -> None:
         self.content = ENTRYPOINT.read_text()
 
-    def test_locks_down_claude_config(self) -> None:
-        assert "chown -R root:root" in self.content
-        assert "/.claude" in self.content
+    def test_does_not_chown_lock_the_workspace(self) -> None:
+        """Write-protection moved to the launcher's read-only overmounts — the
+        entrypoint must NOT chown/chmod-a-w the bind-mounted WORKSPACE guardrails
+        (that chown was the host-ownership leak). The container-home lockdown
+        ($CLAUDE_USER_DIR, a volume) is unaffected — it never touches host inodes."""
+        assert 'chmod -R a+r,a-w "$WORKSPACE' not in self.content
+        assert 'chown -R root:root "$WORKSPACE/.claude"' not in self.content
+        assert 'chown -R root:root "$WORKSPACE/.devcontainer"' not in self.content
+        assert 'chown root:root "$WORKSPACE/$doc"' not in self.content
+
+    def test_installs_deps_as_node(self) -> None:
+        """node_modules is installed as the node user so it stays node-owned (no root
+        leak onto the host); the read-only overmount keeps the agent from tampering."""
+        assert "su node -c" in self.content and "pnpm install" in self.content
 
     def test_calls_harden_monitor(self) -> None:
         assert "harden-monitor" in self.content
@@ -562,22 +574,6 @@ class TestEntrypointHardening:
         # facade; it must be made unreadable to the agent too.
         content = HARDEN_MONITOR.read_text()
         assert "monitorlib" in content and "go-rwx" in content
-
-    def test_devcontainer_lock_has_dev_unlock_hatch(self) -> None:
-        """The maintainer dev hatch (CLAUDE_UNLOCK_DEVCONTAINER=1) gates ONLY the
-        .devcontainer lock — the unlock check sits immediately before that chown
-        (an elif), while the instruction-doc lock below stays unconditional. So
-        developing the sandbox source never silently unlocks the live-executing
-        .claude hooks or the instruction docs."""
-        assert '"${CLAUDE_UNLOCK_DEVCONTAINER:-}" == "1"' in self.content
-        unlock_at = self.content.index("CLAUDE_UNLOCK_DEVCONTAINER")
-        devc_lock_at = self.content.index(
-            'chown -R root:root "$WORKSPACE/.devcontainer"'
-        )
-        docs_lock_at = self.content.index('chown root:root "$WORKSPACE/$doc"')
-        assert unlock_at < devc_lock_at, "unlock check must gate the .devcontainer lock"
-        # The docs loop is not inside the unlock branch — it always runs.
-        assert docs_lock_at > devc_lock_at
 
     @pytest.mark.parametrize(
         "name",

@@ -19,10 +19,10 @@
 #   CLAUDE_DEVCONTAINER_BUILD_TIMEOUT=<s>  timeout when building the image
 #                                      locally — no prebuilt to pull (default: 600)
 #   CLAUDE_WORKSPACE=<dir>             override workspace root (mount broader tree)
-#   CLAUDE_UNLOCK_DEVCONTAINER=1       (maintainer dev mode) leave the workspace's
-#                                      .devcontainer writable so you can iterate on
-#                                      the sandbox source mid-session; WEAKENS the
-#                                      guardrail (see the export below). Off by default.
+#   CLAUDE_UNLOCK_DEVCONTAINER=1       (maintainer dev mode) skip the read-only
+#                                      overmount on .devcontainer so the agent can
+#                                      edit the sandbox source live; WEAKENS the
+#                                      guardrail. Off by default.
 #   --dangerously-skip-firewall        disable the domain-allowlist firewall (or
 #     DANGEROUSLY_SKIP_FIREWALL=1      set via env); the model gets unrestricted
 #                                      internet access inside the container
@@ -520,25 +520,32 @@ if ! command -v devcontainer >/dev/null 2>&1; then
   require_tool "the devcontainer CLI" "run setup.bash, or 'pnpm add -g @devcontainers/cli'"
 fi
 
-# Always launch with OUR protective devcontainer (the firewall + monitor + gVisor
-# compose stack), never one the target repo happens to ship. Trusting a workspace
-# devcontainer.json would let any repo that carries its own (many OSS projects do,
-# for VS Code) boot with ITS config and no sandbox. For this repo itself,
-# $my_dotfiles IS the workspace, so --config resolves to its own (protective)
-# devcontainer — same result, no special case.
+# Always enforce OUR protective sandbox config, and protect the workspace's
+# guardrail paths from the agent with read-only bind mounts rather than chowning
+# them to root (which leaked root ownership onto the host bind mount, leaving the
+# user unable to `git pull`/edit/reinstall without sudo). The launcher generates a
+# per-workspace Compose override (read-only binds for the guardrail paths that
+# exist) and a derived devcontainer.json that merges it over the dotfiles stack; the
+# agent sees the guardrails read-only while the host keeps full ownership.
+# CLAUDE_UNLOCK_DEVCONTAINER=1 omits the .devcontainer mount so the maintainer can
+# edit the sandbox source live. See SECURITY.md.
+# shellcheck source=lib/overmounts.bash disable=SC1091
+source "$(dirname "$SELF_CANONICAL")/lib/overmounts.bash"
+# shellcheck source=lib/volume-id.bash disable=SC1091
+source "$(dirname "$SELF_CANONICAL")/lib/volume-id.bash"
 my_dotfiles="$(git -C "$(dirname "$SELF_CANONICAL")" rev-parse --show-toplevel)"
-cfg_args=(--config "$my_dotfiles/.devcontainer/devcontainer.json")
-
-# Maintainer dev hatch: leave the workspace's .devcontainer writable so the sandbox
-# source can be edited on the host mid-session. The hardener (entrypoint.bash) reads
-# this via the compose env wiring. It WEAKENS the guardrail — a prompt-injected agent
-# could edit those sandbox-source files — but only for the NEXT image build, not the
-# live session (the firewall/monitor scripts are baked into the running image). Off by
-# default; .claude (whose hooks execute live) is never unlocked, only .devcontainer.
-export CLAUDE_UNLOCK_DEVCONTAINER="${CLAUDE_UNLOCK_DEVCONTAINER:-}"
-if [[ "$CLAUDE_UNLOCK_DEVCONTAINER" == "1" ]]; then
-  echo "claude-guard: CLAUDE_UNLOCK_DEVCONTAINER=1 — workspace .devcontainer left writable for development; the agent can modify sandbox-source files this session (effective only on the next build). Unset it for normal locked runs." >&2
+overmount_omit=""
+if [[ "${CLAUDE_UNLOCK_DEVCONTAINER:-}" == "1" ]]; then
+  overmount_omit=".devcontainer"
+  echo "claude-guard: CLAUDE_UNLOCK_DEVCONTAINER=1 — .devcontainer mounted writable for development; the agent can edit the sandbox source this session." >&2
 fi
+session_cfg_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-monitor/devcontainer/$(claude_volume_id "$workspace_folder")"
+mkdir -p "$session_cfg_dir"
+write_overmount_compose "$workspace_folder" "$session_cfg_dir/overmounts.yml" "$overmount_omit"
+write_session_devcontainer_config "$my_dotfiles/.devcontainer/devcontainer.json" \
+  "$my_dotfiles/.devcontainer/docker-compose.yml" "$session_cfg_dir/overmounts.yml" \
+  "$session_cfg_dir/devcontainer.json"
+cfg_args=(--config "$session_cfg_dir/devcontainer.json")
 
 if ! command -v docker >/dev/null 2>&1; then
   require_tool "docker" "https://docs.docker.com/engine/install/ (or Colima/OrbStack/Docker Desktop)"
@@ -660,9 +667,6 @@ _ephemeral_cleanup() {
     fi
   fi
   ephemeral_teardown "$workspace_folder" "$CLAUDE_VOLUME_ID" "${container_id:-}" || true
-  # Containers are gone and the next launch re-hardens, so it's safe to hand the
-  # root-owned, write-stripped guardrail files back to the host user now.
-  restore_workspace_writability "$workspace_folder" "$_img"
 }
 if "$_ephemeral"; then
   trap _ephemeral_cleanup EXIT INT TERM
@@ -873,6 +877,15 @@ if [[ "$container_cwd" != "/workspace" ]]; then
     sleep 0.5
     waited=$((waited + 1))
   done
+fi
+
+# Fail-closed: the read-only guardrail overmounts are a security control, so prove
+# the agent actually cannot write them before handing over. If a mount silently
+# didn't take effect, abort (the EXIT trap tears the session down) rather than run
+# unprotected. Cheap — a few `docker exec` write probes against existing paths.
+if ! _bad_guard="$(verify_guardrails_readonly "$container_id" "$workspace_folder" "$overmount_omit")"; then
+  echo "claude-guard: FATAL — guardrail '$_bad_guard' is writable by the agent in the container; its read-only overmount did not take effect. Refusing to launch unprotected." >&2
+  exit 1
 fi
 
 ccr_flags=()
