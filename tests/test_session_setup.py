@@ -147,26 +147,13 @@ def test_non_proxy_remote_leaves_commit_signing_untouched(
     assert _local_gpgsign(repo) == ""
 
 
-def test_pins_and_fetches_modern_gh_from_official_release() -> None:
+def test_installs_gh_from_official_apt_repo() -> None:
     """apt's gh is too old — it still requests the deprecated classic-Projects
-    `projectCards` field and breaks `gh pr edit`. The setup must pin a version and
-    fetch the official release tarball into ~/.local/bin, and actually run it in the
-    parallel install block (definition + call → the name appears at least twice)."""
+    `projectCards` field and breaks `gh pr edit`. The setup must add GitHub's official
+    apt repo and let apt install/verify gh (not hand-download a binary), and actually
+    call the installer (definition + call → the name appears at least twice)."""
     text = SESSION_SETUP.read_text()
-    assert "GH_CLI_VERSION=" in text
-    assert "github.com/cli/cli/releases/download" in text
-    assert text.count("_install_modern_gh") >= 2
-
-
-def test_local_gh_already_installed_is_left_untouched(
-    repo: Path, env_file: Path, tmp_path: Path
-) -> None:
-    """The installer is idempotent: an existing ~/.local/bin/gh is not re-fetched
-    (the gate the other installers use), so it survives a re-run byte-for-byte."""
-    gh = tmp_path / "home" / ".local" / "bin" / "gh"
-    gh.parent.mkdir(parents=True)
-    gh.write_text("#!/bin/bash\necho sentinel\n")
-    gh.chmod(0o755)
-    r = _run_setup(repo, env_file, HOME=str(tmp_path / "home"))
-    assert r.returncode == 0, r.stderr
-    assert gh.read_text() == "#!/bin/bash\necho sentinel\n"
+    assert "cli.github.com/packages" in text
+    assert "sources.list.d/github-cli.list" in text
+    assert "apt-get install -y -qq gh" in text
+    assert text.count("_install_current_gh") >= 2

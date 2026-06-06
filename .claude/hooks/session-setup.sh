@@ -157,7 +157,46 @@ _install_apt_tools() {
   # drives the real binary (it is deliberately not stubbed), so a missing grepcidr
   # makes is_public_ipv4 fail closed and those tests error — install it to match
   # CI (validate-config.yaml) and the devcontainer image.
-  apt_install_if_missing gh jq shellcheck grepcidr
+  apt_install_if_missing jq shellcheck grepcidr
+  # gh is handled separately: Ubuntu's package is too old, so we add GitHub's
+  # official apt repo. Kept in this same job (not a parallel one) so two apt-get
+  # runs can't deadlock on the dpkg lock.
+  _install_current_gh
+}
+
+# Ubuntu's apt ships gh 2.45, whose `gh pr edit`/`pr view` still request the
+# deprecated classic-Projects `projectCards` GraphQL field that GitHub now rejects —
+# breaking PR edits/views from a session. Install gh from GitHub's official apt repo
+# (https://cli.github.com) so apt fetches a current build, verifies its signature,
+# and upgrades it like any other package. Best-effort: warns and leaves any existing
+# gh in place on failure. The one network fetch is the repo's GPG key — unavoidable
+# for any third-party apt source; the gh binary itself is apt-verified, not curled.
+_install_current_gh() {
+  is_root || {
+    warn "Cannot install gh: needs root"
+    return
+  }
+  command -v apt-get &>/dev/null || {
+    warn "Cannot install gh: apt-get not found"
+    return
+  }
+  local keyring=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+  if [ ! -f "$keyring" ]; then
+    command -v curl &>/dev/null || {
+      warn "Cannot install gh: curl not found"
+      return
+    }
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o "$keyring" || {
+      warn "Cannot install gh: keyring fetch failed"
+      return
+    }
+    chmod go+r "$keyring"
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" \
+      >/etc/apt/sources.list.d/github-cli.list
+  fi
+  apt-get update -qq 2>/dev/null
+  apt-get install -y -qq gh || warn "Failed to install gh from cli.github.com"
 }
 
 _install_uv_toolchain() {
@@ -234,32 +273,6 @@ _install_cosign() {
   fi
 }
 
-# Ubuntu's apt ships an old gh (2.45) whose `pr edit`/`pr view` still request the
-# deprecated classic-Projects `projectCards` GraphQL field, which GitHub now rejects —
-# breaking PR edits/views in web sessions. Shadow it with a current gh in ~/.local/bin
-# (prepended to PATH above). Mirrors _install_cosign; best-effort, warns on failure
-# (PR work still has the mcp__github__* fallback). Bump GH_CLI_VERSION freely.
-GH_CLI_VERSION=2.62.0
-_install_modern_gh() {
-  [ -x "$HOME/.local/bin/gh" ] && return 0
-  command -v curl &>/dev/null || {
-    warn "Cannot install gh: curl not found"
-    return
-  }
-  local arch
-  case "$(uname -m)" in
-  x86_64 | amd64) arch=amd64 ;;
-  aarch64 | arm64) arch=arm64 ;;
-  *) warn "Cannot install gh: unsupported arch $(uname -m)" && return ;;
-  esac
-  mkdir -p "$HOME/.local/bin"
-  # The tarball holds gh_<ver>_linux_<arch>/bin/gh; strip those two leading path
-  # components so just the (executable-mode-preserved) binary lands in ~/.local/bin.
-  local url="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${arch}.tar.gz"
-  curl -fsSL "$url" | tar -xz -C "$HOME/.local/bin" --strip-components=2 --wildcards '*/bin/gh' ||
-    warn "Failed to install gh $GH_CLI_VERSION"
-}
-
 _install_node_deps() {
   [ -f "$PROJECT_DIR/package.json" ] || return 0
   # Skip only when node_modules is root-owned AND we are the unprivileged agent:
@@ -282,7 +295,6 @@ _install_cargo_tools &
 _install_node_deps &
 _install_devcontainer_cli &
 _install_cosign &
-_install_modern_gh &
 wait
 
 # .venv/bin on PATH so Python tools are available to hooks (uv sync ran above).
