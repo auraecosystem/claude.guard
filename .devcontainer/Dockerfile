@@ -159,16 +159,23 @@ RUN echo 'shopt -s histverify' > /etc/profile.d/histverify.sh && \
 # managed-settings hook paths ($SCCD_DIR/.claude/hooks/...) resolve unchanged.
 # Sourced from the `guard-src` build context (the repo root); see docker-compose.yml.
 USER root
+# guard-src is a BuildKit additional build context, not a FROM alias (DL3022).
+# hadolint ignore=DL3022
 COPY --from=guard-src .claude/hooks /opt/claude-guard/.claude/hooks
+# hadolint ignore=DL3022
 COPY --from=guard-src user-config/settings.json /opt/claude-guard/user-config/settings.json
+# hadolint ignore=DL3022
 COPY --from=guard-src bin/merge-user-settings.sh /opt/claude-guard/bin/merge-user-settings.sh
+# hadolint ignore=DL3022
 COPY --from=guard-src package.json pnpm-lock.yaml /opt/claude-guard/
 COPY harden-monitor.bash monitor-policy.txt domain-allowlist.json /opt/claude-guard/.devcontainer/
 # The wired .mjs hooks import production deps (remark/rehype/unified/strip-ansi/...);
 # Node resolves them by walking up from the hooks dir to /opt/claude-guard/node_modules.
 # Install only `dependencies` (the wired hooks need no devDeps) with the same pnpm
 # layout the workspace install uses, and --ignore-scripts so the repo's git-hooks
-# postinstall (no .git here) doesn't run.
+# postinstall (no .git here) doesn't run. cd not WORKDIR: this is a one-shot install
+# that must not change the image's working directory for later stages (DL3003).
+# hadolint ignore=DL3003
 RUN cd /opt/claude-guard && \
     pnpm install --prod --frozen-lockfile --ignore-scripts && \
     rm -f /opt/claude-guard/package.json /opt/claude-guard/pnpm-lock.yaml
