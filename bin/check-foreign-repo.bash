@@ -115,6 +115,22 @@ ck_baked_hook_deps_resolve() {
   }
 }
 
+ck_no_test_artifacts_baked() {
+  # The whole-dir hooks COPY pulls in test files; the bake must strip them so test
+  # code never ships in the image. A runtime hook must remain (proves we narrowed the
+  # surface without deleting what actually runs).
+  if "${DC[@]}" exec -T app sh -c \
+    'ls /opt/claude-guard/.claude/hooks/*.test.mjs /opt/claude-guard/.claude/hooks/test-helpers.mjs' \
+    >/dev/null 2>&1; then
+    echo "test artifacts (*.test.mjs / test-helpers.mjs) shipped in the baked image"
+    return 1
+  fi
+  "${DC[@]}" exec -T app test -f /opt/claude-guard/.claude/hooks/sanitize-input.mjs || {
+    echo "a runtime hook (sanitize-input.mjs) is missing — bake stripped too much"
+    return 1
+  }
+}
+
 # ── Run ────────────────────────────────────────────────────────────────
 run_check build "image builds with baked guardrails" ck_build
 run_check --needs build up "stack starts on a foreign workspace" ck_up
@@ -122,6 +138,7 @@ run_check --needs up foreign_bare "foreign repo ships no guardrails" ck_foreign_
 run_check --needs up managed_settings "managed settings installed from the baked set" ck_managed_settings_from_baked
 run_check --needs up monitor_hidden "baked monitor source hidden from the agent" ck_monitor_read_hidden
 run_check --needs up hook_deps "baked hook deps resolve for the agent" ck_baked_hook_deps_resolve
+run_check --needs up no_test_artifacts "test artifacts stripped from the baked image" ck_no_test_artifacts_baked
 
 # ── Summary ────────────────────────────────────────────────────────────
 if ! harness_summary; then

@@ -982,6 +982,14 @@ class TestBakedGuardrails:
         assert "pnpm install --prod" in self.dockerfile
         assert "package.json pnpm-lock.yaml /opt/claude-guard/" in self.dockerfile
 
+    def test_dockerfile_strips_test_artifacts_from_bake(self) -> None:
+        """The whole-dir hooks COPY pulls in *.test.mjs + the test helper + bytecode
+        caches; the bake must delete them so test code never ships in the image or
+        widens the agent-readable guardrail surface."""
+        assert "/opt/claude-guard/.claude/hooks/*.test.mjs" in self.dockerfile
+        assert "/opt/claude-guard/.claude/hooks/test-helpers.mjs" in self.dockerfile
+        assert "-name __pycache__" in self.dockerfile
+
     def test_dockerfile_read_hides_baked_monitor(self) -> None:
         """Each container gets its own copy of the image layer, so the monitor
         read-hide must be baked (a hardener-side runtime chmod can't reach the app)."""
@@ -1115,6 +1123,12 @@ class TestForeignRepoCheck:
         assert (
             "/opt/claude-guard/.claude/hooks" in self.check
         )  # baked hook deps resolution cwd
+
+    def test_check_asserts_test_artifacts_stripped(self) -> None:
+        """The bake strips test code; the runtime check proves it's gone from the
+        image while a real hook survives."""
+        assert "*.test.mjs" in self.check and "test-helpers.mjs" in self.check
+        assert "sanitize-input.mjs" in self.check
 
     def test_workflow_runs_the_check(self) -> None:
         job = self.workflow["jobs"]["foreign-repo"]
