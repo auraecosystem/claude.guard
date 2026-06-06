@@ -130,6 +130,28 @@ atomic_sudo_write() {
   sudo mv -f "$tmp" "$dest"
 }
 
+# Restart the Docker daemon to apply a daemon.json change, across init systems.
+# systemd is the common case; service(8) covers SysV/OpenRC hosts (e.g. WSL
+# without systemd); Colima manages its own VM on macOS. Returns the restart's
+# exit status, or 1 when no known mechanism is available — the caller decides
+# whether that's fatal (install) or a manual-step warning (uninstall). Used in a
+# `||`/`&&` context so `set -e` doesn't abort before the fallback chain runs.
+restart_docker() {
+  command_exists systemctl && {
+    sudo systemctl restart docker
+    return
+  }
+  command_exists service && {
+    sudo service docker restart
+    return
+  }
+  { "$IS_MAC" && command_exists colima; } && {
+    colima restart
+    return
+  }
+  return 1
+}
+
 # Shared runtime detection (kept identical between the wrapper and this script
 # so the reported runtime always equals the launched one).
 # shellcheck source=bin/lib/runtime-detect.bash disable=SC1091
@@ -344,11 +366,10 @@ uninstall_kata_runtime() {
   ' "$daemon_json")"
   atomic_sudo_write "$daemon_json" "$updated"
   status "Removed kata-fc runtime from $daemon_json"
-  if command_exists systemctl; then
-    sudo systemctl restart docker
+  if restart_docker; then
     status "Restarted docker"
   else
-    warn "systemctl not found — restart Docker manually to apply the change."
+    warn "Could not restart Docker automatically — restart it manually to apply the change."
   fi
 }
 
@@ -639,7 +660,10 @@ register_kata_runtime() {
   local updated
   updated=$(echo "$existing" | jq '.runtimes["kata-fc"] = {"runtimeType":"io.containerd.kata-fc.v2"}')
   atomic_sudo_write "$daemon_json" "$updated"
-  sudo systemctl restart docker
+  restart_docker || {
+    warn "Could not restart Docker to register the kata-fc runtime."
+    exit 1
+  }
 }
 
 setup_kata_shims_and_config() {
@@ -787,7 +811,10 @@ install_runsc_native() {
   sudo install -m 0755 "$tmpd/runsc" "$tmpd/containerd-shim-runsc-v1" /usr/local/bin/
   rm -rf "$tmpd"
   sudo /usr/local/bin/runsc install
-  sudo systemctl restart docker
+  restart_docker || {
+    warn "Could not restart Docker to register the runsc runtime."
+    return 1
+  }
   # The restart drops the daemon briefly; wait for runsc to register before
   # returning so the caller doesn't see a transient "not registered". (The
   # in-VM path below inlines the same poll — it runs inside an SSH heredoc and
