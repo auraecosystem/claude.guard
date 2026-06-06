@@ -1074,44 +1074,81 @@ else
 fi
 
 # ── PATH precedence ─────────────────────────────────────────────────────────
+# Append `line` to the user's shell `profile` under a one-time `marker`, unless
+# the marker is already present (idempotent across re-runs). `label` names the
+# entry for the status/warn lines.
+append_path_entry() {
+  local profile="$1" marker="$2" line="$3" label="$4"
+  if [[ -f "$profile" ]] && grep -qF "$marker" "$profile"; then
+    status "PATH entry for $label already in $profile — open a new shell to pick it up"
+    return 0
+  fi
+  mkdir -p "$(dirname "$profile")"
+  printf '\n%s\n%s\n' "$marker" "$line" >>"$profile"
+  status "Added $label to PATH in $profile"
+  warn "Open a new shell to pick up the PATH change in $profile"
+}
+
 # The wrapper only protects you if typing `claude-guard` resolves to ~/.local/bin
-# ahead of any other `claude-guard`. Prepend ~/.local/bin to PATH in the user's
-# shell profile (idempotent) so the wrapper wins in new shells. Skips writing
-# when `claude-guard` already resolves to our wrapper.
+# ahead of any other `claude-guard`, and the pnpm-global CLIs (claude-code, ccr,
+# the devcontainer CLI) only resolve if $PNPM_HOME/bin is on PATH. Persist both
+# to the user's shell profile (idempotent) so new shells pick them up without any
+# hand-editing. Each entry is skipped when it already resolves on PATH.
 ensure_path_precedence() {
-  local marker="# claude-guard: ~/.local/bin on PATH"
-  local profile line resolved
-  # fish reads neither .profile nor POSIX `export` syntax, so it needs a
-  # fish-native line in its own config; the POSIX `export` form serves the rest.
-  # Intentional single quotes: write the literal $HOME/$PATH so it expands at
-  # shell startup, not at install time.
+  local profile localbin_line pnpm_line pnpm_literal
+  # fish reads neither .profile nor POSIX `export`, so it needs fish-native lines
+  # in its own config; the POSIX `export` form serves every other shell. Single-
+  # quote the ~/.local/bin line so the literal $HOME/$PATH expand at shell startup,
+  # not at install time. PNPM_HOME isn't exported into the user's login shell, so
+  # the pnpm line carries its resolved $PNPM_HOME/bin — but with a leading $HOME
+  # re-literalized so it stays portable across that user's home.
+  pnpm_literal="${PNPM_HOME:+${PNPM_HOME/#$HOME/\$HOME}/bin}"
   # shellcheck disable=SC2016
   case "$(basename "${SHELL:-sh}")" in
-  zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" line='export PATH="$HOME/.local/bin:$PATH"' ;;
-  bash) profile="$HOME/.bashrc" line='export PATH="$HOME/.local/bin:$PATH"' ;;
+  zsh)
+    profile="${ZDOTDIR:-$HOME}/.zshrc"
+    localbin_line='export PATH="$HOME/.local/bin:$PATH"'
+    pnpm_line="export PATH=\"$pnpm_literal:\$PATH\""
+    ;;
+  bash)
+    profile="$HOME/.bashrc"
+    localbin_line='export PATH="$HOME/.local/bin:$PATH"'
+    pnpm_line="export PATH=\"$pnpm_literal:\$PATH\""
+    ;;
   fish)
     profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
     # --move forces ~/.local/bin ahead of an already-present pnpm bin.
-    line='fish_add_path --move "$HOME/.local/bin"'
+    localbin_line='fish_add_path --move "$HOME/.local/bin"'
+    pnpm_line="fish_add_path \"$pnpm_literal\""
     ;;
-  *) profile="$HOME/.profile" line='export PATH="$HOME/.local/bin:$PATH"' ;;
+  *)
+    profile="$HOME/.profile"
+    localbin_line='export PATH="$HOME/.local/bin:$PATH"'
+    pnpm_line="export PATH=\"$pnpm_literal:\$PATH\""
+    ;;
   esac
 
-  resolved="$(command -v claude-guard 2>/dev/null || true)"
-  if [[ "$resolved" == "$HOME/.local/bin/claude-guard" ]]; then
+  if [[ "$(command -v claude-guard 2>/dev/null || true)" == "$HOME/.local/bin/claude-guard" ]]; then
     status "PATH OK — 'claude-guard' resolves to ~/.local/bin/claude-guard"
-    return 0
+  else
+    # SC2088: the tilde here is a display label for status output, not a path to expand.
+    # shellcheck disable=SC2088
+    append_path_entry "$profile" "# claude-guard: ~/.local/bin on PATH" \
+      "$localbin_line" "~/.local/bin"
   fi
 
-  if [[ -f "$profile" ]] && grep -qF "$marker" "$profile"; then
-    status "PATH entry already in $profile — open a new shell to pick it up"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$profile")"
-  printf '\n%s\n%s\n' "$marker" "$line" >>"$profile"
-  status "Prepended ~/.local/bin to PATH in $profile"
-  warn "Open a new shell, or run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+  # Nothing to persist for pnpm when it isn't installed (PNPM_HOME unset) or its
+  # bin is already on PATH.
+  [[ -n "${PNPM_HOME:-}" ]] || return 0
+  case ":$PATH:" in
+  *":$PNPM_HOME/bin:"*)
+    status "PATH OK — pnpm global bin ($PNPM_HOME/bin) already on PATH"
+    ;;
+  *)
+    append_path_entry "$profile" "# claude-guard: pnpm global bin on PATH" \
+      "$pnpm_line" "the pnpm global bin ($PNPM_HOME/bin)"
+    ;;
+  esac
 }
 
 # ── Prewarm the sandbox image ───────────────────────────────────────────────
@@ -1149,10 +1186,6 @@ else
 fi
 echo ""
 ensure_path_precedence
-if [[ -n "${PNPM_HOME:-}" ]]; then
-  echo "   Also add the pnpm global bin to PATH: $PNPM_HOME/bin"
-  echo "   (claude-code, ccr, and the devcontainer CLI live there)."
-fi
 
 if ! "$sandbox_ok"; then
   echo "" >&2
