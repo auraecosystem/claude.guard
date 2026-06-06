@@ -36,7 +36,7 @@ def _register(tmp_path: Path, daemon_json: Path):
     write_exe(stubdir / "systemctl", "#!/bin/bash\nexit 0\n")
     harness = (
         "status(){ :; }\nwarn(){ printf '!! %s\\n' \"$1\" >&2; }\n"
-        "command_exists(){ command -v \"$1\" >/dev/null 2>&1; }\nIS_MAC=false\n"
+        'command_exists(){ command -v "$1" >/dev/null 2>&1; }\nIS_MAC=false\n'
         + slice_bash_function(SETUP, "atomic_sudo_write")
         + "\n"
         + slice_bash_function(SETUP, "restart_docker")
