@@ -1,7 +1,5 @@
 # Contributing to `claude-guard`
 
-Thanks for helping make a responsible Claude Code setup the default. Issues and PRs are welcome — this is security tooling written by an AI professional who is **not** a security professional, so extra eyes are genuinely valuable.
-
 [`CLAUDE.md`](CLAUDE.md) is the canonical, in-depth reference for this repo's conventions (coverage gates, code style, CI patterns). This file is the short version for human contributors.
 
 ## Getting set up
