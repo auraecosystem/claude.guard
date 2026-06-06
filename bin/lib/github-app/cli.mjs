@@ -159,22 +159,22 @@ function createGuidance(newAppUrl) {
   const perms = APP_PERMISSIONS.map(
     ([label, level]) => `       - ${label}: ${level}`,
   ).join("\n");
-  return (
-    "Create a GitHub App in your account. GitHub only accepts the App settings\n" +
-    "same-site, so this can't be automated from a loopback page — do it by hand:\n\n" +
-    `  1. Open: ${newAppUrl}\n` +
-    "  2. Fill in:\n" +
-    "       - GitHub App name: any unique name\n" +
-    "       - Homepage URL: any URL (e.g. your repo)\n" +
-    '       - Webhook: UNCHECK "Active"\n' +
-    "     Repository permissions:\n" +
-    perms +
-    "\n" +
-    "       - Where can this be installed: Only on this account\n" +
-    '  3. Click "Create GitHub App".\n' +
-    '  4. On the App page, note the App ID and click "Generate a private key"\n' +
-    "     (this downloads a .pem file).\n\n"
-  );
+  return `Create a GitHub App in your account. GitHub only accepts the App settings
+same-site, so this can't be automated from a loopback page — do it by hand:
+
+  1. Open: ${newAppUrl}
+  2. Fill in:
+       - GitHub App name: any unique name
+       - Homepage URL: any URL (e.g. your repo)
+       - Webhook: UNCHECK "Active"
+     Repository permissions:
+${perms}
+       - Where can this be installed: Only on this account
+  3. Click "Create GitHub App".
+  4. On the App page, note the App ID and click "Generate a private key"
+     (this downloads a .pem file).
+
+`;
 }
 
 // Walk the user through creating their own GitHub App on github.com, then store

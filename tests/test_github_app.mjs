@@ -801,83 +801,68 @@ async function seedAppCreds(t, dir) {
 // Env that makes install's poll loop instant (no real 2s waits) for tests.
 const FAST_POLL = { CLAUDE_GH_APP_POLL_MS: "0", CLAUDE_GH_APP_POLL_TRIES: "3" };
 
-test("cli: install auto-discovers the lone installation, no paste", async (t) => {
-  const dir = await cliXdg(t);
-  await seedAppCreds(t, dir);
-  const r = await runCli(["install"], {
-    env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1", ...FAST_POLL },
+const TWO_INSTALLS = '[{id:1,account:{login:"a"}},{id:2,account:{login:"b"}}]';
+// Returns empty once (user hasn't clicked Install yet), then the installation.
+const POLL_THEN_FOUND = `(()=>{let n=0;return async()=>({ok:true,status:200,statusText:"OK",json:async()=>(n++<1?[]:[{id:9,account:{login:"z"}}]),text:async()=>""})})()`;
+
+for (const tc of [
+  {
+    name: "auto-discovers the lone installation, no paste",
     fetchStub: installsStub('[{id:555,account:{login:"me"}}]'),
-  });
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stderr, /Saved installation_id=555 \(me\)/);
-  assert.equal((await storage.readMeta()).installation_id, 555);
-});
-
-test("cli: install falls back to '?' when an installation has no account login", async (t) => {
-  const dir = await cliXdg(t);
-  await seedAppCreds(t, dir);
-  const r = await runCli(["install"], {
-    env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1", ...FAST_POLL },
+    code: 0,
+    stderr: /Saved installation_id=555 \(me\)/,
+    metaId: 555,
+  },
+  {
+    name: "falls back to '?' when an installation has no account login",
     fetchStub: installsStub("[{id:7}]"),
-  });
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stderr, /Saved installation_id=7 \(\?\)/);
-});
-
-test("cli: install polls until the installation registers", async (t) => {
-  const dir = await cliXdg(t);
-  await seedAppCreds(t, dir);
-  // First listing is empty (user hasn't clicked Install yet), second has it.
-  const pollStub = `(()=>{let n=0;return async()=>({ok:true,status:200,statusText:"OK",json:async()=>(n++<1?[]:[{id:9,account:{login:"z"}}]),text:async()=>""})})()`;
-  const r = await runCli(["install"], {
-    env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1", ...FAST_POLL },
-    fetchStub: pollStub,
-  });
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stderr, /Saved installation_id=9 \(z\)/);
-});
-
-test("cli: install lets the user pick among multiple installations", async (t) => {
-  const dir = await cliXdg(t);
-  await seedAppCreds(t, dir);
-  const r = await runCli(["install"], {
-    env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1", ...FAST_POLL },
+    code: 0,
+    stderr: /Saved installation_id=7 \(\?\)/,
+  },
+  {
+    name: "polls until the installation registers",
+    fetchStub: POLL_THEN_FOUND,
+    code: 0,
+    stderr: /Saved installation_id=9 \(z\)/,
+  },
+  {
+    name: "lets the user pick among multiple installations",
     input: "2\n",
-    fetchStub: installsStub(
-      '[{id:1,account:{login:"a"}},{id:2,account:{login:"b"}}]',
-    ),
-  });
-  assert.equal(r.code, 0, r.stderr);
-  assert.match(r.stderr, /Saved installation_id=2 \(b\)/);
-  assert.equal((await storage.readMeta()).installation_id, 2);
-});
-
-test("cli: install rejects an out-of-range pick among multiples (exit 1)", async (t) => {
-  const dir = await cliXdg(t);
-  await seedAppCreds(t, dir);
-  const r = await runCli(["install"], {
-    env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1", ...FAST_POLL },
+    fetchStub: installsStub(TWO_INSTALLS),
+    code: 0,
+    stderr: /Saved installation_id=2 \(b\)/,
+    metaId: 2,
+  },
+  {
+    name: "rejects an out-of-range pick among multiples (exit 1)",
     input: "9\n",
-    fetchStub: installsStub(
-      '[{id:1,account:{login:"a"}},{id:2,account:{login:"b"}}]',
-    ),
-  });
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /invalid selection/);
-});
-
-test("cli: install errors when no installations exist after polling (exit 1)", async (t) => {
-  const dir = await cliXdg(t);
-  await seedAppCreds(t, dir);
-  const r = await runCli(["install"], {
-    env: {
-      XDG_CONFIG_HOME: dir,
-      CLAUDE_GH_APP_NO_BROWSER: "1",
-      CLAUDE_GH_APP_POLL_MS: "0",
-      CLAUDE_GH_APP_POLL_TRIES: "1",
-    },
+    fetchStub: installsStub(TWO_INSTALLS),
+    code: 1,
+    stderr: /invalid selection/,
+  },
+  {
+    name: "errors when no installations ever register (exit 1)",
     fetchStub: installsStub("[]"),
+    code: 1,
+    stderr: /no installations found yet/,
+  },
+]) {
+  test(`cli: install ${tc.name}`, async (t) => {
+    const dir = await cliXdg(t);
+    await seedAppCreds(t, dir);
+    const r = await runCli(["install"], {
+      env: {
+        XDG_CONFIG_HOME: dir,
+        CLAUDE_GH_APP_NO_BROWSER: "1",
+        ...FAST_POLL,
+      },
+      input: tc.input,
+      fetchStub: tc.fetchStub,
+    });
+    assert.equal(r.code, tc.code, r.stderr);
+    assert.match(r.stderr, tc.stderr);
+    if (tc.metaId !== undefined) {
+      assert.equal((await storage.readMeta()).installation_id, tc.metaId);
+    }
   });
-  assert.equal(r.code, 1);
-  assert.match(r.stderr, /no installations found yet/);
-});
+}
