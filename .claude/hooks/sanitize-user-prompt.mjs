@@ -78,13 +78,7 @@ try {
 
   // Cheap pre-check: most prompts have no ESC, skip the full stripAnsi walk.
   const hasAnsi = ESC.test(prompt);
-  // strip-ansi is this hook's only npm dependency. Load it lazily inside the try
-  // (not as a top-level import) so a not-yet-installed node_modules on a cold
-  // container start routes a missing dep into the fail-closed catch below instead
-  // of crashing at import time — a static import that throws would slip the prompt
-  // through UNSANITIZED (fail open). Only loaded when ANSI is actually present, so
-  // a benign prompt during the install window still passes via the local invisible-
-  // char detection, which needs no npm deps.
+  // Lazy: a missing node_modules on cold start must route into the fail-closed catch below.
   const deAnsi = hasAnsi
     ? (await import("strip-ansi")).default(prompt)
     : prompt;
