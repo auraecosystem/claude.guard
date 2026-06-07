@@ -26,7 +26,7 @@ Search [existing issues](https://github.com/alexander-turner/claude-guard/issues
 
 ## Pull requests
 
-- Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`<type>(<scope>): <desc>`) — the `commit-msg` hook enforces this.
+- Commits follow the Conventional Commits convention enforced by the `commit-msg` hook — see [`CLAUDE.md`](CLAUDE.md) for the exact format and allowed types.
 - Fill in the [PR template](.github/PULL_REQUEST_TEMPLATE.md) and keep CI green.
 
 ## Reporting a security issue
