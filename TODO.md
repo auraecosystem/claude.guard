@@ -56,33 +56,38 @@ in PreToolUse. Protects deny rules from cross-script bypass.
 
 ## Actionable items
 
-- [x] **Invisible char stripping (Tier 1):** PostToolUse hook strips
+- [ ] **Invisible char stripping (Tier 1):** PostToolUse hook strips
       payload-capable invisible chars from tool output via updatedToolOutput.
       Preserves legitimate formatting (NBSP, NNBSP, typographic spaces).
+      _(Hook code complete; pending Anthropic adding `updatedToolOutput` to PostToolUse API.)_
 
-- [x] **ANSI escape stripping (Tier 2):** PostToolUse hook strips ANSI via
+- [ ] **ANSI escape stripping (Tier 2):** PostToolUse hook strips ANSI via
       strip-ansi before the model sees tool output.
+      _(Hook code complete; pending Anthropic adding `updatedToolOutput` to PostToolUse API.)_
 
 - [x] **Homoglyph normalization (Tier 3):** PreToolUse hook normalizes
       confusable characters in file paths and commands via namespace-guard.
 
-- [x] **HTML comment / markup stripping:** PostToolUse sanitize-output.mjs
+- [ ] **HTML comment / markup stripping:** PostToolUse sanitize-output.mjs
       Layer 2 strips HTML comments, script/style tags, and hidden elements
       (display:none, visibility:hidden, opacity:0, zero dimensions,
       off-canvas positioning) via rehype-sanitize pipeline.
+      _(Hook code complete; pending Anthropic adding `updatedToolOutput` to PostToolUse API.)_
 
-- [x] **API key / secret redaction:** PostToolUse hook scans tool output
+- [ ] **API key / secret redaction:** PostToolUse hook scans tool output
       with detect-secrets (24 provider detectors) + supplemental regex for
       unquoted field-value patterns. Secrets replaced with `[REDACTED: type]`
       before the model sees them. Degrades gracefully if Python unavailable.
+      _(Hook code complete; pending Anthropic adding `updatedToolOutput` to PostToolUse API.)_
 
 - [ ] **Shell metacharacter sanitization:** CVE-2025-54795 showed unescaped
       shell metacharacters in Claude Code CLI. High false-positive risk.
 
-- [x] **Markdown/URL sanitization:** PostToolUse sanitize-output.mjs
+- [ ] **Markdown/URL sanitization:** PostToolUse sanitize-output.mjs
       Layer 3 detects data-exfil patterns in markdown links/images
       (suspicious query params, large base64/hex in queries, template
       injection patterns), strips query strings, and blocks exfil URLs.
+      _(Hook code complete; pending Anthropic adding `updatedToolOutput` to PostToolUse API.)_
 
 - [ ] **Investigate autoformatter approach** as complement to stripping.
       See: https://embracethered.com/blog/posts/2026/scary-agent-skills/
