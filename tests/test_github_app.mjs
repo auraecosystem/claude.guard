@@ -155,18 +155,11 @@ test("storage: saveAppCreds round-trip with file backend", async (t) => {
 test("create guidance: permission set is exactly the agreed-on least-privilege", () => {
   // If this breaks, someone changed the scope the walkthrough tells users to
   // grant their App — i.e. widened (or narrowed) every user's App. The write
-  // grants are contents/pull_requests/issues; metadata is GitHub's mandatory
-  // read. Anything else is scope creep.
+  // grants are contents/pull_requests/issues. Anything else is scope creep.
   const labels = APP_PERMISSIONS.map(([k]) => k);
-  assert.deepEqual(labels, [
-    "Repository contents",
-    "Pull requests",
-    "Issues",
-    "Metadata",
-  ]);
-  for (const [label, level] of APP_PERMISSIONS) {
-    const expected = label === "Metadata" ? /Read-only/ : /Read and write/;
-    assert.match(level, expected);
+  assert.deepEqual(labels, ["Contents", "Pull requests", "Issues"]);
+  for (const [, level] of APP_PERMISSIONS) {
+    assert.match(level, /Read and write/);
   }
 });
 
@@ -730,7 +723,7 @@ test("cli: create stores app_id + slug/html_url after verifying the key via /app
   const pemPath = await tmpPemFile(t);
   const r = await runCli(["create"], {
     env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1" },
-    input: `12345\n${pemPath}\n`,
+    input: `\n12345\n${pemPath}\n`,
     fetchStub: APP_META_STUB,
   });
   assert.equal(r.code, 0, r.stderr);
@@ -748,7 +741,7 @@ test("cli: create --org points the walkthrough at the org's new-App URL", async 
   const pemPath = await tmpPemFile(t);
   const r = await runCli(["create", "--org", "acme"], {
     env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1" },
-    input: `12345\n${pemPath}\n`,
+    input: `\n12345\n${pemPath}\n`,
     fetchStub: APP_META_STUB,
   });
   assert.equal(r.code, 0, r.stderr);
@@ -762,7 +755,7 @@ test("cli: create expands a ~ in the private-key path", async (t) => {
   await fs.writeFile(path.join(home, "key.pem"), genKeypair().privateKey);
   const r = await runCli(["create"], {
     env: { XDG_CONFIG_HOME: dir, CLAUDE_GH_APP_NO_BROWSER: "1", HOME: home },
-    input: "12345\n~/key.pem\n",
+    input: "\n12345\n~/key.pem\n",
     fetchStub: APP_META_STUB,
   });
   assert.equal(r.code, 0, r.stderr);
@@ -772,7 +765,7 @@ test("cli: create expands a ~ in the private-key path", async (t) => {
 test("cli: create rejects a non-positive App ID before reading the key (exit 1)", async (t) => {
   const r = await runCli(["create"], {
     env: { XDG_CONFIG_HOME: await cliXdg(t), CLAUDE_GH_APP_NO_BROWSER: "1" },
-    input: "0\n/does/not/matter\n",
+    input: "\n0\n/does/not/matter\n",
   });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /invalid App ID/);
@@ -782,7 +775,7 @@ test("cli: create rejects a file that isn't a PEM private key (exit 1)", async (
   const notPem = await tmpPemFile(t, "definitely not a key\n");
   const r = await runCli(["create"], {
     env: { XDG_CONFIG_HOME: await cliXdg(t), CLAUDE_GH_APP_NO_BROWSER: "1" },
-    input: `5\n${notPem}\n`,
+    input: `\n5\n${notPem}\n`,
   });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /is not a PEM private key/);

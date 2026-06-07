@@ -24,10 +24,9 @@ import {
 // the create walkthrough — widening this widens every user's App, so it stays
 // minimal and is asserted in the tests.
 export const APP_PERMISSIONS = [
-  ["Repository contents", "Read and write"],
+  ["Contents", "Read and write"],
   ["Pull requests", "Read and write"],
   ["Issues", "Read and write"],
-  ["Metadata", "Read-only (mandatory, auto-selected)"],
 ];
 
 /**
@@ -122,8 +121,12 @@ function resolvePath(raw) {
 // A single persistent 'line' listener queues input, so answers that arrive
 // together (piped stdin) aren't dropped between questions — which a fresh
 // rl.question() per prompt would do once the stream has already flushed.
-/** @param {string[]} questions */
-async function prompt(questions) {
+// afterEach(index, answer) is called after each answer, before the next prompt.
+/**
+ * @param {string[]} questions
+ * @param {((index: number, answer: string) => void) | undefined} [afterEach]
+ */
+async function prompt(questions, afterEach) {
   const rl = readline.createInterface({ input: stdin, output: stderr });
   /** @type {string[]} */
   const queued = [];
@@ -139,15 +142,15 @@ async function prompt(questions) {
   });
   /** @type {string[]} */
   const answers = [];
-  for (const question of questions) {
-    stderr.write(question);
-    answers.push(
-      queued.length
-        ? /** @type {string} */ (queued.shift())
-        : await new Promise((resolve) => {
-            waiting = resolve;
-          }),
-    );
+  for (let i = 0; i < questions.length; i++) {
+    stderr.write(questions[i]);
+    const answer = queued.length
+      ? /** @type {string} */ (queued.shift())
+      : await new Promise((resolve) => {
+          waiting = resolve;
+        });
+    answers.push(answer);
+    afterEach?.(i, answer);
   }
   rl.close();
   return answers;
@@ -169,7 +172,6 @@ same-site, so this can't be automated from a loopback page — do it by hand:
        - Webhook: UNCHECK "Active"
      Repository permissions:
 ${perms}
-       - Where can this be installed: Only on this account
   3. Click "Create GitHub App".
   4. On the App page, note the App ID and click "Generate a private key"
      (this downloads a .pem file).
@@ -188,12 +190,16 @@ async function cmdCreate(flags) {
     ? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new`
     : "https://github.com/settings/apps/new";
   stderr.write(createGuidance(newAppUrl));
-  openBrowser(newAppUrl);
-
-  const [appIdRaw, pemPath] = await prompt([
-    "App ID: ",
-    "Path to the downloaded private key (.pem): ",
-  ]);
+  const [, appIdRaw, pemPath] = await prompt(
+    [
+      "Press Enter to open the GitHub App creation page...",
+      "App ID: ",
+      "Path to the downloaded private key (.pem): ",
+    ],
+    (i) => {
+      if (i === 0) openBrowser(newAppUrl);
+    },
+  );
   const appId = Number(appIdRaw.trim());
   if (!Number.isInteger(appId) || appId <= 0) {
     throw new Error("invalid App ID (expected a positive integer)");
