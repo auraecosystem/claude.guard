@@ -141,8 +141,7 @@ ck_workspace_hook_deps() {
 # matches what managed-settings.json actually wires, so the battery can't drift.
 COVERED=(
   scan-invisible-chars.mjs
-  gate-invisible-chars.mjs
-  sanitize-input.mjs
+  pretooluse-sanitize.mjs
   validate-webfetch.mjs
   sanitize-output.mjs
   monitor-launch.bash
@@ -161,26 +160,17 @@ ck_hook_scan_invisible() {
   }
 }
 
-ck_hook_gate_invisible() {
-  run_hook 'node "$SCCD_DIR"/.claude/hooks/gate-invisible-chars.mjs' \
+ck_hook_pretooluse_sanitize() {
+  # The single registered PreToolUse content-protection orchestrator (it composes the
+  # invisible-char gate, confusable folding, and authored-content sanitizer in ONE
+  # process so their updatedInput rewrites chain instead of clobbering each other).
+  run_hook 'node "$SCCD_DIR"/.claude/hooks/pretooluse-sanitize.mjs' \
     '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}' >/dev/null || {
-    echo "gate-invisible-chars exited non-zero"
+    echo "pretooluse-sanitize exited non-zero"
     return 1
   }
   ! hook_crashed || {
-    echo "gate-invisible-chars crashed: $(cat "$HOOK_ERRFILE")"
-    return 1
-  }
-}
-
-ck_hook_sanitize_input() {
-  run_hook 'node "$SCCD_DIR"/.claude/hooks/sanitize-input.mjs' \
-    '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}' >/dev/null || {
-    echo "sanitize-input exited non-zero"
-    return 1
-  }
-  ! hook_crashed || {
-    echo "sanitize-input crashed: $(cat "$HOOK_ERRFILE")"
+    echo "pretooluse-sanitize crashed: $(cat "$HOOK_ERRFILE")"
     return 1
   }
 }
@@ -308,8 +298,7 @@ run_check --needs up dev_mode "managed SCCD_DIR points at /workspace (dev mode)"
 run_check --needs up hook_deps "live hook deps resolve from /workspace/node_modules" ck_workspace_hook_deps
 
 run_check --needs hook_deps hook_scan "SessionStart scan-invisible-chars runs" ck_hook_scan_invisible
-run_check --needs hook_deps hook_gate "PreToolUse gate-invisible-chars runs" ck_hook_gate_invisible
-run_check --needs hook_deps hook_sanin "PreToolUse sanitize-input runs" ck_hook_sanitize_input
+run_check --needs hook_deps hook_pretool "PreToolUse pretooluse-sanitize runs" ck_hook_pretooluse_sanitize
 run_check --needs hook_deps hook_webfetch "PreToolUse validate-webfetch allows ro / denies other" ck_hook_validate_webfetch
 run_check --needs hook_deps hook_sanout "PostToolUse sanitize-output sanitizes (deps resolve)" ck_hook_sanitize_output
 run_check --needs services_running hook_monlaunch "PreToolUse monitor-launch fails closed" ck_hook_monitor_launch

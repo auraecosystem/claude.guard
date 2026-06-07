@@ -1310,6 +1310,38 @@ class TestDevLifecycleCheck:
         assert "check-dev-lifecycle" in regex
 
 
+class TestComposeLifecycleProjectHooks:
+    """The normal-mode lifecycle must also prove the #3 regression where it actually bit:
+    the project tier (.claude/settings.json) wires hooks resolving from /workspace, so
+    /workspace/node_modules must be populated and those hooks must load — not just the
+    baked /opt/claude-guard set."""
+
+    CHECK = REPO_ROOT / "bin" / "check-compose-lifecycle.bash"
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.check = self.CHECK.read_text()
+
+    def test_asserts_workspace_deps_installed(self) -> None:
+        assert "/workspace/node_modules" in self.check
+        assert (
+            "/workspace/package.json" in self.check
+        )  # dep list derived, not hardcoded
+
+    def test_runs_project_tier_hook_via_project_dir(self) -> None:
+        """It invokes the project-tier hook the way Claude Code does — through
+        $CLAUDE_PROJECT_DIR — and fails if it cannot sanitize (deps unresolved)."""
+        assert "CLAUDE_PROJECT_DIR=/workspace" in self.check
+        assert "sanitize-output.mjs" in self.check
+        assert "SANITIZATION FAILED" in self.check
+
+    def test_new_checks_are_registered(self) -> None:
+        """Both new check functions must be wired into a run_check line, not just defined."""
+        assert "run_check --needs entrypoint workspace_deps" in self.check
+        for check in ("ck_workspace_deps_installed", "ck_project_hook_sanitizes"):
+            assert f" {check}\n" in self.check
+
+
 # ── Auto mode configuration ────────────────────────────────────────────
 
 
