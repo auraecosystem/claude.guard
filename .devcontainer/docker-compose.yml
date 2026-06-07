@@ -162,7 +162,17 @@ services:
     networks:
       sandbox: {}
     pids_limit: 64
-    mem_limit: 256m
+    # The hardener runs a one-shot `pnpm install` of the workspace tree (online,
+    # via the proxy, when the bind-mounted node_modules doesn't satisfy the
+    # lockfile — the common case on a macOS host whose tree lacks the lockfile's
+    # linux-only optional binaries). A real install spikes well past 256m on a
+    # heavy tree (remark/rehype/unified, playwright, …) and gets OOM-killed mid
+    # install, which surfaces as a bare `Killed` and a fatal "dependency install
+    # failed". One knob drives the cap; memswap_limit references the SAME variable
+    # so no-swap holds at any size. The container is transient (exits after
+    # hardening) so the headroom is only held during launch.
+    mem_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-2048}m
+    memswap_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-2048}m
     cpus: 1
     depends_on:
       firewall:
