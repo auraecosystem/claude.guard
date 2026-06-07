@@ -5,7 +5,7 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runHook as run, hookOutput } from "./test-helpers.mjs";
+import { runHook as run, runHookRaw, hookOutput } from "./test-helpers.mjs";
 import { stripInvisible } from "./invisible-chars.mjs";
 import {
   interpretArmor,
@@ -61,6 +61,56 @@ describe("sanitize-output: tool_response extraction", () => {
 
   it("no-ops when no tool output field is present", async () => {
     assert.equal(await run(POST, { tool_name: "Read", tool_input: {} }), null);
+  });
+});
+
+// ─── PostToolUse output-replacement wire contract ────────────────────────────
+// The harness only honors a replacement that is named `updatedToolOutput` and
+// nested under `hookSpecificOutput` with hookEventName "PostToolUse" (per
+// https://code.claude.com/docs/en/hooks#posttooluse-decision-control). Emit it
+// under any other key, at the top level, or with the wrong event name and the
+// harness SILENTLY ignores it — the unsanitized output reaches the model and the
+// hook fails open. These assertions pin the exact wire shape on both the modify
+// branch and the fail-closed catch, so a wrong field name/nesting/event name
+// (which the unwrapping `hookOutput` helper would hide) breaks the build.
+
+describe("sanitize-output: updatedToolOutput wire contract", () => {
+  const assertContract = (response) => {
+    const hso = response.hookSpecificOutput;
+    assert.ok(hso, "replacement must be nested under hookSpecificOutput");
+    assert.equal(hso.hookEventName, "PostToolUse");
+    assert.ok(
+      Object.hasOwn(hso, "updatedToolOutput"),
+      "replacement must use the documented key `updatedToolOutput`",
+    );
+    assert.equal(
+      typeof hso.updatedToolOutput,
+      "string",
+      "updatedToolOutput must be a string the harness can substitute",
+    );
+    // Guard against a top-level emit the harness would ignore.
+    assert.equal(response.updatedToolOutput, undefined);
+  };
+
+  it("modify branch nests updatedToolOutput correctly", async () => {
+    const response = await run(POST, {
+      tool_name: "Bash",
+      tool_input: {},
+      tool_response: `mal${cp(0x200b)}ware`,
+    });
+    assertContract(response);
+    assert.equal(response.hookSpecificOutput.updatedToolOutput, "malware");
+  });
+
+  it("fail-closed catch nests updatedToolOutput correctly", async () => {
+    // Invalid JSON makes readStdinJson throw, routing into the catch.
+    const { stdout } = await runHookRaw(POST, "not json{");
+    const response = JSON.parse(stdout);
+    assertContract(response);
+    assert.match(
+      response.hookSpecificOutput.updatedToolOutput,
+      /SANITIZATION FAILED/,
+    );
   });
 });
 

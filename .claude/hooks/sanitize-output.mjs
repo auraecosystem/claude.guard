@@ -353,10 +353,10 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href)
 
     if (!modified) process.exit(0);
 
-    // updatedToolOutput will replace the raw tool output once Anthropic adds that
-    // field to the PostToolUse hook API (requested). Until then it is silently
-    // ignored by the harness, but the field must stay so enforcement activates
-    // automatically when the API ships. additionalContext is live and warns the model.
+    // updatedToolOutput replaces the raw tool output in the model's context with
+    // the sanitized text — the enforcement boundary. additionalContext rides
+    // alongside it to tell the model why the output changed. The tool already ran,
+    // so this governs only what the model sees, not the side effects.
     emitHookResponse(HookEvent.POST_TOOL_USE, {
       updatedToolOutput: cleaned,
       additionalContext:
@@ -366,8 +366,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href)
     });
   } catch (err) {
     process.stderr.write(`sanitize-output hook error: ${errMessage(err)}\n`);
-    // updatedToolOutput suppresses the raw output once the CC API honors it for
-    // PostToolUse; additionalContext is live now so it warns the model either way.
+    // updatedToolOutput suppresses the raw, unsanitized output by replacing it
+    // with this placeholder; additionalContext warns the model that the sanitizer
+    // failed. Fail closed: the model never sees output we could not vet.
     emitHookResponse(HookEvent.POST_TOOL_USE, {
       updatedToolOutput:
         "[SANITIZATION FAILED — original output suppressed for safety. Hook error: " +
