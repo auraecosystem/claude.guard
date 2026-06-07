@@ -139,12 +139,25 @@ services:
       # write access; the app mounts the same volume read-only so the agent
       # cannot forge the "hardening complete" signal that gates the monitor.
       - hardening-state:/run/hardening
+    # Proxied egress through the firewall so the workspace `pnpm install` can fetch
+    # packages the bind-mounted node_modules lacks (e.g. the lockfile's linux-only
+    # optional binaries when the host installed on macOS). Same squid path the app
+    # uses — bounded to the allowlist (registry.npmjs.org is `ro`, GET-only) — and the
+    # ssl_bump CA is baked into this shared image, so HTTPS to `ro` registries works.
+    env_file: proxy.env
+    dns:
+      - 172.30.0.2
     environment:
       # Maintainer dev mode (set by the launcher): repoint the guardrail source
       # from the baked /opt/claude-guard back to the live /workspace copy so hook
       # edits take effect without a rebuild. entrypoint.bash fails closed if the
       # workspace lacks the guardrail sources. Empty/unset = use the baked set.
       CLAUDE_GUARD_DEV_MODE: ${CLAUDE_GUARD_DEV_MODE:-}
+      # The install now has egress, so do NOT run package lifecycle scripts: a
+      # malicious postinstall could otherwise exfiltrate through the proxy. Mirrors
+      # the app container. Platform binaries (esbuild/rollup) ship as optional
+      # *dependencies*, not scripts, so the missing-linux-deps fix still works.
+      NPM_CONFIG_IGNORE_SCRIPTS: "true"
     command:
       - bash
       - -c
