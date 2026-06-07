@@ -3006,7 +3006,7 @@ PD_ENVELOPE = {
     "hook_event_name": "PermissionDenied",
     "permission_mode": "auto",
     # The documented field name for the classifier's rationale.
-    "denial_reason": "classifier: bulk deletion on a broad path",
+    "reason": "classifier: bulk deletion on a broad path",
 }
 
 
@@ -3306,13 +3306,9 @@ def test_handle_permission_denied_prompt_includes_denial_reason(
     assert "rm -rf /" in user_msg
 
 
-@pytest.mark.parametrize("field", ["denial_reason", "reason", "additionalContext"])
-def test_handle_permission_denied_reads_reason_from_any_field(
-    mon, monkeypatch, capsys, field
-):
-    # Claude Code names the classifier-rationale field inconsistently across docs
-    # (anthropics/claude-code#37559); the reviewer must pick it up under any of
-    # denial_reason / reason / additionalContext so a rename can't blank it.
+def test_handle_permission_denied_reads_reason_field(mon, monkeypatch, capsys):
+    # Claude Code's PermissionDenied input carries the classifier rationale in
+    # the documented `reason` field; the reviewer must pick it up from there.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
     captured = {}
@@ -3328,38 +3324,11 @@ def test_handle_permission_denied_reads_reason_from_any_field(
         "cwd": "/proj",
         "hook_event_name": "PermissionDenied",
         "permission_mode": "auto",
-        field: "classifier flagged exfiltration",
+        "reason": "classifier flagged exfiltration",
     }
     mon.handle_permission_denied(envelope)
     user_msg = captured["body"]["messages"][0]["content"]
     assert "classifier flagged exfiltration" in user_msg
-
-
-def test_handle_permission_denied_reason_field_precedence(mon, monkeypatch, capsys):
-    # When several rationale fields are present, the documented `denial_reason`
-    # wins over the legacy `reason`/`additionalContext` fallbacks.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    captured = {}
-
-    def fake_urlopen(req, timeout=None):
-        captured["body"] = json.loads(req.data)
-        return _anthropic_resp("allow")
-
-    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
-    envelope = {
-        "tool_name": "Bash",
-        "tool_input": {"command": "x"},
-        "cwd": "/proj",
-        "hook_event_name": "PermissionDenied",
-        "denial_reason": "AUTHORITATIVE",
-        "reason": "legacy-reason",
-        "additionalContext": "legacy-context",
-    }
-    mon.handle_permission_denied(envelope)
-    user_msg = captured["body"]["messages"][0]["content"]
-    assert "AUTHORITATIVE" in user_msg
-    assert "legacy-reason" not in user_msg
     assert "legacy-context" not in user_msg
 
 
