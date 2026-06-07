@@ -11,7 +11,6 @@
  * a payload is to block. Thresholds match scan-invisible-chars (SessionStart)
  * for UX consistency.
  */
-import stripAnsi from "strip-ansi";
 import { readStdinJson, errMessage, HookEvent } from "./lib-hook-io.mjs";
 import {
   CHECKS,
@@ -79,7 +78,10 @@ try {
 
   // Cheap pre-check: most prompts have no ESC, skip the full stripAnsi walk.
   const hasAnsi = ESC.test(prompt);
-  const deAnsi = hasAnsi ? stripAnsi(prompt) : prompt;
+  // Lazy: a missing node_modules on cold start must route into the fail-closed catch below.
+  const deAnsi = hasAnsi
+    ? (await import("strip-ansi")).default(prompt)
+    : prompt;
 
   const longRunSample = deAnsi.match(LONG_RUN_RE)?.[0] ?? null;
   const invisibleCount = deAnsi.match(STRIP)?.length ?? 0;

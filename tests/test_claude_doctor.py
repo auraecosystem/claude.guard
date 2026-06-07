@@ -29,6 +29,11 @@ WRAPPER = REPO_ROOT / "bin" / "claude-guard"
 # docker stub: reports gVisor as the only runtime and treats `ps` as a reachable
 # daemon with no running containers. Parameterized by the `ps` exit code so the
 # "daemon unreachable" case can flip it to 1 without a second template.
+# STATE fake (issue #373 doctrine): every branch keys off docker *state/exit
+# code* (runtime list, daemon reachable, image cached, build succeeds) — the
+# conditions the doctor reports on — not off docker's argument contract. It does
+# not assert the real CLI accepts these argv; the tools listed in ALL_TOOLS are
+# likewise presence stubs (`command -v`), with no contract to validate.
 _DOCKER_STUB = """\
 #!/usr/bin/env bash
 if [[ "$1" == "info" && "$2" == "--format" ]]; then
@@ -40,6 +45,10 @@ if [[ "$1" == "ps" ]]; then
 fi
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
   exit {img_exit}
+fi
+if [[ "$1" == "compose" && "$2" == "version" && "$3" == "--short" ]]; then
+  printf '{compose_version}\\n'
+  exit 0
 fi
 if [[ "$1" == "compose" ]]; then
   echo "STUB-BUILD-OUTPUT $*"
@@ -59,6 +68,7 @@ def _make_stubs(
     docker_ps_exit: int = 0,
     docker_image_inspect_exit: int = 0,
     docker_compose_exit: int = 0,
+    docker_compose_version: str = "2.39.0",
     claude: str | None = "wrapper",
 ) -> Path:
     """Populate a stub dir with a docker stub plus trivial tool executables.
@@ -81,6 +91,7 @@ def _make_stubs(
                 ps_exit=docker_ps_exit,
                 img_exit=docker_image_inspect_exit,
                 compose_exit=docker_compose_exit,
+                compose_version=docker_compose_version,
             ),
         )
     for tool in tools:
@@ -310,6 +321,22 @@ def test_selected_runtime_not_registered_degrades(tmp_path: Path) -> None:
     )
     assert r.returncode in (1, 2)
     assert "runsc but it is not registered with Docker" in r.stdout
+
+
+def test_too_old_compose_version_unprotects(tmp_path: Path) -> None:
+    """Compose below the start_interval floor (2.20.3) fails every sandboxed
+    launch, so the doctor must flag it as unprotected with the version and floor."""
+    stubs = _make_stubs(tmp_path, docker_compose_version="2.10.0")
+    r = _run(
+        stubs,
+        tmp_path / "home",
+        CONTAINER_RUNTIME="runsc",
+        ANTHROPIC_API_KEY="sk-test",
+        DANGEROUSLY_SKIP_MONITOR="",
+    )
+    assert r.returncode == 2
+    assert "VERDICT: UNPROTECTED" in r.stdout
+    assert "below 2.20.3" in r.stdout
 
 
 @pytest.mark.parametrize(

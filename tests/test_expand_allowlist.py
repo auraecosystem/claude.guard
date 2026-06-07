@@ -39,14 +39,24 @@ _STUBS = {
         'if [ "$1" = "add" ]; then echo "$3" >>"$IPSET_LOG"; fi\n'
         "exit 0\n"
     ),
-    # dig's domain is the last argument; echo $FAKE_IP for it unless that domain
-    # is listed (space-separated) in $NORESOLVE, which lets a test exercise
-    # partial resolution within one batch.
+    # expand-allowlist now resolves via the shared batch_resolve_a, which calls
+    # `dig +noall +answer -f <file>`. The stub pulls the query file, and for each
+    # domain NOT space-listed in $NORESOLVE prints an answer-section A record
+    # `<domain>.\t300\tIN\tA\t$FAKE_IP` (empty FAKE_IP => unresolvable), so a test
+    # can still exercise partial resolution within one batch.
     "dig": (
         "#!/bin/sh\n"
-        'for a in "$@"; do d="$a"; done\n'
-        'case " $NORESOLVE " in *" $d "*) exit 0 ;; esac\n'
-        '[ -n "$FAKE_IP" ] && echo "$FAKE_IP"\n'
+        'qfile=""\n'
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "-f" ]; then qfile="$2"; shift 2; continue; fi\n'
+        "  shift\n"
+        "done\n"
+        '[ -n "$qfile" ] || exit 0\n'
+        "while IFS= read -r d; do\n"
+        '  [ -n "$d" ] || continue\n'
+        '  case " $NORESOLVE " in *" $d "*) continue ;; esac\n'
+        '  [ -n "$FAKE_IP" ] && printf \'%s.\\t300\\tIN\\tA\\t%s\\n\' "$d" "$FAKE_IP"\n'
+        'done <"$qfile"\n'
         "exit 0\n"
     ),
     "dnsmasq": "#!/bin/sh\nexit 0\n",
@@ -74,6 +84,8 @@ def fake_fw(tmp_path: Path) -> dict:
     dnsmasq_conf = tmp_path / "allowlist.conf"
     ro_domains = tmp_path / "readonly-domains.txt"
     ro_domains.write_text("")
+    rw_domains = tmp_path / "readwrite-domains.txt"
+    rw_domains.write_text("")
     resolv = tmp_path / "resolv.conf.docker"
     resolv.write_text("nameserver 9.9.9.9\n")
     ipset_log = tmp_path / "ipset.log"
@@ -84,6 +96,7 @@ def fake_fw(tmp_path: Path) -> dict:
         "ALLOWLIST_OVERLAY": str(overlay),
         "DNSMASQ_CONF": str(dnsmasq_conf),
         "RO_DOMAINS": str(ro_domains),
+        "RW_DOMAINS": str(rw_domains),
         "RESOLV_DOCKER": str(resolv),
         "IPSET_LOG": str(ipset_log),
         "FAKE_IP": "203.0.113.7",
@@ -96,6 +109,7 @@ def fake_fw(tmp_path: Path) -> dict:
         "overlay": overlay,
         "dnsmasq_conf": dnsmasq_conf,
         "ro_domains": ro_domains,
+        "rw_domains": rw_domains,
         "ipset_log": ipset_log,
     }
 
@@ -173,25 +187,27 @@ def test_requires_root(fake_fw: dict) -> None:
 
 
 @pytest.mark.parametrize(
-    "arg,domain,access,ro_acl",
+    "arg,domain,access,ro_acl,rw_acl",
     [
-        # ro: squid ACL gains the domain (leading dot = domain + subdomains).
-        ("files.example.com", "files.example.com", "ro", ".files.example.com\n"),
-        # rw: spliced, not method-restricted, so no squid ACL entry.
-        ("api.example.com:rw", "api.example.com", "rw", ""),
+        # ro: readonly ACL gains the domain (leading dot = domain + subdomains).
+        ("files.example.com", "files.example.com", "ro", ".files.example.com\n", ""),
+        # rw: exact entry in the readwrite ACL so it is spliced out of any ro
+        # wildcard; never appears in the readonly (method-restricted) list.
+        ("api.example.com:rw", "api.example.com", "rw", "", "api.example.com\n"),
     ],
 )
 def test_domain_applied_across_overlay_dnsmasq_ipset_and_squid(
-    fake_fw: dict, arg: str, domain: str, access: str, ro_acl: str
+    fake_fw: dict, arg: str, domain: str, access: str, ro_acl: str, rw_acl: str
 ) -> None:
     r = run_expand(fake_fw["env"], arg)
     assert r.returncode == 0, r.stderr
     # Overlay (default access ro), dnsmasq record, and live ipset entry are
-    # populated for both tiers; only the squid ACL differs by access.
+    # populated for both tiers; only the squid ACL files differ by access.
     assert fake_fw["overlay"].read_text() == f"{domain}\t{access}\n"
     assert f"address=/{domain}/203.0.113.7" in fake_fw["dnsmasq_conf"].read_text()
     assert "203.0.113.7" in fake_fw["ipset_log"].read_text()
     assert fake_fw["ro_domains"].read_text() == ro_acl
+    assert fake_fw["rw_domains"].read_text() == rw_acl
 
 
 def test_repeat_call_is_idempotent(fake_fw: dict) -> None:
@@ -267,6 +283,19 @@ def test_both_scripts_source_the_shared_lib() -> None:
     assert 'source "$SCRIPT_DIR/firewall-lib.bash"' in EXPAND.read_text()
 
 
+def test_all_three_paths_resolve_through_the_shared_function() -> None:
+    # The build, the refresh loop, and live expansion must resolve via the one
+    # shared resolver (which follows CNAMEs and keys by the queried name), not a
+    # private `dig` path — otherwise they drift and a CNAME'd domain resolves in
+    # one path but not another. Guards against expand-allowlist regrowing its own
+    # `dig +short` loop.
+    init_src = INIT_FIREWALL.read_text()
+    expand_src = EXPAND.read_text()
+    assert "resolve_a_with_retries" in init_src
+    assert "resolve_a_with_retries" in expand_src
+    assert "dig +short" not in expand_src, "expand must not resolve via its own dig"
+
+
 def test_bogon_list_is_single_source_of_truth() -> None:
     # The resolve-time filter and the packet-layer DROP rules must read the same
     # list so they can't drift: BOGON_CIDRS is defined once in the shared lib and
@@ -321,6 +350,25 @@ def test_write_ro_domains_empty_truncates(tmp_path: Path) -> None:
     out = tmp_path / "ro.txt"
     out.write_text(".stale.example\n")
     r = run_lib(f"write_ro_domains '{out}'")
+    assert r.returncode == 0
+    assert out.read_text() == ""
+
+
+def test_write_rw_domains_exact_entries_sorted_and_deduped(tmp_path: Path) -> None:
+    """rw domains are EXACT (no leading dot) so a rw child escapes a ro wildcard;
+    sorted + deduped for byte-stable regeneration like write_ro_domains."""
+    out = tmp_path / "rw.txt"
+    r = run_lib(
+        f"write_rw_domains '{out}' api.anthropic.com b.example api.anthropic.com"
+    )
+    assert r.returncode == 0
+    assert out.read_text() == "api.anthropic.com\nb.example\n"
+
+
+def test_write_rw_domains_empty_truncates(tmp_path: Path) -> None:
+    out = tmp_path / "rw.txt"
+    out.write_text("api.stale.example\n")
+    r = run_lib(f"write_rw_domains '{out}'")
     assert r.returncode == 0
     assert out.read_text() == ""
 

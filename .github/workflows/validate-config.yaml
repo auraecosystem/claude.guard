@@ -28,7 +28,7 @@ jobs:
     name: Decide (validate config)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
-      paths-regex: '^(\.claude/|\.hooks/|\.github/workflows/validate-config\.yaml|\.github/scripts/validate-config\.sh|\.github/actions/setup-base-env/|\.github/actions/install-claude-cli/|\.devcontainer/|bin/|hooks/|setup\.bash|tests/|pyproject\.toml|uv\.lock|\.python-version)'
+      paths-regex: '^(\.claude/|\.hooks/|\.github/workflows/validate-config\.yaml|\.github/scripts/validate-config\.sh|\.github/actions/setup-base-env/|\.github/actions/install-claude-cli/|\.github/actions/install-devcontainer-cli/|\.devcontainer/|bin/|hooks/|setup\.bash|tests/|pyproject\.toml|uv\.lock|\.python-version)'
 
   validate:
     name: Validate shell config
@@ -55,15 +55,175 @@ jobs:
       # Real `claude` binary so the auto-mode integration tests run (they error,
       # not skip, when it's absent).
       - uses: ./.github/actions/install-claude-cli
+      # Real `devcontainer` binary so test_devcontainer_cli_contract.py validates
+      # the wrapper's `devcontainer up` argv against the actual CLI argument
+      # contract (a stub rubber-stamps any flag); errors, not skips, when absent.
+      - uses: ./.github/actions/install-devcontainer-cli
       # grepcidr backs the firewall's is_public_ipv4 range check; the firewall
       # tests exercise the real binary (no stub), so install it rather than let
       # them silently no-op when it is absent.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends grepcidr
+      # Real `cosign` so test_resolve_image_cosign_contract.py validates the
+      # resolver's `cosign verify` flag contract against the actual binary (a stub
+      # rubber-stamps any flag); errors, not skips, when absent. Version pinned via
+      # .github/tool-versions.sh, shared with the local session hook.
+      - name: Read cosign version
+        id: tool-versions
+        run: |
+          . .github/tool-versions.sh
+          echo "cosign=$COSIGN_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: ${{ steps.tool-versions.outputs.cosign }}
       # pytest-cov natively handles xdist workers (instruments each, then
       # combines), so coverage stays accurate while -n auto parallelises
       # across the runner's cores. --dist=loadscope keeps tests from the
       # same file on one worker, which preserves module-scoped fixtures.
       - run: uv run --extra dev pytest tests/ -n auto --dist=loadscope --cov --cov-report=term-missing
+
+  # kcov's DEBUG bash tracing is far too slow to run in one job — the wrappers'
+  # ~150 traced launches overran a 45-minute single-runner ceiling, and a runner's
+  # parallelism is capped at its cores. So the pass fans out: build kcov once,
+  # trace a hash-slice of the tests on each of many shards in parallel
+  # (KCOV_SHARD_INDEX/COUNT — see tests/conftest.py), then merge every shard's
+  # report and enforce 100% in one gate job. The gate keeps the
+  # "Bash coverage (kcov)" name so it stays the required status check; the shards
+  # and build are not themselves required.
+  #
+  # Only the test files that invoke an enrolled wrapper by its real path
+  # contribute kcov coverage. test_setup_bash_coverage.py is omitted on purpose:
+  # setup.bash is not enrolled (see tests/_kcov.py), and its tests source sliced
+  # functions / run a temp copy, so they trace nothing here — they run in the
+  # ordinary pytest job instead.
+  kcov-build:
+    name: Build kcov
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Bump this to re-cut the cached binary when upgrading kcov; it keys both the
+      # cache and the cloned branch so they can't drift.
+      KCOV_VERSION: v42
+    steps:
+      # kcov was dropped from Ubuntu's repos, so build the pinned release from
+      # source — it is the only tool that gives real line coverage for the bash
+      # wrappers (pytest-cov can't see subprocesses). The compiled binary is
+      # cached across runs (it's pinned, so it never changes) and shared with the
+      # shards/gate as an artifact, so a warm PR skips the from-source build
+      # entirely instead of recompiling it on every run.
+      - name: Cache kcov binary
+        id: cache-kcov
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: kcov-bin/kcov
+          key: kcov-${{ env.KCOV_VERSION }}-${{ runner.os }}
+      - name: Build kcov
+        if: steps.cache-kcov.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ libdw-dev libelf-dev binutils-dev \
+            libcurl4-openssl-dev zlib1g-dev libssl-dev
+          git clone --depth 1 --branch "$KCOV_VERSION" https://github.com/SimonKagstrom/kcov.git /tmp/kcov
+          cmake -S /tmp/kcov -B /tmp/kcov/build -G Ninja
+          ninja -C /tmp/kcov/build
+          mkdir -p kcov-bin
+          cp "$(find /tmp/kcov/build -name kcov -type f -perm -u+x | head -1)" kcov-bin/kcov
+      - name: Upload kcov binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kcov-bin
+          path: kcov-bin/kcov
+          if-no-files-found: error
+
+  kcov-shard:
+    name: Bash coverage shard ${{ matrix.shard }}
+    needs: [decide, kcov-build]
+    if: needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this list's length in sync with KCOV_SHARD_COUNT below.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    env:
+      KCOV_SHARD_COUNT: "16"
+      KCOV_SHARD_INDEX: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-base-env
+        with:
+          setup-python: "true"
+      - uses: ./.github/actions/install-kcov
+      # Every test file that invokes an enrolled wrapper must be listed, not just
+      # the *_coverage.py top-ups: the wrappers reach 100% only from the UNION of
+      # their original suites (test_claude_*.py) and those top-ups. A file left
+      # out doesn't fail loudly — it silently drops the lines only it covers, and
+      # the gate then reports them as uncovered. test_guard_doctor_coverage.py is
+      # absent on purpose: claude-guard-doctor is Python (not kcov-traceable).
+      - name: Trace this shard's slice
+        run: |
+          bash tests/run-kcov.sh collect "$RUNNER_TEMP/kcov-out" \
+            tests/test_claude_wrapper.py \
+            tests/test_claude_guard_coverage.py \
+            tests/test_claude_variants.py \
+            tests/test_claude_audit.py \
+            tests/test_audit_reconcile.py \
+            tests/test_guard_audit_coverage.py \
+            tests/test_claude_panic.py \
+            tests/test_guard_panic_coverage.py \
+            tests/test_claude_remote.py \
+            tests/test_guard_remote_coverage.py \
+            tests/test_claude_create_worktree.py \
+            tests/test_create_worktree_coverage.py \
+            tests/test_claude_github_app.py \
+            tests/test_github_app_coverage.py \
+            tests/test_loosen_firewall_coverage.py \
+            tests/test_ephemeral.py \
+            tests/test_uninstall.py \
+            tests/test_merge_user_settings.py \
+            tests/test_merge_settings_coverage.py \
+            tests/test_volume_gc.py
+      - name: Upload shard coverage
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kcov-runs-${{ matrix.shard }}
+          path: ${{ runner.temp }}/kcov-out/runs
+          # A light slice may trace nothing; the gate's NOT-TRACED check is the
+          # backstop, so an empty shard must not fail the upload.
+          if-no-files-found: ignore
+
+  kcov-gate:
+    name: Bash coverage (kcov)
+    needs: [decide, kcov-build, kcov-shard]
+    # always(): run even when a shard failed so this required check turns red
+    # instead of being skipped (a skipped required check counts as passing). The
+    # decide gate still short-circuits it on unrelated PRs.
+    if: always() && needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fail if the build or any shard failed
+        if: needs.kcov-build.result != 'success' || needs.kcov-shard.result != 'success'
+        run: |
+          echo "kcov build=${{ needs.kcov-build.result }} shards=${{ needs.kcov-shard.result }}" >&2
+          exit 1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-base-env
+        with:
+          setup-python: "true"
+      - uses: ./.github/actions/install-kcov
+      - name: Fetch every shard's coverage
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          pattern: kcov-runs-*
+          path: kcov-runs
+          merge-multiple: true
+      - name: Merge shard reports and enforce 100%
+        run: bash tests/run-kcov.sh merge-gate kcov-runs
 
   mypy:
     name: Type check (mypy)
@@ -79,8 +239,9 @@ jobs:
       # Check every source tree, not a curated file list, so a new module can't
       # slip past type-checking. The roots are named explicitly because `mypy .`
       # skips dot-directories (it would never descend into .claude/ — the monitor
-      # itself) and because tests/ is excluded via [tool.mypy] in pyproject.
-      - run: uv run --extra dev mypy .claude .devcontainer bin research
+      # itself) and because tests/ is excluded via [tool.mypy] in pyproject — the
+      # eval harness (library code under tests/) is re-included root by root.
+      - run: uv run --extra dev mypy .claude .devcontainer bin research .github/scripts tests/eval
 
   pylint:
     name: Lint (pylint)
@@ -93,4 +254,55 @@ jobs:
       - uses: ./.github/actions/setup-base-env
         with:
           setup-python: "true"
-      - run: uv run --extra dev pylint .claude/hooks .devcontainer bin/lib
+      - run: uv run --extra dev pylint .claude/hooks .devcontainer bin/lib .github/scripts tests/eval
+
+  # Pre-commit deliberately is NOT a standalone lint CI workflow (it lives in the
+  # local hook; see CLAUDE.md § CI). This job's purpose is different: it runs the
+  # real SessionStart provisioner and then `pre-commit run` to prove
+  # session-setup.sh actually installs everything the local commit hook needs
+  # (uv-installed pre-commit, cargo-installed shellharden, the language:system
+  # hook binaries). Catching a provisioning gap here — for real, end to end —
+  # replaces re-running the installer inside a fragile unit test. test_precommit_
+  # tooling.py still statically guards that each language:system binary is named
+  # in session-setup.sh; this job proves the install commands themselves work.
+  setup-precommit-run:
+    name: Session setup provisions a commit-clean environment — run
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-base-env
+        with:
+          setup-python: "true"
+      - name: Provision via session-setup.sh, then run pre-commit
+        run: |
+          # Run as the unprivileged runner user, exactly as a web session does.
+          # apt installs (gh/jq/shellcheck/grepcidr) warn and skip without root,
+          # but pre-commit doesn't need them: its pinned rev hooks (shellcheck,
+          # shfmt, ruff, gitleaks, codespell, actionlint) fetch themselves, and
+          # session-setup's uv (pre-commit) + cargo (shellharden) installs need no
+          # root. A real provisioning failure here is the signal we want.
+          bash .claude/hooks/session-setup.sh
+          export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          pre-commit run --all-files --show-diff-on-failure
+
+  setup-precommit:
+    name: Session setup provisions a commit-clean environment
+    needs: [decide, setup-precommit-run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [[ "${{ needs.decide.outputs.run }}" != "true" ]]; then
+            echo "Skipped: no relevant changes"
+            exit 0
+          fi
+          result="${{ needs.setup-precommit-run.result }}"
+          if [[ "$result" == "success" ]]; then
+            exit 0
+          fi
+          echo "setup-precommit-run: $result"
+          exit 1

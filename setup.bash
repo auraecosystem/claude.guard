@@ -26,7 +26,7 @@ WRAPPER_SCRIPTS=(
 IS_MAC=false
 [[ "$(uname)" == "Darwin" ]] && IS_MAC=true
 IS_INTEL_MAC=false
-if $IS_MAC && [[ "$(uname -m)" == "x86_64" ]]; then
+if "$IS_MAC" && [[ "$(uname -m)" == "x86_64" ]]; then
   IS_INTEL_MAC=true
 fi
 HOOKS_ONLY=false
@@ -67,8 +67,37 @@ done
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
-status() { printf ':: %s\n' "$1"; }
-warn() { printf '!! %s\n' "$1" >&2; }
+# Color support — checked once; gates ANSI escapes on a real interactive terminal.
+# Respects NO_COLOR (https://no-color.org) and TERM=dumb.
+_setup_use_color=false
+[[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]] && [[ -t 1 ]] && _setup_use_color=true
+
+# section <label>  — bold cyan divider marking a major install phase (stdout).
+section() {
+  if "$_setup_use_color"; then
+    printf '\n\033[1m\033[36m── %s ──\033[0m\n' "$1"
+  else
+    printf '\n── %s ──\n' "$1"
+  fi
+}
+
+# status <msg>  — ✓ success/progress line (stdout).
+status() {
+  if "$_setup_use_color"; then
+    printf '\033[32m\033[1m✓\033[0m %s\n' "$1"
+  else
+    printf ':: %s\n' "$1"
+  fi
+}
+
+# warn <msg>  — ⚠ warning (stderr).
+warn() {
+  if "$_setup_use_color"; then
+    printf '\033[33m\033[1m⚠\033[0m  %s\n' "$1" >&2
+  else
+    printf '!! %s\n' "$1" >&2
+  fi
+}
 
 # verify_install_artifacts <claude-code-version>
 # Confirm the pieces the pnpm-global install chain is responsible for actually
@@ -117,19 +146,6 @@ MINGW* | MSYS* | CYGWIN*)
   ;;
 esac
 
-# Atomically replace a root-owned config file: write a temp file in the same
-# directory, preserve the destination's mode, then rename over it. An interrupted
-# write can never leave a truncated config (e.g. a half-written daemon.json).
-atomic_sudo_write() {
-  local dest="$1" content="$2" tmp mode=""
-  [[ -e "$dest" ]] && mode=$(stat -c '%a' "$dest" 2>/dev/null || stat -f '%Lp' "$dest" 2>/dev/null || true)
-  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || mode=644
-  tmp=$(sudo mktemp "$(dirname "$dest")/.$(basename "$dest").XXXXXX")
-  printf '%s\n' "$content" | sudo tee "$tmp" >/dev/null
-  sudo chmod "$mode" "$tmp"
-  sudo mv -f "$tmp" "$dest"
-}
-
 # Shared runtime detection (kept identical between the wrapper and this script
 # so the reported runtime always equals the launched one).
 # shellcheck source=bin/lib/runtime-detect.bash disable=SC1091
@@ -141,6 +157,12 @@ source "$SCRIPT_DIR/bin/lib/docker-plugins-repair.bash"
 # Package-manager-assisted prerequisite install (offer_install).
 # shellcheck source=bin/lib/pkg-install.bash disable=SC1091
 source "$SCRIPT_DIR/bin/lib/pkg-install.bash"
+
+# Privileged-write primitives (atomic_sudo_write, restart_docker) shared by the
+# install path (sandbox-runtime.bash) and the uninstall path (uninstall.bash),
+# so it must be sourced before both.
+# shellcheck source=bin/lib/sudo-helpers.bash disable=SC1091
+source "$SCRIPT_DIR/bin/lib/sudo-helpers.bash"
 
 grep -qi microsoft /proc/version 2>/dev/null && {
   if [[ -e /dev/kvm ]]; then
@@ -209,204 +231,17 @@ maybe_link_claude_alias() {
   safe_symlink "$alias_src" "$alias_dst" "claude → claude-guard"
 }
 
-# ── Uninstall ───────────────────────────────────────────────────────────────
-# remove_repo_symlink <dst> <label> — remove a symlink only if it points into
-# this repo checkout (the wrapper scripts live under bin/, the commands dir
-# under user-config/skills). Leaves unrelated files and .bak backups alone.
-remove_repo_symlink() {
-  local dst="$1" label="$2"
-  if [[ ! -L "$dst" ]]; then
-    if [[ -e "$dst" ]]; then
-      status "Left $label ($dst is not a symlink — not ours)"
-    fi
-    return 0
-  fi
-  local tgt
-  tgt="$(readlink "$dst")"
-  if [[ "$tgt" == "$SCRIPT_DIR/"* ]]; then
-    rm -f "$dst"
-    status "Removed $label ($dst)"
-  else
-    status "Left $label ($dst points to $tgt — not into this repo)"
-  fi
-}
-
-# remove_kata_shim <dst> — remove a /usr/local/bin kata shim symlink only if it
-# points into /opt/kata/bin (what setup_kata_shims_and_config created).
-remove_kata_shim() {
-  local dst="$1"
-  if [[ ! -L "$dst" ]]; then
-    if [[ -e "$dst" ]]; then
-      status "Left $dst (not a symlink — not ours)"
-    fi
-    return 0
-  fi
-  local tgt
-  tgt="$(readlink "$dst")"
-  if [[ "$tgt" == /opt/kata/bin/* ]]; then
-    sudo rm -f "$dst"
-    status "Removed kata shim $dst"
-  else
-    status "Left $dst (points to $tgt — not into /opt/kata/bin)"
-  fi
-}
-
-# uninstall_managed_settings — reverse bin/merge-user-settings.sh. The merge is
-# a deep merge keyed by .env.SCCD_DIR; we only act when that marker matches this
-# install. When a timestamped backup exists (written by merge-user-settings.sh
-# before each overwrite), the oldest backup — the pre-install state — is restored
-# verbatim and all backups are removed. When no backup is available, hooks carrying
-# the SCCD_DIR marker are stripped and the user is warned to review any
-# unrestorable scalar overrides (permissionMode, autoMode, …).
-uninstall_managed_settings() {
-  local out="/etc/claude-code/managed-settings.json"
-  if [[ ! -f "$out" ]]; then
-    status "No managed settings file at $out — nothing to remove"
-    return
-  fi
-  if ! command_exists jq; then
-    warn "jq not found — cannot safely edit $out. Remove it manually if this repo created it."
-    return
-  fi
-  local marker
-  marker="$(sudo jq -r '.env.SCCD_DIR // ""' "$out" 2>/dev/null || echo "")"
-  if [[ "$marker" != "$SCRIPT_DIR" ]]; then
-    warn "Managed settings marker (.env.SCCD_DIR=${marker:-unset}) does not match this repo ($SCRIPT_DIR)."
-    warn "Not modifying $out — review and remove this repo's keys manually if needed."
-    return
-  fi
-  # Find backup files created by merge-user-settings.sh (newest-first via sort -r).
-  local oldest_backup='' all_backups=()
-  while IFS= read -r line; do all_backups+=("$line"); done < <(
-    find "$(dirname "$out")" -maxdepth 1 \
-      -name "$(basename "$out").bak.*" 2>/dev/null | sort -r
-  )
-  [[ ${#all_backups[@]} -gt 0 ]] && oldest_backup="${all_backups[-1]}"
-
-  if [[ -n "$oldest_backup" && -f "$oldest_backup" ]]; then
-    # The oldest backup is the pre-install state; restore it verbatim.
-    local pre_install
-    pre_install="$(sudo cat "$oldest_backup")"
-    atomic_sudo_write "$out" "$pre_install"
-    sudo chmod 444 "$out"
-    status "Restored $out from pre-install backup: $oldest_backup"
-    local n_backups="${#all_backups[@]}"
-    for bak in "${all_backups[@]}"; do sudo rm -f "$bak"; done
-    status "Removed $n_backups backup file(s) from $(dirname "$out")"
-  else
-    # No backup available — strip our additions and warn about unrestorable scalars.
-    local cleaned
-    cleaned="$(sudo jq '
-      (.hooks // {}) |= with_entries(
-        .value |= [ .[] | select((.hooks // []) | all(
-          ((.command // "") | contains("SCCD_DIR") | not) and
-          ((.prompt // "")[0:22] != "You see ONE edit hunk.")
-        )) ]
-      )
-      | (.hooks // {}) |= with_entries(select(.value | length > 0))
-      | del(.env.SCCD_DIR)
-      | del(._sccd_last_backup)
-      | if (.env // {}) == {} then del(.env) else . end
-    ' "$out")"
-    atomic_sudo_write "$out" "$cleaned"
-    sudo chmod 444 "$out"
-    status "Stripped this repo's hooks and SCCD_DIR marker from $out"
-    warn "Left other keys in $out (permissions, sandbox, permissionMode, autoMode, etc.)."
-    warn "No backup found — scalar settings overwritten during install cannot be auto-restored."
-    warn "Review $out and remove anything you no longer want, or delete the file entirely"
-    warn "if this repo created it from scratch."
-  fi
-}
-
-# uninstall_kata_runtime — inverse of register_kata_runtime: delete only the
-# kata-fc runtime this repo added from /etc/docker/daemon.json, drop an empty
-# .runtimes, and restart docker. Leaves other runtimes alone.
-uninstall_kata_runtime() {
-  local daemon_json="/etc/docker/daemon.json"
-  if [[ ! -f "$daemon_json" ]]; then
-    status "No $daemon_json — no kata-fc runtime to remove"
-    return
-  fi
-  if ! command_exists jq; then
-    warn "jq not found — cannot edit $daemon_json. Remove .runtimes[\"kata-fc\"] manually."
-    return
-  fi
-  if ! sudo jq -e '.runtimes."kata-fc"' "$daemon_json" >/dev/null 2>&1; then
-    status "No kata-fc runtime entry in $daemon_json"
-    return
-  fi
-  local updated
-  updated="$(sudo jq '
-    del(.runtimes."kata-fc")
-    | if (.runtimes // {}) == {} then del(.runtimes) else . end
-  ' "$daemon_json")"
-  atomic_sudo_write "$daemon_json" "$updated"
-  status "Removed kata-fc runtime from $daemon_json"
-  if command_exists systemctl; then
-    sudo systemctl restart docker
-    status "Restarted docker"
-  else
-    warn "systemctl not found — restart Docker manually to apply the change."
-  fi
-}
-
-run_uninstall() {
-  status "Uninstalling claude-guard..."
-
-  # Wrapper symlinks (only ours).
-  for script in "${WRAPPER_SCRIPTS[@]}"; do
-    remove_repo_symlink "$HOME/.local/bin/$script" "$script"
-  done
-  remove_repo_symlink "$HOME/.local/bin/claude" "claude alias"
-  # claude-original points to the real binary (not this repo), so
-  # remove_repo_symlink won't remove it — remove it directly.
-  if [[ -L "$HOME/.local/bin/claude-original" ]]; then
-    rm -f "$HOME/.local/bin/claude-original"
-    status "Removed claude-original ($HOME/.local/bin/claude-original)"
-  fi
-  # The commands dir symlinks into this repo's skills.
-  remove_repo_symlink "$HOME/.claude/commands" "$HOME/.claude/commands"
-
-  # Managed settings security merge.
-  uninstall_managed_settings
-
-  if ! $IS_MAC; then
-    # Kata runtime + shims (Linux only).
-    uninstall_kata_runtime
-    remove_kata_shim /usr/local/bin/containerd-shim-kata-v2
-    remove_kata_shim /usr/local/bin/containerd-shim-kata-fc-v2
-  else
-    # macOS ccr LaunchAgent.
-    local plist="$HOME/Library/LaunchAgents/com.turntrout.ccr.plist"
-    if [[ -L "$plist" && "$(readlink "$plist")" == "$SCRIPT_DIR/"* ]]; then
-      launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
-      rm -f "$plist"
-      status "Unloaded and removed ccr LaunchAgent ($plist)"
-    elif [[ -e "$plist" ]]; then
-      status "Left $plist (not a symlink into this repo)"
-    else
-      status "No ccr LaunchAgent to remove"
-    fi
-  fi
-
-  echo ""
-  status "Uninstall complete. The following were intentionally LEFT in place:"
-  echo "   ~/.config/claude-monitor/          (ntfy config + any legacy monitor env — delete manually if unwanted)"
-  echo "   ~/.claude/CLAUDE.md                 (security instructions — yours to keep or edit)"
-  echo "   ~/.local/bin/*.bak.<timestamp>     (wrapper binaries setup.bash backed up before linking)"
-  echo "   /usr/local/bin/runsc + shim        (gVisor — shared; other tools may use it)"
-  echo "   /opt/kata + Kata binaries          (package/static install — remove via your package manager)"
-  echo "   pnpm global claude-code / ccr       (uninstall with 'pnpm remove -g' if unwanted)"
-  echo ""
-  status "Done."
-  exit 0
-}
-
-if $UNINSTALL; then
+# Uninstall lives in a sourced lib (run_uninstall + its helpers); it depends on
+# status/warn, atomic_sudo_write/restart_docker (sudo-helpers.bash) and
+# offer_install (pkg-install.bash), all sourced earlier, so it must come after them.
+# shellcheck source=bin/lib/uninstall.bash disable=SC1091
+source "$SCRIPT_DIR/bin/lib/uninstall.bash"
+if "$UNINSTALL"; then
   run_uninstall
 fi
 
 # ── Prerequisites ──────────────────────────────────────────────────────────
+section "Prerequisites"
 # Offer to install the host tools that have a real package. jq and curl are
 # needed below (settings merge, version read, firewall plumbing); installing them
 # now beats failing mid-run. uv, the devcontainer CLI, Node/pnpm, and the Docker
@@ -444,7 +279,7 @@ fi
 safe_symlink "$SCRIPT_DIR/user-config/skills" \
   "$HOME/.claude/commands" "$HOME/.claude/commands"
 
-if $HOOKS_ONLY; then
+if "$HOOKS_ONLY"; then
   status "Setup complete (--hooks-only)."
   echo "   Security settings merged into /etc/claude-code/managed-settings.json"
   echo "   Run without --hooks-only for full devcontainer + wrapper setup."
@@ -452,6 +287,7 @@ if $HOOKS_ONLY; then
 fi
 
 # ── Wrapper scripts ────────────────────────────────────────────────────────
+section "Installing components"
 # uv is a hard runtime dependency: the claude wrapper runs `uv run ...` to launch
 # the sandbox, and bin/lib/venice-resolve.bash + bin/setup-ntfy.bash use it too.
 # brew, pacman, dnf, zypper, and apk ship a `uv` package; Debian/Ubuntu (apt) do
@@ -478,7 +314,7 @@ fi
 
 # dig backs host-mode firewall/monitor DNS checks. macOS ships it; on Linux it is
 # split into a separate package (optional — claude-guard doctor only degrades without it).
-if ! command_exists dig && ! $IS_MAC; then
+if ! command_exists dig && ! "$IS_MAC"; then
   offer_install dig dig "$(dig_pkg_name)" ||
     warn "dig not installed (optional — host-mode firewall/monitor DNS helper)."
 fi
@@ -503,7 +339,7 @@ maybe_link_claude_alias
 # macOS lacks GNU `timeout`, which the claude wrapper uses to bound `devcontainer
 # up`. Homebrew's coreutils ships it as `gtimeout`; install that and expose a
 # `timeout` shim in ~/.local/bin so the wrapper finds it.
-if $IS_MAC && ! command_exists timeout; then
+if "$IS_MAC" && ! command_exists timeout; then
   command_exists gtimeout || offer_install coreutils gtimeout coreutils || true
   if command_exists gtimeout; then
     ln -sf "$(command -v gtimeout)" "$HOME/.local/bin/timeout"
@@ -530,7 +366,7 @@ fi
 INSTALL_VERIFY_FAILED=false
 
 if command_exists pnpm; then
-  if $IS_MAC; then
+  if "$IS_MAC"; then
     export PNPM_HOME="${PNPM_HOME:-$HOME/Library/pnpm}"
   else
     export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
@@ -585,8 +421,10 @@ fi
 # ── Venice model cache ─────────────────────────────────────────────────────
 # shellcheck source=bin/lib/venice-resolve.bash disable=SC1091
 source "$SCRIPT_DIR/bin/lib/venice-resolve.bash"
-status "Resolving Venice default_code model..."
+status "Resolving Venice models (default_code, newest Opus, strict private)..."
 cache_venice_trait default_code "$VENICE_DEFAULT_CODE_FALLBACK"
+cache_venice_selector newest_opus "$VENICE_THINK_FALLBACK"
+cache_venice_selector strict_private "$VENICE_STRICT_FALLBACK"
 
 # ── ccr LaunchAgent (macOS) ────────────────────────────────────────────────
 # Render the plist from the template with this machine's HOME and resolved ccr
@@ -603,7 +441,7 @@ render_ccr_plist() {
     >"$SCRIPT_DIR/launchagents/com.turntrout.ccr.generated.plist"
 }
 
-if $IS_MAC; then
+if "$IS_MAC"; then
   CCR_PLIST_DEST="$HOME/Library/LaunchAgents/com.turntrout.ccr.plist"
   if command_exists ccr; then
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/com.turntrout.ccr"
@@ -623,281 +461,33 @@ if $IS_MAC; then
 fi
 
 # ── Container runtime isolation ───────────────────────────────────────────
+section "Sandbox runtime"
 # Linux: Kata Containers (Firecracker microVM, needs /dev/kvm)
 # macOS: gVisor/runsc (userspace syscall interception, no KVM)
 
-register_kata_runtime() {
-  local daemon_json="${1:-/etc/docker/daemon.json}"
-  local existing
-  if [[ -f "$daemon_json" ]]; then
-    existing=$(cat "$daemon_json")
-  else
-    existing="{}"
-  fi
-  local updated
-  updated=$(echo "$existing" | jq '.runtimes["kata-fc"] = {"runtimeType":"io.containerd.kata-fc.v2"}')
-  atomic_sudo_write "$daemon_json" "$updated"
-  sudo systemctl restart docker
-}
+# Runtime install functions (register_kata_runtime, install_kata_static,
+# setup_macos_sandbox, install_runsc_native, …) live in a sourced lib; the
+# dispatch that picks which to install stays below.
+# shellcheck source=bin/lib/sandbox-runtime.bash disable=SC1091
+source "$SCRIPT_DIR/bin/lib/sandbox-runtime.bash"
 
-setup_kata_shims_and_config() {
-  local kata_bin="${1:-/opt/kata/bin}"
-  sudo ln -sf "$kata_bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-v2
-  sudo ln -sf "$kata_bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-fc-v2
-  sudo modprobe vhost vhost_net vhost_vsock 2>/dev/null || true
-  if [[ "$(uname -m)" == "aarch64" ]]; then
-    local cfg_dir
-    for cfg_dir in /opt/kata/share/defaults/kata-containers /etc/kata-containers; do
-      if [[ -d "$cfg_dir" ]]; then
-        for cfg in "$cfg_dir"/configuration*.toml; do
-          [[ -f "$cfg" ]] && sudo sed -i 's/cpu_features = "pmu=off"/cpu_features = ""/' "$cfg"
-        done
-      fi
-    done
-  fi
-}
-
-install_kata_static() {
-  local arch
-  arch=$(uname -m)
-  case "$arch" in
-  aarch64) arch=arm64 ;;
-  x86_64) arch=amd64 ;;
-  *)
-    warn "Unsupported architecture for Kata: $arch"
-    return 1
-    ;;
-  esac
-  local version release_json curl_headers=()
-  [ -n "${GITHUB_TOKEN:-}" ] && curl_headers=(-H "Authorization: token ${GITHUB_TOKEN}")
-  release_json=$(curl -sL "${curl_headers[@]}" https://api.github.com/repos/kata-containers/kata-containers/releases/latest) || {
-    warn "Failed to query the latest Kata Containers release"
-    return 1
-  }
-  version=$(jq -r .tag_name <<<"$release_json")
-  if [[ -z "$version" || "$version" == "null" ]]; then
-    warn "Failed to fetch latest Kata Containers version"
-    return 1
-  fi
-  local asset="kata-static-${version}-${arch}.tar.zst"
-  local url="https://github.com/kata-containers/kata-containers/releases/download/${version}/${asset}"
-  # The GitHub release API exposes a per-asset content digest (sha256:...). We
-  # pull it from the same response that gave us the version so the tarball can
-  # be verified before it is extracted into / as root.
-  local digest
-  digest=$(jq -r --arg a "$asset" '.assets[]? | select(.name == $a) | .digest // empty' <<<"$release_json")
-  # Download into a private mktemp dir (0700, owned by us) rather than a
-  # predictable /tmp path — closes a symlink/TOCTOU race where another local
-  # user could swap the tarball between download and the root `tar xf`.
-  local tmpdir tarball
-  tmpdir=$(mktemp -d) || {
-    warn "Failed to create a temp directory for the Kata download"
-    return 1
-  }
-  tarball="$tmpdir/kata-static.tar.zst"
-  status "Downloading Kata Containers ${version} (${arch})..."
-  # 200MB+ over minutes; --progress-bar shows movement so it doesn't look hung.
-  # Keep -f (fail on HTTP error) and -L (follow redirects).
-  curl -fSL --progress-bar "$url" -o "$tarball" || {
-    warn "Download failed: $url"
-    rm -rf "$tmpdir"
-    return 1
-  }
-  # Fail closed: no digest means we cannot verify, so we do not extract an
-  # unverifiable runtime into / as root (an attacker tampering with the API
-  # response could otherwise just omit the digest to skip the check). Matches
-  # the gVisor path, which aborts if its .sha512 sidecar is missing.
-  if [[ -z "$digest" || "$digest" != sha256:* ]]; then
-    warn "No sha256 digest published for $asset — refusing to extract an unverifiable download"
-    rm -rf "$tmpdir"
-    return 1
-  fi
-  if ! printf '%s  %s\n' "${digest#sha256:}" "$tarball" | sha256sum -c - >/dev/null 2>&1; then
-    warn "Kata tarball checksum mismatch — refusing to extract a tampered or corrupt download"
-    rm -rf "$tmpdir"
-    return 1
-  fi
-  status "Verified Kata tarball against the release sha256 digest"
-  sudo tar xf "$tarball" -C /
-  rm -rf "$tmpdir"
-}
-
-find_kata_runtime() {
-  if [[ -x /opt/kata/bin/kata-runtime ]]; then
-    echo "/opt/kata/bin/kata-runtime"
-  elif command_exists kata-runtime; then
-    command -v kata-runtime
-  fi
-}
-
-install_runsc_in_docker_vm() {
-  local ssh_cmd="$1"
-  $ssh_cmd bash <<'INSTALL_RUNSC'
-set -euo pipefail
-ARCH=$(uname -m)
-URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
-echo ":: Downloading runsc for ${ARCH}..."
-# gVisor publishes a .sha512 next to each binary; download into a temp dir,
-# verify, then install — never run an unverified binary as the sandbox runtime.
-TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
-cd "$TMPD"
-curl -fsSL -O "${URL}/runsc" -O "${URL}/runsc.sha512" \
-  -O "${URL}/containerd-shim-runsc-v1" -O "${URL}/containerd-shim-runsc-v1.sha512"
-sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
-sudo install -m 0755 runsc containerd-shim-runsc-v1 /usr/local/bin/
-cd /
-echo ":: Registering runsc runtime with Docker..."
-sudo /usr/local/bin/runsc install
-sudo systemctl restart docker
-# Inline poll (mirrors wait_for_docker_runtime in runtime-detect.bash): this runs
-# inside the VM over SSH and cannot source the host lib, so it is duplicated here.
-for _i in $(seq 1 30); do
-  docker info 2>/dev/null | grep -q "runsc" && break
-  sleep 1
-done
-docker info 2>/dev/null | grep -q "runsc" || { echo "!! runsc not visible after install" >&2; exit 1; }
-echo ":: runsc installed and registered"
-INSTALL_RUNSC
-}
-
-install_runsc_native() {
-  local arch url tmpd
-  arch=$(uname -m)
-  url="https://storage.googleapis.com/gvisor/releases/release/latest/${arch}"
-  status "Downloading runsc for ${arch}..."
-  # Verify against gVisor's published .sha512 sums in a private temp dir before
-  # installing — the downloaded binaries are the sandbox enforcement floor.
-  tmpd=$(mktemp -d) || {
-    warn "Failed to create a temp directory for the runsc download"
-    return 1
-  }
-  (
-    cd "$tmpd" &&
-      curl -fsSL -O "${url}/runsc" -O "${url}/runsc.sha512" \
-        -O "${url}/containerd-shim-runsc-v1" -O "${url}/containerd-shim-runsc-v1.sha512" &&
-      sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
-  ) || {
-    warn "runsc download or checksum verification failed"
-    rm -rf "$tmpd"
-    return 1
-  }
-  sudo install -m 0755 "$tmpd/runsc" "$tmpd/containerd-shim-runsc-v1" /usr/local/bin/
-  rm -rf "$tmpd"
-  sudo /usr/local/bin/runsc install
-  sudo systemctl restart docker
-  # The restart drops the daemon briefly; wait for runsc to register before
-  # returning so the caller doesn't see a transient "not registered". (The
-  # in-VM path below inlines the same poll — it runs inside an SSH heredoc and
-  # cannot source this host lib.)
-  wait_for_docker_runtime runsc
-}
-
-# Ensure a usable Docker engine on Linux: install the distro-native engine
-# (docker.io / moby-engine / docker — not Docker's third-party repo), start the
-# daemon, and add the user to the docker group. macOS gets Docker via the Colima
-# path in the runtime section below. A fresh install needs a re-login before the
-# group membership takes effect, so the runtime registration in the same run may
-# still see a no-permission daemon — we say so and the user re-runs setup.
-ensure_docker_linux() {
-  if command_exists docker && docker info >/dev/null 2>&1; then
-    status "Docker engine reachable"
-    return 0
-  fi
-  if ! command_exists docker; then
-    offer_install "the Docker engine" docker "$(docker_pkg_name)" || {
-      warn "Docker not installed — install it manually: https://docs.docker.com/engine/install/"
-      return 1
-    }
-  fi
-  # Start the daemon (systemd, else SysV) and grant the current user access.
-  if command_exists systemctl; then
-    sudo systemctl enable --now docker 2>/dev/null ||
-      sudo systemctl start docker 2>/dev/null || true
-  elif command_exists service; then
-    sudo service docker start 2>/dev/null || true
-  fi
-  if command_exists usermod; then
-    sudo groupadd -f docker 2>/dev/null || true
-    if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-      status "Adding $(id -un) to the 'docker' group (log out/in to take effect)..."
-      sudo usermod -aG docker "$(id -un)" 2>/dev/null || true
-    fi
-  fi
-  if docker info >/dev/null 2>&1; then
-    status "Docker engine installed and reachable"
-    return 0
-  fi
-  # Two distinct failure modes get conflated here, so classify before advising:
-  #   - daemon down: `docker info` says it can't connect to the socket
-  #   - group not yet active: the socket exists but denies us (permission denied),
-  #     i.e. usermod added us to the docker group but this shell predates it.
-  # Capture the error so we can give one precise next step instead of a menu.
-  local docker_err
-  docker_err="$(docker info 2>&1 >/dev/null)"
-
-  if printf '%s' "$docker_err" | grep -qi 'permission denied'; then
-    # A fresh `usermod -aG docker` doesn't apply to the current shell. If the
-    # membership is now configured, re-exec under the docker group via `sg` so
-    # the runtime registration below can reach the daemon in this same run
-    # instead of forcing a manual logout. The sentinel guards against an exec
-    # loop. On failure, surface why rather than silently dropping to advice.
-    if [[ -z "${SCCD_DOCKER_REEXEC:-}" ]] && command_exists sg &&
-      getent group docker 2>/dev/null | grep -qw "$(id -un)"; then
-      status "Docker daemon is up but this shell predates your 'docker' group membership."
-      status "Re-running setup under the new group via 'sg docker'..."
-      export SCCD_DOCKER_REEXEC=1
-      local _cmd
-      printf -v _cmd '%q ' bash "$SCRIPT_DIR/setup.bash" "${SCRIPT_ARGS[@]}"
-      # exec replaces this process on success; it only returns if sg itself
-      # failed to launch (e.g. no such group), so the warn below is reachable.
-      # shellcheck disable=SC2093
-      exec sg docker -c "$_cmd"
-      warn "Could not re-exec under 'docker' via sg — falling back to manual instructions."
-    fi
-    warn "Docker daemon is running, but your user isn't in the 'docker' group in this shell."
-    warn "  Fix: run 'newgrp docker' (or log out and back in), then re-run setup.bash."
-    return 1
-  fi
-
-  warn "Docker is installed but the daemon isn't reachable: ${docker_err:-unknown error}"
-  warn "  Fix: start it (sudo systemctl start docker), then re-run setup.bash."
-  return 1
-}
-
-# Ensure `docker buildx` and `docker compose` actually EXECUTE. The devcontainer
-# CLI builds the sandbox image and runs `docker compose up` through buildx; a
-# missing plugin — or, the classic macOS case, a ~/.docker/cli-plugins symlink
-# left DANGLING by a Docker Desktop -> Colima/OrbStack migration — makes that step
-# hang instead of failing, so the launch stalls to its timeout. Offer the install,
-# then delegate the (re)link to repair_docker_cli_plugin (bin/lib/docker-plugins-
-# repair.bash). macOS-only: Linux daemons ship these via the distro docker package.
-ensure_docker_cli_plugins() {
-  $IS_MAC || return 0
-  command_exists docker || return 0
-  status "Checking Docker CLI plugins (buildx, compose)..."
-  local plugin verb
-  for plugin in buildx compose; do
-    docker "$plugin" version >/dev/null 2>&1 ||
-      offer_install "docker $plugin plugin" "docker-$plugin" "docker-$plugin" || true
-    verb="$(repair_docker_cli_plugin "$plugin")" || true
-    case "$verb" in
-    linked) status "Linked docker-$plugin into ~/.docker/cli-plugins/ (replaced any dead Docker Desktop symlink)" ;;
-    removed-dangling) status "Removed dangling ~/.docker/cli-plugins/docker-$plugin (plugin works via another path)" ;;
-    ok) status "docker $plugin plugin works" ;;
-    *) warn "docker $plugin still not working — brew install docker-$plugin, then re-run setup.bash" ;;
-    esac
-  done
-}
+# Docker-engine setup (ensure_docker_linux, ensure_docker_cli_plugins,
+# ensure_docker_compose_version) lives in a sourced lib; the dispatch that calls
+# them stays below. docker-plugins.bash supplies the version detection the compose
+# check relies on (SCCD_MIN_COMPOSE_VERSION, docker_compose_version, version_ge).
+# shellcheck source=bin/lib/docker-plugins.bash disable=SC1091
+source "$SCRIPT_DIR/bin/lib/docker-plugins.bash"
+# shellcheck source=bin/lib/docker-engine.bash disable=SC1091
+source "$SCRIPT_DIR/bin/lib/docker-engine.bash"
 
 sandbox_ok=false
 
-if ! $IS_MAC; then
+if ! "$IS_MAC"; then
   ensure_docker_linux || true
 
   if [[ "${CONTAINER_RUNTIME:-}" == "runsc" ]]; then
     # WSL2 or explicit runsc selection — install gVisor directly on host.
-    if docker info 2>/dev/null | grep -q "runsc"; then
+    if docker_has_runtime runsc; then
       status "runsc already registered with Docker"
       sandbox_ok=true
     else
@@ -910,20 +500,17 @@ if ! $IS_MAC; then
         warn "See: https://gvisor.dev/docs/user_guide/install/"
       fi
     fi
-  elif docker info 2>/dev/null | grep -q "kata-fc"; then
+  elif docker_has_kata_runtime; then
     status "Kata Containers (kata-fc) already registered with Docker"
     sandbox_ok=true
   else
     rt_path=$(find_kata_runtime)
     if [[ -z "$rt_path" ]]; then
       status "Installing Kata Containers..."
-      if command_exists apt-get; then
-        sudo apt-get install -y kata-containers 2>/dev/null || true
-      elif command_exists dnf; then
-        sudo dnf install -y kata-containers 2>/dev/null || true
-      elif command_exists pacman; then
-        sudo pacman -S --noconfirm kata-containers 2>/dev/null || true
-      fi
+      # pkg_run_install carries the per-manager install syntax (single source of
+      # truth in pkg-install.bash); an unsupported manager or missing package is
+      # not fatal — we fall back to the static release below.
+      pkg_run_install "$(detect_pkg_manager)" kata-containers 2>/dev/null || true
       rt_path=$(find_kata_runtime)
     fi
     if [[ -z "$rt_path" ]]; then
@@ -947,66 +534,19 @@ else
   # runsc intercepts syscalls in a sandboxed userspace process — works on
   # both Apple Silicon and Intel, no nested KVM needed.
   # Supports Colima and OrbStack; Docker Desktop uses its own Linux VM.
-  docker_vm_ssh=""
-
-  # Install Colima when neither it nor a reachable Docker is present (macOS has no
-  # native Docker engine). brew ships a signed package, so we offer it. OrbStack /
-  # Docker Desktop users already have a daemon and skip this.
-  if ! command_exists colima && ! docker info >/dev/null 2>&1; then
-    offer_install "Colima + docker CLI (macOS Docker runtime)" colima colima docker ||
-      warn "Colima not installed — install it (brew install colima docker), then re-run setup.bash."
-  fi
-
-  if command_exists colima && colima status >/dev/null 2>&1; then
-    docker_vm_ssh="colima ssh --"
-  elif command_exists colima; then
-    colima_start_args=(--cpu "$COLIMA_CPUS" --memory "$COLIMA_MEMORY" --disk "$COLIMA_DISK")
-    # Virtualization.framework (vz) is Apple Silicon only
-    ! $IS_INTEL_MAC && colima_start_args=(--vm-type vz --mount-type virtiofs "${colima_start_args[@]}")
-    status "Starting Colima..."
-    colima start "${colima_start_args[@]}"
-    docker_vm_ssh="colima ssh --"
-  fi
-
-  if [[ -z "$docker_vm_ssh" ]]; then
-    if docker info >/dev/null 2>&1; then
-      if docker info 2>/dev/null | grep -q "runsc"; then
-        status "runsc already registered with Docker"
-        export CONTAINER_RUNTIME=runsc
-        sandbox_ok=true
-      else
-        warn "Docker is running but cannot SSH into the backing VM to install runsc."
-        warn "For Colima: brew install colima && colima start"
-        warn "For OrbStack: orb sudo bash -c 'U=https://storage.googleapis.com/gvisor/releases/release/latest/\$(uname -m) && curl -fsSL \$U/runsc -o /usr/local/bin/runsc && curl -fsSL \$U/containerd-shim-runsc-v1 -o /usr/local/bin/containerd-shim-runsc-v1 && chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1 && runsc install && systemctl restart docker'"
-        warn "Then re-run setup.bash."
-      fi
-    else
-      warn "Docker not reachable. Install Colima (brew install colima docker) or OrbStack."
-    fi
-  else
-    if docker info 2>/dev/null | grep -q "runsc"; then
-      status "runsc already registered with Docker"
-      export CONTAINER_RUNTIME=runsc
-      sandbox_ok=true
-    else
-      status "Installing gVisor/runsc in Docker VM..."
-      if install_runsc_in_docker_vm "$docker_vm_ssh"; then
-        export CONTAINER_RUNTIME=runsc
-        sandbox_ok=true
-        status "Registered runsc runtime with Docker"
-      else
-        warn "runsc installation failed"
-        warn "Try manually: $docker_vm_ssh, then install from https://gvisor.dev/docs/user_guide/install/"
-      fi
-    fi
-  fi
+  setup_macos_sandbox
 
   # buildx/compose plugins the devcontainer CLI needs (and the dangling-symlink
   # repair) — a silent launch hang otherwise. Non-fatal: never block setup on it.
   ensure_docker_cli_plugins || true
 fi
 
+# Compose must be new enough for the sandbox's start_interval healthchecks (both
+# platforms — macOS self-upgrades via brew, Linux gets guidance). Non-fatal.
+ensure_docker_compose_version || true
+
 # ── Monitor health check ──────────────────────────────────────────────────
+section "Monitor"
 status "Checking monitor configuration..."
 
 # Mirror the launcher's auto-scan (env, then envchain) so this reports exactly
@@ -1039,17 +579,17 @@ elif [[ -n "${VENICE_INFERENCE_KEY:-}" ]]; then
 elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
   status "Monitor provider: OpenRouter (qwen/qwen3-coder)"
   status "Tip: run 'bin/openrouter-privacy' to disable input/output logging on your OR account."
-  status "Note: OpenRouter is NOT compatible with claude-guard --private --strict (no E2EE guarantee)."
+  status "Note: OpenRouter is NOT compatible with claude-guard --privacy e2ee (no E2EE guarantee)."
   monitor_ok=true
 else
   warn "No API key found for the trusted monitor — tool calls run unmonitored."
   print_monitor_setup_help
 fi
 
-if $monitor_ok && command_exists curl && command_exists jq; then
+if "$monitor_ok" && command_exists curl && command_exists jq; then
   status "Monitor dependencies satisfied (curl, jq)"
 else
-  $monitor_ok && warn "Monitor needs curl and jq on PATH"
+  "$monitor_ok" && warn "Monitor needs curl and jq on PATH"
 fi
 
 # ── ntfy setup ─────────────────────────────────────────────────────────────
@@ -1073,45 +613,94 @@ else
   status "Push notifications not configured — run 'bash $SCRIPT_DIR/bin/setup-ntfy.bash' to enable ntfy ASK alerts."
 fi
 
+# ── Claude & GitHub credential onboarding ────────────────────────────────────
+# Ephemeral-by-default sessions need a host Claude token (so login survives the
+# throwaway config volume) and a personal GitHub App (so the agent gets
+# auto-minted GH tokens). Nudge the user through both now while they're here;
+# both no-op when already configured and never block an unattended install.
+# shellcheck source=bin/lib/onboarding.bash disable=SC1091
+source "$SCRIPT_DIR/bin/lib/onboarding.bash"
+onboarding_offer_claude_auth
+onboarding_offer_gh_app "$SCRIPT_DIR/bin/claude-github-app"
+
 # ── PATH precedence ─────────────────────────────────────────────────────────
+# Append `line` to the user's shell `profile` under a one-time `marker`, unless
+# the marker is already present (idempotent across re-runs). `label` names the
+# entry for the status/warn lines.
+append_path_entry() {
+  local profile="$1" marker="$2" line="$3" label="$4"
+  if [[ -f "$profile" ]] && grep -qF "$marker" "$profile"; then
+    status "PATH entry for $label already in $profile — open a new shell to pick it up"
+    return 0
+  fi
+  mkdir -p "$(dirname "$profile")"
+  printf '\n%s\n%s\n' "$marker" "$line" >>"$profile"
+  status "Added $label to PATH in $profile"
+  warn "Open a new shell to pick up the PATH change in $profile"
+}
+
 # The wrapper only protects you if typing `claude-guard` resolves to ~/.local/bin
-# ahead of any other `claude-guard`. Prepend ~/.local/bin to PATH in the user's
-# shell profile (idempotent) so the wrapper wins in new shells. Skips writing
-# when `claude-guard` already resolves to our wrapper.
+# ahead of any other `claude-guard`, and the pnpm-global CLIs (claude-code, ccr,
+# the devcontainer CLI) only resolve if $PNPM_HOME/bin is on PATH. Persist both
+# to the user's shell profile (idempotent) so new shells pick them up without any
+# hand-editing. Each entry is skipped when it already resolves on PATH.
 ensure_path_precedence() {
-  local marker="# claude-guard: ~/.local/bin on PATH"
-  local profile line resolved
-  # fish reads neither .profile nor POSIX `export` syntax, so it needs a
-  # fish-native line in its own config; the POSIX `export` form serves the rest.
-  # Intentional single quotes: write the literal $HOME/$PATH so it expands at
-  # shell startup, not at install time.
+  local profile localbin_line pnpm_line pnpm_literal
+  # fish reads neither .profile nor POSIX `export`, so it needs fish-native lines
+  # in its own config; the POSIX `export` form serves every other shell. Single-
+  # quote the ~/.local/bin line so the literal $HOME/$PATH expand at shell startup,
+  # not at install time. PNPM_HOME isn't exported into the user's login shell, so
+  # the pnpm line carries its resolved $PNPM_HOME/bin — but with a leading $HOME
+  # re-literalized so it stays portable across that user's home. The pnpm bin is
+  # APPENDED, never prepended: both it and ~/.local/bin ship a `claude`, and the
+  # guard's wrapper alias under ~/.local/bin must win, so pnpm stays behind it.
+  pnpm_literal="${PNPM_HOME:+${PNPM_HOME/#$HOME/\$HOME}/bin}"
   # shellcheck disable=SC2016
   case "$(basename "${SHELL:-sh}")" in
-  zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" line='export PATH="$HOME/.local/bin:$PATH"' ;;
-  bash) profile="$HOME/.bashrc" line='export PATH="$HOME/.local/bin:$PATH"' ;;
+  zsh)
+    profile="${ZDOTDIR:-$HOME}/.zshrc"
+    localbin_line='export PATH="$HOME/.local/bin:$PATH"'
+    pnpm_line="export PATH=\"\$PATH:$pnpm_literal\""
+    ;;
+  bash)
+    profile="$HOME/.bashrc"
+    localbin_line='export PATH="$HOME/.local/bin:$PATH"'
+    pnpm_line="export PATH=\"\$PATH:$pnpm_literal\""
+    ;;
   fish)
     profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
     # --move forces ~/.local/bin ahead of an already-present pnpm bin.
-    line='fish_add_path --move "$HOME/.local/bin"'
+    localbin_line='fish_add_path --move "$HOME/.local/bin"'
+    pnpm_line="fish_add_path --append \"$pnpm_literal\""
     ;;
-  *) profile="$HOME/.profile" line='export PATH="$HOME/.local/bin:$PATH"' ;;
+  *)
+    profile="$HOME/.profile"
+    localbin_line='export PATH="$HOME/.local/bin:$PATH"'
+    pnpm_line="export PATH=\"\$PATH:$pnpm_literal\""
+    ;;
   esac
 
-  resolved="$(command -v claude-guard 2>/dev/null || true)"
-  if [[ "$resolved" == "$HOME/.local/bin/claude-guard" ]]; then
+  if [[ "$(command -v claude-guard 2>/dev/null || true)" == "$HOME/.local/bin/claude-guard" ]]; then
     status "PATH OK — 'claude-guard' resolves to ~/.local/bin/claude-guard"
-    return 0
+  else
+    # SC2088: the tilde here is a display label for status output, not a path to expand.
+    # shellcheck disable=SC2088
+    append_path_entry "$profile" "# claude-guard: ~/.local/bin on PATH" \
+      "$localbin_line" "~/.local/bin"
   fi
 
-  if [[ -f "$profile" ]] && grep -qF "$marker" "$profile"; then
-    status "PATH entry already in $profile — open a new shell to pick it up"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$profile")"
-  printf '\n%s\n%s\n' "$marker" "$line" >>"$profile"
-  status "Prepended ~/.local/bin to PATH in $profile"
-  warn "Open a new shell, or run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+  # Nothing to persist for pnpm when it isn't installed (PNPM_HOME unset) or its
+  # bin is already on PATH.
+  [[ -n "${PNPM_HOME:-}" ]] || return 0
+  case ":$PATH:" in
+  *":$PNPM_HOME/bin:"*)
+    status "PATH OK — pnpm global bin ($PNPM_HOME/bin) already on PATH"
+    ;;
+  *)
+    append_path_entry "$profile" "# claude-guard: pnpm global bin on PATH" \
+      "$pnpm_line" "the pnpm global bin ($PNPM_HOME/bin)"
+    ;;
+  esac
 }
 
 # ── Prewarm the sandbox image ───────────────────────────────────────────────
@@ -1120,7 +709,7 @@ ensure_path_precedence() {
 # when a sandbox runtime is actually registered (no point building an image we
 # can't launch) and Docker is reachable. Best-effort: never abort setup on it.
 # Opt out with SCCD_NO_PREWARM=1.
-if $sandbox_ok && command_exists docker && docker info >/dev/null 2>&1; then
+if "$sandbox_ok" && command_exists docker && docker info >/dev/null 2>&1; then
   status "Prewarming the sandbox image so the first launch is fast..."
   # shellcheck source=bin/lib/resolve-image.bash disable=SC1091
   source "$SCRIPT_DIR/bin/lib/resolve-image.bash"
@@ -1128,33 +717,29 @@ if $sandbox_ok && command_exists docker && docker info >/dev/null 2>&1; then
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
-echo ""
-if $INSTALL_VERIFY_FAILED; then
+section "Summary"
+if "$INSTALL_VERIFY_FAILED"; then
   warn "Setup incomplete — a required component above did not install (see the Fix lines)."
 else
   status "Setup complete."
 fi
 echo "   Managed settings: /etc/claude-code/managed-settings.json"
-echo "   Wrappers:       ~/.local/bin/claude-guard  (subcommands: doctor, audit, panic, remote; flags: --private [--strict])"
-if $IS_MAC && [[ -L "${CCR_PLIST_DEST:-}" ]]; then
-  echo "   ccr daemon:     launchd (com.turntrout.ccr)"
+echo "   Wrappers:         ~/.local/bin/claude-guard  (subcommands: doctor, audit, panic, remote; flags: --privacy {default,private,e2ee})"
+if "$IS_MAC" && [[ -L "${CCR_PLIST_DEST:-}" ]]; then
+  echo "   ccr daemon:       launchd (com.turntrout.ccr)"
 fi
 # Report the runtime the wrapper will actually launch (same detection rule),
 # not whatever CONTAINER_RUNTIME happened to be set to mid-script.
 effective_runtime="$(detect_container_runtime)"
 if [[ "$effective_runtime" == "kata-fc" ]]; then
-  echo "   Runtime:        kata-fc (Firecracker microVM)"
+  echo "   Runtime:          kata-fc (Firecracker microVM)"
 else
-  echo "   Runtime:        runsc (gVisor — userspace syscall sandbox)"
+  echo "   Runtime:          runsc (gVisor — userspace syscall sandbox)"
 fi
 echo ""
 ensure_path_precedence
-if [[ -n "${PNPM_HOME:-}" ]]; then
-  echo "   Also add the pnpm global bin to PATH: $PNPM_HOME/bin"
-  echo "   (claude-code, ccr, and the devcontainer CLI live there)."
-fi
 
-if ! $sandbox_ok; then
+if ! "$sandbox_ok"; then
   echo "" >&2
   warn "FATAL: No sandbox runtime (kata-fc or runsc) is registered with Docker."
   warn "Fix the errors above and re-run setup.bash."

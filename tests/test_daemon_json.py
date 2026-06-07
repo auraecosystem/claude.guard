@@ -11,9 +11,9 @@ unit-tested elsewhere:
     rewrites via a temp file + rename), so a locked-down daemon.json doesn't come
     back world-different after setup.
 
-Both functions are sourced together (register calls atomic_sudo_write) with a
-`sudo` stub that re-execs and a no-op `systemctl`, so the real jq/tee/mv act on a
-throwaway daemon.json under tmp — no root, no real Docker.
+Both functions are sourced together (register calls atomic_sudo_write, then
+restart_docker) with a `sudo` stub that re-execs and a no-op `systemctl`, so the
+real jq/tee/mv act on a throwaway daemon.json under tmp — no root, no real Docker.
 """
 
 # covers: setup.bash
@@ -22,9 +22,16 @@ import shutil
 import stat
 from pathlib import Path
 
-from tests._helpers import REPO_ROOT, run_capture, slice_bash_function, write_exe
+from tests._helpers import (
+    REPO_ROOT,
+    SUDO_REEXEC,
+    run_capture,
+    slice_bash_function,
+    write_exe,
+)
 
-SETUP = REPO_ROOT / "setup.bash"
+SUDO_HELPERS = REPO_ROOT / "bin/lib/sudo-helpers.bash"
+SANDBOX_RT = REPO_ROOT / "bin/lib/sandbox-runtime.bash"
 BASH = shutil.which("bash") or "/bin/bash"
 
 KATA_RT = {"runtimeType": "io.containerd.kata-fc.v2"}
@@ -32,13 +39,16 @@ KATA_RT = {"runtimeType": "io.containerd.kata-fc.v2"}
 
 def _register(tmp_path: Path, daemon_json: Path):
     stubdir = tmp_path / "stub"
-    write_exe(stubdir / "sudo", '#!/bin/bash\nexec "$@"\n')
+    write_exe(stubdir / "sudo", SUDO_REEXEC)
     write_exe(stubdir / "systemctl", "#!/bin/bash\nexit 0\n")
     harness = (
         "status(){ :; }\nwarn(){ printf '!! %s\\n' \"$1\" >&2; }\n"
-        + slice_bash_function(SETUP, "atomic_sudo_write")
+        'command_exists(){ command -v "$1" >/dev/null 2>&1; }\nIS_MAC=false\n'
+        + slice_bash_function(SUDO_HELPERS, "atomic_sudo_write")
         + "\n"
-        + slice_bash_function(SETUP, "register_kata_runtime")
+        + slice_bash_function(SUDO_HELPERS, "restart_docker")
+        + "\n"
+        + slice_bash_function(SANDBOX_RT, "register_kata_runtime")
         + f"\nregister_kata_runtime '{daemon_json}'\n"
     )
     return run_capture([BASH, "-c", harness], env={"PATH": f"{stubdir}:/usr/bin:/bin"})

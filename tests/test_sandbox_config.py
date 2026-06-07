@@ -36,6 +36,7 @@ ENTRYPOINT = REPO_ROOT / ".devcontainer" / "entrypoint.bash"
 INIT_FIREWALL = REPO_ROOT / ".devcontainer" / "init-firewall.bash"
 FIREWALL_LIB = REPO_ROOT / ".devcontainer" / "firewall-lib.bash"
 HARDEN_MONITOR = REPO_ROOT / ".devcontainer" / "harden-monitor.bash"
+GUARD_DIR_HELPER = REPO_ROOT / ".devcontainer" / "guard-dir.bash"
 SETUP_BASH = REPO_ROOT / "setup.bash"
 DOMAIN_ALLOWLIST = REPO_ROOT / ".devcontainer" / "domain-allowlist.json"
 
@@ -117,6 +118,22 @@ def test_firewall_caps_are_least_privilege(compose: dict) -> None:
     assert not leaked, f"firewall cap_add includes dangerous caps: {sorted(leaked)}"
 
 
+def test_hardener_caps_allow_dropping_to_node(compose: dict) -> None:
+    """The hardener runs entrypoint.bash as root but `su node`s to run pnpm install
+    on the bind-mounted workspace (so node_modules isn't left root-owned and untrusted
+    install scripts don't run as root). That privilege drop needs SETUID/SETGID;
+    without them `su` fails with 'cannot set groups' and the launch aborts. Still
+    least-privilege: cap_drop ALL, no dangerous caps, escalation blocked by
+    no-new-privileges."""
+    h = compose["services"]["hardener"]
+    assert h["cap_drop"] == ["ALL"]
+    added = set(h.get("cap_add", []))
+    assert {"SETUID", "SETGID"} <= added, "hardener needs SETUID/SETGID for `su node`"
+    leaked = added & _DANGEROUS_CAPS
+    assert not leaked, f"hardener cap_add includes dangerous caps: {sorted(leaked)}"
+    assert "no-new-privileges:true" in h["security_opt"]
+
+
 @pytest.mark.parametrize("svc", ["app", "monitor", "ccr", "firewall"])
 def test_no_new_privileges(compose: dict, svc: str) -> None:
     assert "no-new-privileges:true" in compose["services"][svc]["security_opt"]
@@ -154,6 +171,23 @@ def test_app_adds_no_caps(compose: dict) -> None:
 
 def test_monitor_read_only(compose: dict) -> None:
     assert compose["services"]["monitor"]["read_only"] is True
+
+
+def test_ccr_has_writable_home_under_read_only(compose: dict) -> None:
+    """ccr is read_only, but `ccr start` writes ~/.claude.json and
+    ~/.claude-code-router/ under $HOME=/home/node. Without a writable home it
+    crashes with EROFS, so a tmpfs must cover the home dir (or HOME must point at
+    a tmpfs path). The CI smoke override stubs ccr's command, so this static check
+    is the only guard against the read-only-home regression."""
+    ccr = compose["services"]["ccr"]
+    assert ccr["read_only"] is True
+    home = ccr.get("environment", {}).get("HOME", "/home/node")
+    tmpfs_targets = [str(t).split(":", 1)[0] for t in ccr.get("tmpfs", [])]
+    # The home is writable if a tmpfs mounts it (or any ancestor of it).
+    assert any(
+        home == target or home.startswith(target.rstrip("/") + "/")
+        for target in tmpfs_targets
+    ), f"ccr HOME={home} not covered by a tmpfs mount (targets: {tmpfs_targets})"
 
 
 @pytest.mark.parametrize("svc", ["firewall", "monitor"])
@@ -296,6 +330,22 @@ def test_has_healthcheck(compose: dict, svc: str) -> None:
     assert "test" in compose["services"][svc]["healthcheck"]
 
 
+def test_app_gates_on_hardener_completion_not_health(compose: dict) -> None:
+    """The hardener is a one-shot that writes its sentinel and exits 0. Gating the
+    app on service_healthy races that exit (Compose aborts with "dependency failed
+    to start: ... exited (0)"), so the app must gate on completion instead."""
+    assert (
+        compose["services"]["app"]["depends_on"]["hardener"]["condition"]
+        == "service_completed_successfully"
+    )
+
+
+def test_hardener_has_no_healthcheck(compose: dict) -> None:
+    """A one-shot can never report 'healthy'; a healthcheck on it is dead config
+    now that the app gates on service_completed_successfully."""
+    assert "healthcheck" not in compose["services"]["hardener"]
+
+
 # ── Credential scrubbing ────────────────────────────────────────────
 
 
@@ -331,10 +381,16 @@ def test_rw_domains_are_inference_apis(allowlist: dict) -> None:
     A non-API domain with rw is a data exfiltration risk."""
     # Escape hatch for inference providers whose API lives on the apex domain
     # (path-based, e.g. openrouter.ai/api/v1/...) rather than an api.* subdomain.
-    # Only the agent's own provider (api.anthropic.com) needs rw — the monitor
-    # and ccr sidecars bypass squid, so their providers stay ro. Empty unless an
-    # apex-served provider is deliberately promoted to rw, justified in the PR.
-    apex_api_hosts: set[str] = set()
+    # Only the agent's own provider needs rw — the monitor and ccr sidecars bypass
+    # squid, so their providers stay ro. platform.claude.com is Claude Code's own
+    # auth + model endpoint (it POSTs streaming requests); claude.ai and
+    # console.anthropic.com are the OAuth login hosts (the code->token exchange is a
+    # POST), so all three need rw despite not being api.* hosts.
+    apex_api_hosts: set[str] = {
+        "platform.claude.com",
+        "claude.ai",
+        "console.anthropic.com",
+    }
     rw_domains = {d for d, v in allowlist.items() if v == "rw"}
     for domain in rw_domains:
         assert "api." in domain or domain in apex_api_hosts, (
@@ -342,11 +398,82 @@ def test_rw_domains_are_inference_apis(allowlist: dict) -> None:
         )
 
 
+def _non_venice_inference_domains() -> set[str]:
+    """The NON_VENICE_INFERENCE_DOMAINS array as defined in firewall-lib.bash."""
+    script = (
+        f'source "{FIREWALL_LIB}"\n'
+        'printf "%s\\n" "${NON_VENICE_INFERENCE_DOMAINS[@]}"\n'
+    )
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=True
+    ).stdout
+    return set(out.split())
+
+
+# Endpoints Claude Code itself must reach to authenticate and run inference. When
+# Anthropic moves the CLI to a new host (platform.claude.com superseded the older
+# endpoint), the agent fails at startup with an opaque ECONNREFUSED — the dnsmasq
+# catch-all (`address=/#/`) sinkholes any unlisted host to 0.0.0.0, and a connect
+# to 0.0.0.0 is refused. claude.ai + console.anthropic.com are the interactive
+# /login (OAuth) hosts; without them an in-container `/login` hits the egress block
+# page. Pin the known-required hosts so dropping one is caught in CI, not by a user
+# staring at a refused connection.
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "api.anthropic.com",
+        "platform.claude.com",
+        "claude.ai",
+        "console.anthropic.com",
+    ],
+)
+def test_claude_code_endpoints_allowed_rw(allowlist: dict, domain: str) -> None:
+    assert allowlist.get(domain) == "rw", (
+        f"{domain} must be allowlisted rw — Claude Code POSTs to it; without it "
+        "the CLI cannot connect (ECONNREFUSED via the 0.0.0.0 sinkhole)"
+    )
+
+
+def test_rw_domains_locked_down_in_privacy_mode(allowlist: dict) -> None:
+    """--privacy private|e2ee must reach only Venice for inference. Every rw domain
+    (POST-capable = an inference/exfil channel the agent can hit through squid)
+    except Venice must be in NON_VENICE_INFERENCE_DOMAINS so the lockdown drops it;
+    a new rw endpoint added without updating that list silently leaks in privacy
+    mode."""
+    rw_domains = {d for d, v in allowlist.items() if v == "rw"} - {"api.venice.ai"}
+    leaked = rw_domains - _non_venice_inference_domains()
+    assert not leaked, (
+        f"rw domains not dropped in privacy mode: {leaked} — add them to "
+        "NON_VENICE_INFERENCE_DOMAINS in firewall-lib.bash"
+    )
+
+
 def test_no_wildcard_or_ip_domains(allowlist: dict) -> None:
     for domain in allowlist:
         assert "*" not in domain, f"wildcard: {domain}"
         parts = domain.split(".")
         assert not all(p.isdigit() for p in parts), f"raw IP: {domain}"
+
+
+def test_allowlist_keys_are_valid_bare_domains(allowlist: dict) -> None:
+    """Every committed allowlist key must pass valid_domain_name — the same shape
+    gate expand-allowlist.bash and the per-project merge apply — so a typo'd global
+    entry (trailing dot, scheme, embedded space) is caught at commit time instead of
+    silently failing to resolve at launch."""
+    script = (
+        f"source '{FIREWALL_LIB}'\n"
+        'for d in "$@"; do valid_domain_name "$d" || echo "$d"; done\n'
+    )
+    r = subprocess.run(
+        ["bash", "-c", script, "_", *allowlist.keys()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "", (
+        f"invalid domain(s) in domain-allowlist.json: {r.stdout.split()}"
+    )
 
 
 # init-firewall.bash proves the policy is actually live at launch by probing a
@@ -367,8 +494,8 @@ def _firewall_probe_hosts() -> set[str]:
     and unrelated URLs are not swept in.
     """
     text = INIT_FIREWALL.read_text()
-    curls = re.findall(r"curl[^\n]*?https://([A-Za-z0-9.-]+)", text)
-    digs = re.findall(r"@127\.0\.0\.1\s+([A-Za-z0-9.-]+)\s+A\b", text)
+    curls = re.findall(r"curl[^\n]*?https://(?P<domain>[A-Za-z0-9.-]+)", text)
+    digs = re.findall(r"@127\.0\.0\.1\s+(?P<domain>[A-Za-z0-9.-]+)\s+A\b", text)
     return set(curls) | set(digs)
 
 
@@ -428,12 +555,16 @@ class TestInitFirewallMergesProjectAllowlist:
         self.content = INIT_FIREWALL.read_text()
 
     def test_merges_ro_domains_as_ro(self) -> None:
-        assert "PROJECT_ALLOWED_DOMAINS_RO" in self.content
-        assert 'DOMAIN_ACCESS["$domain"]="ro"' in self.content
+        assert (
+            'add_project_domains ro <<<"${PROJECT_ALLOWED_DOMAINS_RO:-}"'
+            in self.content
+        )
 
     def test_merges_rw_domains_as_rw(self) -> None:
-        assert "PROJECT_ALLOWED_DOMAINS_RW" in self.content
-        assert 'DOMAIN_ACCESS["$domain"]="rw"' in self.content
+        assert (
+            'add_project_domains rw <<<"${PROJECT_ALLOWED_DOMAINS_RW:-}"'
+            in self.content
+        )
 
     def test_no_stale_overlay_file_reference(self) -> None:
         """The old standalone overlay file is gone; nothing should still read it."""
@@ -463,11 +594,47 @@ class TestWrapperProjectAllowlist:
     def test_warns_loudly_on_rw(self) -> None:
         """rw widens egress; the launcher (on the host, seen at launch) must warn,
         since the firewall-container log isn't read interactively."""
-        assert "READ-WRITE" in self.wrapper and "WARNING" in self.wrapper
+        assert "READ-WRITE" in self.wrapper and "cg_warn" in self.wrapper
 
     def test_validates_domain_format(self) -> None:
         """A junk/wildcard host must abort the launch rather than reach dnsmasq."""
         assert "invalid per-project domain" in self.wrapper
+
+
+class TestReadOnlyGuardrailOvermounts:
+    """bin/claude-guard always launches with our protective config (a per-workspace
+    devcontainer.json derived from the dotfiles one) and protects the workspace
+    guardrails with read-only bind overmounts instead of chowning them — verified
+    fail-closed before the agent runs."""
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.wrapper = CLAUDE_WRAPPER.read_text()
+
+    def test_sources_and_uses_overmount_lib(self) -> None:
+        assert "lib/overmounts.bash" in self.wrapper
+        assert "write_overmount_compose" in self.wrapper
+        assert "write_session_devcontainer_config" in self.wrapper
+
+    def test_config_points_at_generated_session_config(self) -> None:
+        """--config points at the derived per-workspace config (base stack + override),
+        always — the old gate that let a repo's own devcontainer take over is gone."""
+        assert (
+            'cfg_args=(--config "$session_cfg_dir/devcontainer.json")' in self.wrapper
+        )
+        assert (
+            'if [[ ! -e "$workspace_folder/.devcontainer/devcontainer.json" ]]'
+            not in self.wrapper
+        )
+
+    def test_verifies_guardrails_readonly_fail_closed(self) -> None:
+        """The read-only overmounts are a security control, so the launcher proves
+        the agent can't write them and refuses to launch otherwise."""
+        assert "verify_guardrails_readonly" in self.wrapper
+        assert "Refusing to launch unprotected" in self.wrapper
+
+    def test_dev_hatch_omits_devcontainer_mount(self) -> None:
+        assert 'overmount_omit=".devcontainer"' in self.wrapper
 
 
 # ── Entrypoint hardening ────────────────────────────────────────────
@@ -478,9 +645,27 @@ class TestEntrypointHardening:
     def _load(self) -> None:
         self.content = ENTRYPOINT.read_text()
 
-    def test_locks_down_claude_config(self) -> None:
-        assert "chown -R root:root" in self.content
-        assert "/.claude" in self.content
+    def test_does_not_chown_lock_the_workspace(self) -> None:
+        """Write-protection moved to the launcher's read-only overmounts — the
+        entrypoint must NOT chown/chmod-a-w the bind-mounted WORKSPACE guardrails
+        (that chown was the host-ownership leak). The container-home lockdown
+        ($CLAUDE_USER_DIR, a volume) is unaffected — it never touches host inodes."""
+        assert 'chmod -R a+r,a-w "$WORKSPACE' not in self.content
+        assert 'chown -R root:root "$WORKSPACE/.claude"' not in self.content
+        assert 'chown -R root:root "$WORKSPACE/.devcontainer"' not in self.content
+        assert 'chown root:root "$WORKSPACE/$doc"' not in self.content
+
+    def test_installs_deps_as_node(self) -> None:
+        """node_modules is installed as the node user so it stays node-owned (no root
+        leak onto the host); the read-only overmount keeps the agent from tampering."""
+        assert "su node -c" in self.content and "pnpm install" in self.content
+
+    def test_workspace_install_fails_loud_when_it_wires_node_hooks(self) -> None:
+        """A workspace whose own .claude/settings.json wires node hooks needs its
+        node_modules, so a failed install must abort rather than launch broken; a
+        workspace with no node hooks only warns."""
+        assert "workspace_wires_node_hooks" in self.content
+        assert "refusing to launch" in self.content
 
     def test_calls_harden_monitor(self) -> None:
         assert "harden-monitor" in self.content
@@ -494,6 +679,17 @@ class TestEntrypointHardening:
         # facade; it must be made unreadable to the agent too.
         content = HARDEN_MONITOR.read_text()
         assert "monitorlib" in content and "go-rwx" in content
+
+    def test_harden_monitor_skips_read_hide_in_dev_mode(self) -> None:
+        """In dev mode the source is the live /workspace copy on a host bind mount, so
+        the read-hide chown is gated behind CLAUDE_GUARD_DEV_MODE to avoid leaking root
+        ownership onto the maintainer's checkout. The chown/chmod must sit in the
+        non-dev branch."""
+        content = HARDEN_MONITOR.read_text()
+        guard = 'if [[ "${CLAUDE_GUARD_DEV_MODE:-}" == "1" ]]; then'
+        assert guard in content
+        # The ownership read-hide lives after the guard (in its else branch), not before.
+        assert content.index(guard) < content.index('chown root:root "$MONITOR"')
 
     @pytest.mark.parametrize(
         "name",
@@ -872,6 +1068,287 @@ class TestDockerfile:
         """Secret-bearing env vars are scrubbed from interactive shells via
         profile scripts copied into the image."""
         assert "scrub-secrets.sh" in self.content
+
+
+class TestBakedGuardrails:
+    """The security guardrail set is image-baked into a root-owned /opt/claude-guard
+    OUTSIDE /workspace, so claude-guard can protect arbitrary repos that don't vendor
+    .claude/user-config/.devcontainer. See entrypoint.bash's GUARD_DIR resolution."""
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.dockerfile = DOCKERFILE.read_text()
+        self.entrypoint = ENTRYPOINT.read_text()
+
+    def test_dockerfile_bakes_the_guardrail_set(self) -> None:
+        """The four guardrail pieces are COPYd into /opt/claude-guard preserving the
+        repo-relative layout so $SCCD_DIR/.claude/hooks/... resolves unchanged."""
+        for dest in (
+            "/opt/claude-guard/.claude/hooks",
+            "/opt/claude-guard/user-config/settings.json",
+            "/opt/claude-guard/bin/merge-user-settings.sh",
+            "/opt/claude-guard/.devcontainer/",
+        ):
+            assert dest in self.dockerfile, f"Dockerfile does not bake {dest}"
+
+    def test_dockerfile_bakes_hook_production_deps(self) -> None:
+        """The wired .mjs hooks import production deps resolved by walking up to
+        /opt/claude-guard/node_modules, so the bake must install them."""
+        assert "pnpm install --prod" in self.dockerfile
+        assert "package.json pnpm-lock.yaml /opt/claude-guard/" in self.dockerfile
+
+    def test_dockerfile_strips_test_artifacts_from_bake(self) -> None:
+        """The whole-dir hooks COPY pulls in *.test.mjs + the test helper + bytecode
+        caches; the bake must delete them so test code never ships in the image or
+        widens the agent-readable guardrail surface."""
+        assert "/opt/claude-guard/.claude/hooks/*.test.mjs" in self.dockerfile
+        assert "/opt/claude-guard/.claude/hooks/test-helpers.mjs" in self.dockerfile
+        assert "-name __pycache__" in self.dockerfile
+
+    def test_dockerfile_read_hides_baked_monitor(self) -> None:
+        """Each container gets its own copy of the image layer, so the monitor
+        read-hide must be baked (a hardener-side runtime chmod can't reach the app)."""
+        assert "chmod 700 /opt/claude-guard/.claude/hooks/monitor.py" in self.dockerfile
+        assert (
+            "chmod -R go-rwx /opt/claude-guard/.claude/hooks/monitorlib"
+            in self.dockerfile
+        )
+
+    def test_dockerfile_root_owns_baked_set_readonly(self) -> None:
+        assert "chown -R root:root /opt/claude-guard" in self.dockerfile
+        assert "chmod -R a+rX,a-w /opt/claude-guard" in self.dockerfile
+
+    def test_compose_feeds_guard_src_context_to_main_image(self, compose: dict) -> None:
+        """firewall/hardener/app share the main image; each build block must carry the
+        guard-src additional context so any build path bakes the guardrails."""
+        for svc in ("firewall", "hardener", "app"):
+            ctx = compose["services"][svc]["build"]["additional_contexts"]
+            assert ctx == {"guard-src": ".."}, f"{svc} missing guard-src context: {ctx}"
+
+    def test_compose_threads_dev_mode_to_hardener(self, compose: dict) -> None:
+        """CLAUDE_GUARD_DEV_MODE must reach the hardener (where entrypoint runs) so it
+        can repoint GUARD_DIR at /workspace for live guardrail development."""
+        env = compose["services"]["hardener"]["environment"]
+        assert "CLAUDE_GUARD_DEV_MODE" in env
+
+    def test_every_main_dockerfile_build_passes_guard_src(self) -> None:
+        """The baked Dockerfile copies from the guard-src context, so every workflow
+        that `docker build`s the main Dockerfile directly must supply it (mirroring the
+        monitor image's hooks context) or the build fails. Catches a new workflow build
+        site that forgets it. Compose builds carry it via additional_contexts (covered
+        by test_compose_feeds_guard_src_context_to_main_image); the .monitor/.ccr images
+        are excluded — the negative lookahead skips `Dockerfile.<x>`."""
+        main_ref = re.compile(r"-f\s+['\"]?\.devcontainer/Dockerfile(?![.\w-])")
+        offenders = []
+        for wf in (REPO_ROOT / ".github" / "workflows").glob("*.yaml"):
+            text = wf.read_text()
+            if main_ref.search(text) and "guard-src" not in text:
+                offenders.append(wf.name)
+        assert not offenders, (
+            f"main-Dockerfile build without guard-src context: {offenders}"
+        )
+
+    def test_smoke_devcontainer_passes_guard_src(self) -> None:
+        """The smoke job builds the main Dockerfile via a standalone (non-compose)
+        devcontainer config, so it must pass guard-src through build.options."""
+        smoke = json.loads(
+            (REPO_ROOT / ".devcontainer" / "smoke" / "devcontainer.json").read_text()
+        )
+        opts = smoke["build"].get("options", [])
+        assert any("guard-src=" in o for o in opts), (
+            f"smoke build missing guard-src: {opts}"
+        )
+
+    def test_guard_src_context_paths_exist(self) -> None:
+        """The COPY sources must exist in the repo, or the image build fails."""
+        for rel in (
+            ".claude/hooks/monitor.py",
+            ".claude/hooks/monitorlib",
+            "user-config/settings.json",
+            "bin/merge-user-settings.sh",
+            "package.json",
+            "pnpm-lock.yaml",
+        ):
+            assert (REPO_ROOT / rel).exists(), f"missing baked source {rel}"
+
+    def test_entrypoint_defaults_to_baked_guard_dir(self) -> None:
+        assert 'BAKED_GUARD_DIR="/opt/claude-guard"' in self.entrypoint
+        assert (
+            'GUARD_DIR="$(resolve_guard_dir "$WORKSPACE" "$BAKED_GUARD_DIR")"'
+            in self.entrypoint
+        )
+
+    def test_dev_mode_helper_fails_closed(self) -> None:
+        """resolve_guard_dir repoints at /workspace under CLAUDE_GUARD_DEV_MODE but
+        returns non-zero (fail closed) if the workspace lacks the guardrail sources —
+        never silently fall back to the baked set the maintainer didn't mean to test."""
+        helper = GUARD_DIR_HELPER.read_text()
+        assert "CLAUDE_GUARD_DEV_MODE:-" in helper
+        assert "monitor.py" in helper and "monitorlib" in helper
+        assert "user-config/settings.json" in helper
+        assert "FATAL" in helper and "return 1" in helper
+
+    def test_dockerfile_bakes_guard_dir_helper(self) -> None:
+        """guard-dir.bash is sourced by entrypoint, so it must ride along into the image."""
+        assert "guard-dir.bash" in self.dockerfile
+
+    def test_entrypoint_drives_merge_and_harden_from_guard_dir(self) -> None:
+        assert (
+            'bash "$GUARD_DIR/bin/merge-user-settings.sh" "$GUARD_DIR"'
+            in self.entrypoint
+        )
+        assert (
+            'WORKSPACE="$GUARD_DIR" bash "$GUARD_DIR/.devcontainer/harden-monitor.bash"'
+            in self.entrypoint
+        )
+
+
+class TestForeignRepoCheck:
+    """The arbitrary-repo CI check boots the real stack with /workspace pointed at a
+    bare repo (no vendored guardrails) and asserts the baked set takes over."""
+
+    CHECK = REPO_ROOT / "bin" / "check-foreign-repo.bash"
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "devcontainer-smoke.yaml"
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.check = self.CHECK.read_text()
+        self.workflow_text = self.WORKFLOW.read_text()
+        self.workflow = yaml.safe_load(self.workflow_text)
+
+    def test_check_exists_and_executable(self) -> None:
+        assert self.CHECK.exists()
+        assert os.access(self.CHECK, os.X_OK), (
+            "check-foreign-repo.bash must be executable"
+        )
+
+    def test_check_points_workspace_at_a_foreign_repo(self) -> None:
+        """It mounts a throwaway dir as /workspace, not the claude-guard checkout."""
+        assert "CLAUDE_DEVCONTAINER_WORKSPACE" in self.check
+        assert "mktemp -d" in self.check
+
+    def test_check_asserts_the_baked_guardrails(self) -> None:
+        """The load-bearing assertions: managed settings from the baked dir, the
+        monitor hidden from the agent, and the baked hook deps resolving."""
+        assert "/etc/claude-code/managed-settings.json" in self.check
+        assert ".env.SCCD_DIR" in self.check and "/opt/claude-guard" in self.check
+        # Proves the agent (node) cannot read the baked monitor source.
+        assert "-u node app cat" in self.check
+        assert "/opt/claude-guard/.claude/hooks/monitor.py" in self.check
+        assert (
+            "/opt/claude-guard/.claude/hooks" in self.check
+        )  # baked hook deps resolution cwd
+
+    def test_check_asserts_test_artifacts_stripped(self) -> None:
+        """The bake strips test code; the runtime check proves it's gone from the
+        image while a real hook survives."""
+        assert "*.test.mjs" in self.check and "test-helpers.mjs" in self.check
+        assert "sanitize-input.mjs" in self.check
+
+    def test_workflow_runs_the_check(self) -> None:
+        job = self.workflow["jobs"]["foreign-repo"]
+        assert job["if"] == "needs.decide.outputs.run == 'true'"
+        assert any(
+            "check-foreign-repo.bash" in step.get("run", "") for step in job["steps"]
+        )
+
+    def test_workflow_gates_on_the_check_path(self) -> None:
+        """The job is gated by `decide`, so the check's own path must be in both the
+        push paths and the decide regex — else editing it never triggers the job.
+        (`on:` parses as the YAML 1.1 boolean True, so assert against the raw text.)"""
+        assert '"bin/check-foreign-repo.bash"' in self.workflow_text
+        regex = self.workflow["jobs"]["decide"]["with"]["paths-regex"]
+        assert "check-foreign-repo" in regex
+
+
+class TestDevLifecycleCheck:
+    """The dev-mode CI check boots the real stack with CLAUDE_GUARD_DEV_MODE=1 (guardrails
+    sourced live from /workspace) and invokes every wired command hook against that live
+    copy — the path baked-mode lifecycles never exercise, where the #3 missing-deps bug
+    silently disabled the hooks."""
+
+    CHECK = REPO_ROOT / "bin" / "check-dev-lifecycle.bash"
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "devcontainer-smoke.yaml"
+    HOOKS_DIR = REPO_ROOT / ".claude" / "hooks"
+    SETTINGS = REPO_ROOT / "user-config" / "settings.json"
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.check = self.CHECK.read_text()
+        self.workflow_text = self.WORKFLOW.read_text()
+        self.workflow = yaml.safe_load(self.workflow_text)
+
+    def test_check_exists_and_executable(self) -> None:
+        assert self.CHECK.exists()
+        assert os.access(self.CHECK, os.X_OK), (
+            "check-dev-lifecycle.bash must be executable"
+        )
+
+    def test_check_runs_in_dev_mode(self) -> None:
+        """Dev mode is the whole point: it must export the dev flag and assert managed
+        settings repoint at /workspace, not the baked dir."""
+        assert "CLAUDE_GUARD_DEV_MODE=1" in self.check
+        assert ".env.SCCD_DIR" in self.check
+        assert '"$sccd" == "/workspace"' in self.check
+
+    def test_check_guards_against_missing_deps(self) -> None:
+        """The #3 regression guard: sanitize-output must actually sanitize, not fail
+        closed — which it only can if its deps resolved from the live workspace tree."""
+        assert "SANITIZATION FAILED" in self.check
+
+    def test_check_invokes_every_wired_command_hook(self) -> None:
+        """Every command-type hook wired in settings.json must be invoked by name, and
+        the script's own coverage guard must cross-check that at runtime."""
+        settings = json.loads(self.SETTINGS.read_text())
+        wired = {
+            re.search(r"hooks/(?P<f>[a-z0-9-]+\.(?:mjs|bash))", h["command"]).group("f")
+            for event in settings["hooks"].values()
+            for matcher in event
+            for h in matcher["hooks"]
+            if h.get("type") == "command"
+        }
+        assert wired, "expected at least one wired command hook"
+        for hook in wired:
+            assert hook in self.check, (
+                f"wired hook {hook} is never invoked by the check"
+            )
+        # The runtime coverage guard that keeps this from drifting.
+        assert "managed-settings.json" in self.check
+        assert "not exercised by this lifecycle" in self.check
+
+    def test_workflow_runs_the_check(self) -> None:
+        job = self.workflow["jobs"]["dev-lifecycle"]
+        assert job["if"] == "needs.decide.outputs.run == 'true'"
+        assert any(
+            "check-dev-lifecycle.bash" in step.get("run", "") for step in job["steps"]
+        )
+
+    def test_workflow_gates_on_the_check_path(self) -> None:
+        assert '"bin/check-dev-lifecycle.bash"' in self.workflow_text
+        regex = self.workflow["jobs"]["decide"]["with"]["paths-regex"]
+        assert "check-dev-lifecycle" in regex
+
+
+class TestComposeLifecycleProjectHooks:
+    """The normal-mode lifecycle must prove the #3 regression where it actually bit: the
+    project tier (.claude/settings.json) wires hooks resolving from /workspace, so those
+    hooks must load — not just the baked /opt/claude-guard set."""
+
+    CHECK = REPO_ROOT / "bin" / "check-compose-lifecycle.bash"
+
+    @pytest.fixture(autouse=True)
+    def _load(self) -> None:
+        self.check = self.CHECK.read_text()
+
+    def test_runs_project_tier_hook_via_project_dir(self) -> None:
+        """It invokes the project-tier hook the way Claude Code does — through
+        $CLAUDE_PROJECT_DIR — and fails if it cannot sanitize (deps unresolved)."""
+        assert "CLAUDE_PROJECT_DIR=/workspace" in self.check
+        assert "sanitize-output.mjs" in self.check
+        assert "SANITIZATION FAILED" in self.check
+        assert (
+            " ck_project_hook_sanitizes\n" in self.check
+        )  # registered, not just defined
 
 
 # ── Auto mode configuration ────────────────────────────────────────────

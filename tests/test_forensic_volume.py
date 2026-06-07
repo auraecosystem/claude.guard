@@ -215,3 +215,102 @@ def test_latest_archive_empty_when_no_dir(tmp_path: Path) -> None:
     r = _sourced('forensic_latest_archive "$1" "$2"', str(tmp_path / "nope"), "jsonl")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == ""
+
+
+# ── archive failure modes: fail-loud when content exists but can't be saved ──
+
+
+def test_archive_returns_1_when_mkdir_fails(tmp_path: Path) -> None:
+    """When the log has content but the dest dir can't be created, return 1 — the
+    caller must surface it rather than silently swallow a lost forensic record.
+    A file placed where the dir must go causes mkdir -p to fail even as root."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    env = _docker_stub(tmp_path / "stub", tmp_path / "args.log", run_output="entry\n")
+    r = _sourced(
+        'forensic_archive_volume "$1" "$2" "$3" "$4" "$5" "$6" "$7"',
+        "vol",
+        "img",
+        "/m",
+        "f.log",
+        str(blocker / "subdir"),  # mkdir -p fails: parent is a file
+        "jsonl",
+        "10",
+        env=env,
+    )
+    assert r.returncode == 1
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0,
+    reason="root bypasses chmod 555 — write-permission denial can't be simulated",
+)
+def test_archive_returns_1_when_write_fails(tmp_path: Path) -> None:
+    """When the log has content and the dir is not writable, return 1 rather than
+    silently swallowing the failed write."""
+    dest = tmp_path / "dest"
+    dest.mkdir(mode=0o555)  # exists; mkdir -p succeeds, but creating files inside fails
+    try:
+        env = _docker_stub(
+            tmp_path / "stub", tmp_path / "args.log", run_output="entry\n"
+        )
+        r = _sourced(
+            'forensic_archive_volume "$1" "$2" "$3" "$4" "$5" "$6" "$7"',
+            "vol",
+            "img",
+            "/m",
+            "f.log",
+            str(dest),
+            "jsonl",
+            "10",
+            env=env,
+        )
+        assert r.returncode == 1
+    finally:
+        dest.chmod(0o755)  # restore so tmp_path cleanup succeeds
+
+
+def test_archive_returns_1_when_read_fails(tmp_path: Path) -> None:
+    """A docker/mount failure (the reader exits non-zero) must NOT be read as an
+    empty volume: return 1 and write nothing, so a real read failure can't be
+    mistaken for "no record" and let the volume be deleted with its log unsaved."""
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    write_exe(stub_dir / "docker", "#!/bin/bash\nexit 7\n")
+    dest = tmp_path / "dest"
+    r = _sourced(
+        'forensic_archive_volume "$1" "$2" "$3" "$4" "$5" "$6" "$7"',
+        "vol",
+        "img",
+        "/m",
+        "f",
+        str(dest),
+        "jsonl",
+        "10",
+        env={"PATH": f"{stub_dir}:{os.environ.get('PATH', '')}"},
+    )
+    assert r.returncode == 1
+    assert not dest.exists()
+
+
+def test_read_volume_absent_file_is_empty_success(tmp_path: Path) -> None:
+    """A volume whose log was never written (file absent) is the benign empty
+    case: the reader exits 0 with no output, distinct from a read failure. We exec
+    the real `sh -c <prog>` the way the quote-injection test does, pointed at a
+    path that does not exist."""
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    write_exe(
+        stub_dir / "docker",
+        '#!/bin/bash\nwhile [[ $# -gt 0 && "$1" != sh ]]; do shift; done\nexec "$@"\n',
+    )
+    r = _sourced(
+        'forensic_read_volume "$1" "$2" "$3" "$4"',
+        "vol",
+        "img:tag",
+        str(tmp_path / "mnt"),
+        "never-written.log",
+        env={"PATH": f"{stub_dir}:{os.environ.get('PATH', '')}"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ""

@@ -34,6 +34,10 @@ Commits MUST use [Conventional Commits](https://www.conventionalcommits.org/) (`
 
 **Do not attempt to clean up history.** No squashing, no amending after push, no rebasing to tidy commit count. Multi-commit branches are fine. Attempts to clean up history consistently hit permission denials and create more problems than they solve.
 
+## Pre-commit tooling
+
+`.claude/hooks/session-setup.sh` provisions the binaries the commit hooks shell out to (apt: `gh jq shellcheck grepcidr`; uv: `pre-commit`; cargo: `shellharden`). **When you add a `language: system` hook to `.pre-commit-config.yaml` that invokes an external binary, add an install for it to `session-setup.sh` in the same change** — otherwise web sessions (which build a fresh container) hit "executable not found" on their first commit, exactly when the hook should be helping. Hooks whose binary pre-commit fetches itself (the pinned `rev:` repos like shellcheck/shfmt/ruff/gitleaks) need nothing here.
+
 ## Pull Requests
 
 Use the `/pr-creation` skill. Before writing a PR description, check for `CONTRIBUTING.md` or `.github/PULL_REQUEST_TEMPLATE.md` in the target repo and follow its conventions. **Before adding any new per-project/config mechanism, run `gh pr list --search "<concept>" --state all` to check for an existing convention in merged or open PRs**—duplicate mechanisms with different shapes cause confusion and file conflicts. Include a `## Lessons Learned` section **only** for **truly generalizable insights that apply to all kinds of projects**—not just this repo. The test: would this lesson help a maintainer of an unrelated project that shares none of this code? If it only matters here, it is repo-specific and does **not** belong. Each lesson must be actionable: specify **what** to change, **where**, and **why**. Delete the section entirely if there are no generalizable lessons—empty or vague lessons create noise.
@@ -41,6 +45,10 @@ Use the `/pr-creation` skill. Before writing a PR description, check for `CONTRI
 ## README
 
 The README is the project's front door, not a changelog. **Only add to it when doing so is CRUCIAL**—i.e. a user genuinely cannot install, run, or safely operate the stack without the information, or a security/behavior boundary would be misunderstood. Default to **not** touching it: most features, flags, and internals belong in code comments, the relevant module, or a focused doc—not the README. Before adding, ask whether an existing section already covers it (extend or fix that instead of appending a near-duplicate), and whether removing the addition would actually leave a user stuck. If not, leave it out. Prefer editing/condensing over appending; never document the same command or flag twice.
+
+## SECURITY.md
+
+`SECURITY.md` documents the threat model, defense layers, and trust boundaries. **Update it only when a change actually alters a security boundary, defense mechanism, or trust assumption**—and then with the **most minimal edit that makes it accurate**. Out-of-date claims are dangerous: they describe protections that no longer exist, so a reader trusts a boundary that isn't there. Verbose padding is its own hazard—it buries the boundaries that matter. Most changes need **no** SECURITY.md edit. When one does, fix the specific stale sentence in place; do not append, restate, or narrate the change.
 
 ## Code Style
 
@@ -77,7 +85,7 @@ Stop only when a full pass turns up **nothing** worth changing. Cap at 3 passes;
 
 ## Prebuilt-image supply chain
 
-`bin/lib/resolve-image.bash` pulls signed prebuilt images from GHCR when the checkout's HEAD matches a `git-<sha>` tag — but only if `cosign verify` succeeds against the OIDC identity baked into this repo's `publish-image.yaml`. Verification failures (compromised registry token, unsigned image, missing cosign) fall back to a local build rather than pulling something we can't attribute. Override regex and issuer via `SCCD_COSIGN_IDENTITY_REGEX` / `SCCD_COSIGN_OIDC_ISSUER` for a private fork that ships its own signer. There is deliberately no bypass for verification: if it can't be verified, it's built locally. `SCCD_SBOM_DIFF=1` opts in to a per-launch package diff against the previously verified SBOM, cached under `~/.cache/claude-monitor/sbom/`.
+`bin/lib/resolve-image.bash` pulls signed prebuilt images from GHCR when the checkout's HEAD matches a `git-<sha>` tag — but only if `cosign verify` succeeds against the OIDC identity baked into this repo's `publish-image.yaml`. Verification failures (compromised registry token, unsigned image, missing cosign) fall back to a local build rather than pulling something we can't attribute. Override regex and issuer via `SCCD_COSIGN_IDENTITY_REGEX` / `SCCD_COSIGN_OIDC_ISSUER` for a private fork that ships its own signer. There is deliberately no bypass for verification: if it can't be verified, it's built locally. To avoid re-pulling and re-verifying on every launch, a successful verify records the verified registry digest per image under `~/.cache/claude-monitor/verified-images/<sha>`; a later launch on the same commit that finds those exact digests already on disk skips the pull and cosign entirely. This is digest-keyed, not a bypass — a swapped local image carries a different digest, misses the cache, and is re-pulled and re-verified, so an unverified image is never run. `SCCD_SBOM_DIFF=1` opts in to a per-launch package diff against the previously verified SBOM, cached under `~/.cache/claude-monitor/sbom/`.
 
 ## Ephemeral sessions (the default)
 
@@ -112,6 +120,33 @@ To skip expensive jobs on irrelevant PRs **without** hanging the check, gate at 
 
 `decide` runs on cheap `ubuntu-latest` and returns `run=true` on `push`/`workflow_dispatch` (no PR to diff), so post-merge and manual runs are never gated. Keep `paths:` on the `push:` trigger to skip redundant main-branch runs.
 
+**For jobs that must be required status checks, add an `always()` reporter job.** A GitHub `skipped` conclusion is not always counted as passing by branch-protection rules. The safe pattern is a thin reporter job that always runs and exits 0/1 explicitly — this is the job whose name you register as the required check:
+
+```yaml
+my-job-run:           # does the real work; skipped when decide=false
+  name: My check — run
+  needs: decide
+  if: needs.decide.outputs.run == 'true'
+  ...
+
+my-job:               # always reports; this is the required-check name
+  name: My check
+  needs: [decide, my-job-run]
+  if: always()
+  runs-on: ubuntu-latest
+  steps:
+    - name: Report result
+      run: |
+        if [[ "${{ needs.decide.outputs.run }}" != "true" ]]; then
+          echo "Skipped: no relevant changes"; exit 0
+        fi
+        result="${{ needs.my-job-run.result }}"
+        [[ "$result" == "success" ]] && exit 0
+        echo "my-job-run: $result"; exit 1
+```
+
+Apply this pattern whenever you add or modify a job that is (or could become) a required status check.
+
 Only bother gating **expensive** workflows (containers, VMs, macOS, full test suites). For a job that finishes in a few seconds (actionlint, hadolint, gitleaks), the `decide` job costs as much as the work — just let it always run.
 
 ## CI / GitHub Actions
@@ -133,7 +168,7 @@ Only bother gating **expensive** workflows (containers, VMs, macOS, full test su
 
 JS hooks (`.claude/hooks/*.mjs`): enforced by c8 via `.c8rc.json`. Run `pnpm test:coverage`. Per-file thresholds: **100% lines, 100% branches, 100% functions**. CI fails if any single file drops below these floors.
 
-Subprocess-invoked scripts (`.claude/hooks/*.py`, `setup.bash`, `bin/claude*`): pytest-cov can't instrument them, so `tests/test_coverage_structure.py` enforces a structural floor instead — every tracked source must be claimed by a test via a `# covers: <repo-relative-path>` marker (comma-separated, many-to-many). Adding a new hook or wrapper turns the gate red until a test claims it; a claim pointing at a renamed/deleted file also fails. This proves a test _exists_, not that every branch runs — it is a floor, not real coverage.
+End-to-end-runnable **bash** wrappers (`bin/claude*`): pytest-cov can't instrument them (they run as subprocesses), so they are enrolled in `tests/_kcov.py`'s `KCOV_ENROLLED` list and run under `kcov`, which traces bash line-by-line and enforces **100% real line coverage** (see `tests/run-kcov.sh`). kcov's DEBUG tracing is too slow for one job, so CI fans it out — a `kcov-build` job, a `kcov-shard` matrix, and the required `Bash coverage (kcov)` gate that merges every shard and enforces 100%. Enrolling a wrapper means adding it to `KCOV_ENROLLED` **and** listing **every** test file that invokes it in the `kcov-shard` step of `validate-config.yaml` — not just a `*_coverage.py` top-up. A wrapper reaches 100% from the **union** of its original suite (`test_claude_*.py`) and those top-ups; omit a file and the gate silently reports the lines only it covered as uncovered. Only **bash** wrappers can be enrolled: `bin/claude-guard-doctor` is `#!/usr/bin/env python3`, which kcov's bash method can't trace, so it is **not** enrolled (pytest owns its coverage). Structurally unreachable lines (macOS-only blocks on Linux CI, `modal run` needing a live account) are excluded with `# kcov-ignore-line` / `# kcov-ignore-start:kcov-ignore-end` markers, each justified in review. `setup.bash` is **not** kcov-enrolled either: its tests source sliced functions or run a temp copy, so kcov can't trace them — it relies on those behavioral tests plus the structural `# covers:` gate instead.
 
 **New modules under the coverage-gated dirs (`.claude/hooks/`, `.devcontainer/`, `bin/lib/`) must be covered with in-process tests, not subprocess invocations.** Subprocess calls don't trace into the child interpreter, so a module exercised only via CLI will sit at ~0% and silently fail the `fail_under = 100` gate in CI. Import the module directly in the test.
 

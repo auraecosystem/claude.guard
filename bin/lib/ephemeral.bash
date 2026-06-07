@@ -15,7 +15,7 @@
 # unmistakable in `docker volume ls` and impossible to confuse with a real
 # workspace id (which is "<basename>-<cksum>").
 ephemeral_volume_id() {
-  printf 'ephemeral-%s-%s-%s\n' "$(date -u +%s)" "$$" "${RANDOM}"
+  printf 'ephemeral-%s-%s-%s\n' "$(date -u +%s)" "$$" "$RANDOM"
 }
 
 # Print the session-scoped volume names for <id>, one per line. This is the
@@ -30,6 +30,24 @@ ephemeral_volume_names() {
   done
 }
 
+# Remove every compose-created network for project <proj>. Teardown used to leave
+# them behind, and the sandbox network's subnet is a fixed 172.30.0.0/24
+# (docker-compose.yml), so a leftover from a crashed session collides with the next
+# launch ("invalid pool request: Pool overlaps"). Enumerate by compose-project label
+# rather than hardcoding names, so the egress network and any future one are caught
+# too. Best-effort like the container removal — an absent network is success; one
+# that still EXISTS after the rm attempt warns (it breaks the next launch's
+# networking, not the throwaway-volume guarantee, so it warns rather than failing).
+ephemeral_remove_networks() {
+  local net
+  while IFS= read -r net; do
+    [[ -n "$net" ]] || continue
+    docker network rm "$net" >/dev/null 2>&1 && continue
+    docker network inspect "$net" >/dev/null 2>&1 || continue
+    echo "claude: WARNING — could not remove ephemeral network '$net'; a later launch may hit a subnet overlap ('Pool overlaps'). Remove it with 'docker network rm $net'." >&2
+  done < <(docker network ls --filter "label=com.docker.compose.project=$1" --format '{{.Name}}' 2>/dev/null)
+}
+
 # Tear down an ephemeral session: remove its containers, then its volumes.
 # Best-effort in that a missing resource is never an error — but a genuine
 # failure to remove a volume is reported LOUDLY rather than swallowed, because a
@@ -39,11 +57,18 @@ ephemeral_volume_names() {
 #   ephemeral_teardown <workspace_folder> <id> <container_id>
 #
 # Returns non-zero if any throwaway volume survived. Containers are found by the
-# compose project label off <container_id> (so the firewall/monitor/hardener
-# siblings are caught, not just the app container that carries the
-# devcontainer.local_folder label). If <container_id> is empty (launch failed
-# early), fall back to the local_folder label for whatever did come up. Volumes
-# are removed by exact name after the containers release them.
+# compose project label so the firewall/monitor/hardener siblings are caught, not
+# just the app container that carries the devcontainer.local_folder label. The
+# project is resolved off <container_id> when present; when no project resolves
+# from it (empty id, or a 'devcontainer up' that failed before the app came up so
+# its id was never captured), the sidecars still exist, so recover the project
+# from any container whose compose working_dir is <workspace_folder> or a
+# directory beneath it (compose records the .devcontainer subdir). The match is
+# anchored — exact dir or a "<wf>/" prefix — not the loose substring
+# _dump_sidecar_logs uses, because this feeds a destructive rm -f and must not
+# catch a sibling like "<wf>-other". Only if that finds nothing do we fall back to
+# the local_folder label. Volumes are removed by exact name after the containers
+# release them — a sidecar left pinning a volume is exactly why teardown leaks.
 ephemeral_teardown() {
   local workspace_folder="$1" id="$2" container_id="$3" proj="" cids vol failed=0
   if ! command -v docker >/dev/null 2>&1; then
@@ -55,6 +80,12 @@ ephemeral_teardown() {
     proj=$(docker inspect "$container_id" \
       --format '{{ index .Config.Labels "com.docker.compose.project" }}' 2>/dev/null || true)
   fi
+  if [[ -z "$proj" ]]; then
+    proj=$(docker ps -a --filter "label=com.docker.compose.project.working_dir" \
+      --format '{{.Label "com.docker.compose.project"}}'$'\t''{{.Label "com.docker.compose.project.working_dir"}}' \
+      2>/dev/null | awk -F'\t' -v wf="$workspace_folder" \
+      '$2 == wf || index($2, wf "/") == 1 {print $1; exit}')
+  fi
 
   if [[ -n "$proj" ]]; then
     cids=$(docker ps -aq --filter "label=com.docker.compose.project=$proj" 2>/dev/null || true)
@@ -64,6 +95,11 @@ ephemeral_teardown() {
   if [[ -n "$cids" ]] && ! xargs -r docker rm -f >/dev/null 2>&1 <<<"$cids"; then
     echo "claude: WARNING — failed to remove one or more ephemeral containers for session $id; their volumes may stay pinned and survive teardown." >&2
   fi
+
+  # Containers (the networks' endpoints) are gone, so the project's networks can
+  # now be removed. Only when we resolved the compose project — the local_folder
+  # fallback can't filter by project.
+  [[ -n "$proj" ]] && ephemeral_remove_networks "$proj"
 
   # `docker volume rm -f` treats an already-absent volume as success, so a
   # non-zero status here means the volume still EXISTS and could not be removed —

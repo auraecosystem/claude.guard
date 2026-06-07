@@ -48,22 +48,26 @@ def _fake_docker(
     *,
     manifest_ok: bool,
     pull_ok: bool = True,
-    pull_digest: bool = True,
+    image_digest: str | None = FAKE_DIGEST,
 ) -> None:
-    # `docker pull` prints a "Digest: sha256:..." line the resolver parses;
-    # omit it (pull_digest=False) to simulate output we can't read a digest from.
-    if pull_ok:
-        pull_body = 'echo "Status: Downloaded"; exit 0'
-        if pull_digest:
-            pull_body = f'echo "Digest: {FAKE_DIGEST}"; ' + pull_body
+    # The resolver reads each image's digest from `docker image inspect`'s
+    # RepoDigests (not from pull output): image_digest=None → no usable digest
+    # (image absent / pulled without one); a digest → print the ref's RepoDigest
+    # as "<repo>@<digest>" so the resolver matches it.
+    if image_digest is None:
+        image_body = "exit 0"  # no RepoDigests line emitted
     else:
-        pull_body = "exit 1"
+        image_body = (
+            'ref="${@: -1}"; '  # last arg is the image ref (repo:tag)
+            f'echo "${{ref%%:*}}@{image_digest}"; exit 0'
+        )
     _write(
         bindir / "docker",
         "#!/usr/bin/env bash\n"
         'case "$1" in\n'
         f"  manifest) exit {0 if manifest_ok else 1} ;;\n"
-        f"  pull) {pull_body} ;;\n"
+        f"  pull) exit {0 if pull_ok else 1} ;;\n"
+        f"  image) {image_body} ;;\n"
         "  *) exit 0 ;;\n"
         "esac\n",
     )
@@ -72,6 +76,13 @@ def _fake_docker(
 def _fake_cosign(
     bindir: Path, *, verify_ok: bool = True, tsa_only: bool = False
 ) -> None:
+    # CONTROL-FLOW fake (issue #373 doctrine): this stub stands in for cosign's
+    # verify *outcome* (pass / fail / TSA-only-fallback), the state the resolver
+    # branches on, and records argv so tests can assert the trust pins. It does
+    # NOT assert real cosign accepts that argv — a stub rubber-stamps any flag.
+    # The flag contract (a renamed/dropped `--certificate-…` pin) is validated
+    # against the real binary in test_resolve_image_cosign_contract.py.
+    #
     # Record argv so a test can assert the verification is pinned to the commit
     # and the GitHub OIDC issuer; for non-verify subcommands (download
     # attestation) exit clean with no output so the SBOM diff branch can't
@@ -113,7 +124,14 @@ def _run(bindir: Path, env_extra: dict[str, str] | None = None) -> dict[str, str
         'echo "CCR=${SCCD_IMAGE_CCR:-}"\n'
         'echo "POLICY=${SCCD_PULL_POLICY:-}"\n'
     )
-    env = {"PATH": f"{bindir}:{os.environ['PATH']}", **(env_extra or {})}
+    # Isolate the verified-image cache under the test's bindir so a real
+    # ~/.cache is never read or written, and runs don't leak state into each
+    # other unless a test deliberately shares the dir.
+    env = {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "XDG_CACHE_HOME": str(bindir / "cache"),
+        **(env_extra or {}),
+    }
     out = subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, env=env, check=True
     ).stdout
@@ -160,6 +178,146 @@ def test_probe_no_remote(tmp_path: Path) -> None:
     _fake_git(tmp_path, origin="https://gitlab.com/foo/bar.git")
     _fake_docker(tmp_path, manifest_ok=True)
     assert _probe(tmp_path) == "no-remote"
+
+
+# ── dirty check is scoped to the image build inputs ──────────────────────────
+# _fake_git ignores pathspecs, so a real committed repo is needed to exercise
+# `git status --porcelain -- :/.devcontainer :/.claude/hooks`: only uncommitted
+# changes to the Docker build contexts may force a local build; edits elsewhere
+# (bin/, tests/, docs) must not.
+
+_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.com",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.com",
+}
+
+
+def _init_real_repo(repo: Path) -> dict[str, str]:
+    """A real committed repo with both build-context dirs and an out-of-context
+    file, isolated from host/global git config. Returns env to reuse for probes."""
+    env = {**_GIT_ENV, "PATH": os.environ["PATH"]}
+    for rel in (
+        ".devcontainer/Dockerfile",
+        ".claude/hooks/monitor.py",
+        "user-config/settings.json",
+        "bin/merge-user-settings.sh",
+        "package.json",
+        "pnpm-lock.yaml",
+        "bin/tool",
+    ):
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("orig\n")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, env=env
+        )
+
+    git("init", "-q")
+    git("remote", "add", "origin", ORIGIN)
+    git("add", "-A")
+    git("commit", "-q", "--no-verify", "-m", "init")
+    return env
+
+
+def _probe_real(bindir: Path, repo: Path, git_env: dict[str, str]) -> str:
+    # Real git (from the system PATH) resolves the pathspec; only docker is faked.
+    script = f"source {LIB}\n_sccd_prebuilt_probe {repo}\n"
+    env = {**git_env, "PATH": f"{bindir}:{os.environ['PATH']}"}
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env, check=True
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "rel,expected_state",
+    [
+        ("bin/tool", "available"),  # tracked edit outside the build context
+        ("README.md", "available"),  # untracked file outside the build context
+        (".devcontainer/Dockerfile", "dirty"),  # tracked edit to a context file
+        (".devcontainer/new.txt", "dirty"),  # untracked file in the context
+        (".claude/hooks/monitor.py", "dirty"),  # the monitor's extra context
+        (".claude/hooks/new.py", "dirty"),  # untracked in the extra context
+        ("user-config/settings.json", "dirty"),  # baked via guard-src
+        ("bin/merge-user-settings.sh", "dirty"),  # baked via guard-src
+        ("package.json", "dirty"),  # baked dep manifest
+        ("pnpm-lock.yaml", "dirty"),  # baked lockfile
+    ],
+    ids=[
+        "outside-tracked",
+        "outside-untracked",
+        "devcontainer-tracked",
+        "devcontainer-untracked",
+        "hooks-tracked",
+        "hooks-untracked",
+        "user-config-tracked",
+        "merge-settings-tracked",
+        "package-json-tracked",
+        "lockfile-tracked",
+    ],
+)
+def test_dirty_check_scoped_to_image_inputs(
+    tmp_path: Path, rel: str, expected_state: str
+) -> None:
+    repo = tmp_path / "repo"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    git_env = _init_real_repo(repo)
+    # manifest_ok so a non-dirty tree resolves all the way to "available", proving
+    # the out-of-context change did NOT short-circuit at the dirty branch.
+    _fake_docker(bindir, manifest_ok=True)
+    (repo / rel).write_text("changed\n")
+    assert _probe_real(bindir, repo, git_env).split("\t")[0] == expected_state
+
+
+# Boundary of the no-stale-image guarantee: operations that change the build
+# context in non-obvious ways (a staged-only edit, a rename moving a file across
+# the context edge, a deletion) must still be caught. These guard against a
+# future refactor to a narrower pathspec/`-uno` that silently stops seeing them.
+def test_dirty_check_catches_context_mutations(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _fake_docker(bindir, manifest_ok=True)
+
+    def fresh_probe(mutate) -> str:
+        repo = tmp_path / f"repo-{mutate.__name__}"
+        git_env = _init_real_repo(repo)
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-C", str(repo), *args],
+                check=True,
+                capture_output=True,
+                env=git_env,
+            )
+
+        mutate(repo, git)
+        return _probe_real(bindir, repo, git_env).split("\t")[0]
+
+    def staged_in_context(repo: Path, git) -> None:
+        (repo / ".devcontainer" / "Dockerfile").write_text("x\n")
+        git("add", ".devcontainer/Dockerfile")  # index-only, no working-tree delta
+
+    def rename_out_of_context(repo: Path, git) -> None:
+        git("mv", ".devcontainer/Dockerfile", "bin/Dockerfile")  # context loses a file
+
+    def delete_in_context(repo: Path, git) -> None:
+        (repo / ".devcontainer" / "Dockerfile").unlink()
+
+    def staged_out_of_context(repo: Path, git) -> None:
+        (repo / "bin" / "tool").write_text("x\n")
+        git("add", "bin/tool")
+
+    assert fresh_probe(staged_in_context) == "dirty"
+    assert fresh_probe(rename_out_of_context) == "dirty"
+    assert fresh_probe(delete_in_context) == "dirty"
+    # A staged change wholly outside the context must NOT force a local build.
+    assert fresh_probe(staged_out_of_context) == "available"
 
 
 def test_success_path_exports_verified_tags(tmp_path: Path) -> None:
@@ -268,7 +426,7 @@ def test_missing_digest_builds_locally(tmp_path: Path) -> None:
     # Pull ok and cosign present, but the image reports no RepoDigests: refuse
     # to trust an image we can't pin by digest.
     _fake_git(tmp_path)
-    _fake_docker(tmp_path, manifest_ok=True, pull_digest=False)
+    _fake_docker(tmp_path, manifest_ok=True, image_digest=None)
     _fake_cosign(tmp_path, verify_ok=True)
     res = _run(tmp_path)
     assert res["MAIN"] == "" and res["POLICY"] == ""
@@ -336,6 +494,104 @@ def test_owner_parsing(tmp_path: Path, origin: str, expected: str) -> None:
     assert res["MAIN"] == f"ghcr.io/{expected}/secure-claude-sandbox:git-{FAKE_SHA}"
 
 
+# ── verified-image cache (skip the pull on the steady-state launch) ──────────
+# After a successful pull+verify, the resolver records the verified registry
+# digest per image under XDG_CACHE_HOME. The next launch on the same commit
+# confirms the images are on disk at those exact digests and skips the manifest
+# check, the pull, and cosign entirely. Digest-keyed, so a swapped local image
+# misses and is re-pulled + re-verified.
+
+OTHER_DIGEST = "sha256:" + "deadbeef" * 8
+_BASES = ("secure-claude-sandbox", "secure-claude-monitor", "secure-claude-ccr")
+
+
+def _cache_file(bindir: Path) -> Path:
+    return bindir / "cache" / "claude-monitor" / "verified-images" / FAKE_SHA
+
+
+def _seed_cache(bindir: Path, digests: dict[str, str]) -> None:
+    """Write a verified-image cache file mapping <base> -> <digest>."""
+    f = _cache_file(bindir)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("".join(f"{base} {dg}\n" for base, dg in digests.items()))
+
+
+def test_success_writes_verified_cache(tmp_path: Path) -> None:
+    """A successful pull+verify records each image's verified digest so the next
+    launch can skip the network."""
+    _fake_git(tmp_path)
+    _fake_docker(tmp_path, manifest_ok=True)
+    _fake_cosign(tmp_path, verify_ok=True)
+    _run(tmp_path)
+    lines = _cache_file(tmp_path).read_text().split()
+    # Three "<base> <digest>" pairs, every digest the one cosign verified.
+    assert {lines[0], lines[2], lines[4]} == set(_BASES)
+    assert lines[1] == lines[3] == lines[5] == FAKE_DIGEST
+
+
+def test_cache_hit_skips_pull_and_verify(tmp_path: Path) -> None:
+    """With the verified digests already cached and the images on disk at those
+    digests, the resolver exports the tags WITHOUT pulling, checking the
+    registry manifest, or invoking cosign."""
+    _fake_git(tmp_path)
+    _seed_cache(tmp_path, dict.fromkeys(_BASES, FAKE_DIGEST))
+    # manifest + pull both fail: if either were consulted the resolver would
+    # fall back to a local build (empty env). image inspect returns the matching
+    # digest so the cache check passes.
+    _fake_docker(tmp_path, manifest_ok=False, pull_ok=False, image_digest=FAKE_DIGEST)
+    _fake_cosign(tmp_path, verify_ok=True)
+    res = _run(tmp_path)
+    assert (
+        res["MAIN"] == f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{FAKE_SHA}"
+    )
+    assert res["POLICY"] == "never"
+    # cosign records argv only when called — its absence proves verification was
+    # skipped on the cache hit.
+    assert not (tmp_path / "cosign-args").exists()
+
+
+@pytest.mark.parametrize(
+    "seed,image_digest",
+    [
+        (dict.fromkeys(_BASES, FAKE_DIGEST), OTHER_DIGEST),  # local swap (mismatch)
+        ({"secure-claude-sandbox": FAKE_DIGEST}, FAKE_DIGEST),  # incomplete record
+    ],
+    ids=["digest-mismatch", "base-missing"],
+)
+def test_cache_miss_repulls_and_reverifies(tmp_path, seed, image_digest) -> None:
+    """Any stale/incomplete cache record is not trusted: the resolver re-pulls and
+    re-verifies (cosign is invoked, so it was not a fast-path hit)."""
+    _fake_git(tmp_path)
+    _seed_cache(tmp_path, seed)
+    _fake_docker(tmp_path, manifest_ok=True, image_digest=image_digest)
+    _fake_cosign(tmp_path, verify_ok=True)
+    res = _run(tmp_path)
+    assert res["POLICY"] == "never"
+    assert (tmp_path / "cosign-args").exists()
+
+
+def test_cache_hit_no_repo_digest_skips_pull(tmp_path: Path) -> None:
+    """After `docker compose build` overwrites the git-sha tag with a locally-
+    rebuilt image, the tag carries no RepoDigest. The verified cache (seeded by
+    the prior pull+cosign run) should still produce a cache HIT so that every
+    subsequent cold-start does not re-pull from the registry."""
+    _fake_git(tmp_path)
+    _seed_cache(tmp_path, dict.fromkeys(_BASES, FAKE_DIGEST))
+    # image_digest=None: docker image inspect exits 0 but emits no RepoDigest —
+    # exactly what docker reports for a locally-rebuilt image.
+    # manifest + pull both fail so that consulting the registry would fall back
+    # to a local build (empty MAIN/POLICY), proving neither was reached.
+    _fake_docker(tmp_path, manifest_ok=False, pull_ok=False, image_digest=None)
+    _fake_cosign(tmp_path, verify_ok=True)
+    res = _run(tmp_path)
+    assert (
+        res["MAIN"] == f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{FAKE_SHA}"
+    )
+    assert res["POLICY"] == "never"
+    # cosign is not invoked: the cache hit short-circuits verification entirely.
+    assert not (tmp_path / "cosign-args").exists()
+
+
 # ── prewarm_sandbox_image ────────────────────────────────────────────────────
 # setup.bash calls this at the end of install so the user's FIRST `claude`
 # launch is fast: pull the verified prebuilt when one matches the commit,
@@ -348,14 +604,14 @@ def _fake_docker_logged(
 ) -> None:
     """Like _fake_docker but records every invocation to docker-args, so a test
     can assert whether `compose build` ran (the local-build prewarm path)."""
-    pull_body = f'echo "Digest: {FAKE_DIGEST}"; exit 0' if pull_ok else "exit 1"
     _write(
         bindir / "docker",
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$*" >>"{bindir}/docker-args"\n'
         'case "$1" in\n'
         f"  manifest) exit {0 if manifest_ok else 1} ;;\n"
-        f"  pull) {pull_body} ;;\n"
+        f"  pull) exit {0 if pull_ok else 1} ;;\n"
+        '  image) ref="${@: -1}"; ' + f'echo "${{ref%%:*}}@{FAKE_DIGEST}"; exit 0 ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n",
     )
@@ -364,7 +620,11 @@ def _fake_docker_logged(
 def _prewarm(bindir: Path, repo: Path, env_extra: dict[str, str] | None = None) -> str:
     # set -euo pipefail mirrors setup.bash, which calls this under it.
     script = f'set -euo pipefail\nsource {LIB}\nprewarm_sandbox_image "{repo}"\n'
-    env = {"PATH": f"{bindir}:{os.environ['PATH']}", **(env_extra or {})}
+    env = {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "XDG_CACHE_HOME": str(bindir / "cache"),
+        **(env_extra or {}),
+    }
     subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, env=env, check=True
     )

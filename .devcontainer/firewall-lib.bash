@@ -4,12 +4,50 @@
 # Sourced, not executed. These two rules fail OPEN if the build path, the refresh
 # loop, and live expansion ever disagree on them, so they live in exactly one place.
 
-# valid_ipv4 IP — true when IP is four dotted decimal octets. The single place the
-# build path, the refresh loop, and live expansion agree on what a resolved A
-# record may look like before it enters the ipset; an unvalidated value could
-# smuggle a non-address token into `ipset add`.
+# valid_ipv4 IP — true when IP is four dotted decimal octets, each 0-255. The
+# single place the build path, the refresh loop, and live expansion agree on what
+# a resolved A record may look like before it enters the ipset; an unvalidated
+# value could smuggle a non-address token into `ipset add`. Each octet is bounded
+# (not the looser [0-9]{1,3}, which accepts 999): an address grepcidr can't match
+# any BOGON_CIDR is reported public by is_public_ipv4, so an out-of-range octet
+# that passed a shape-only check would slip the bogon filter and enter the ipset.
 valid_ipv4() {
-  [[ "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
+  local octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  [[ "$1" =~ ^$octet\.$octet\.$octet\.$octet$ ]]
+}
+
+# valid_domain_name NAME — true when NAME is a bare hostname: letters/digits/dot/
+# hyphen, at least one dot, no leading/trailing dot or hyphen. Rejects URLs, ports,
+# IPs-as-domains, whitespace, and shell metacharacters. The single place the live
+# expansion path (expand-allowlist.bash) and the build path's per-project allowlist
+# (init-firewall.bash) agree on what an admissible domain looks like before it reaches
+# DOMAIN_ACCESS, dnsmasq, or the squid dstdomain ACL — so an unvalidated value from a
+# workspace's .claude/settings.json can't seed a junk entry into those configs.
+valid_domain_name() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$1" == *.* ]]
+}
+
+# add_project_domains ACCESS — read newline-separated domains on stdin and record
+# each, at tier ACCESS (ro|rw), into the caller's DOMAIN_ACCESS map. The launcher
+# feeds the workspace's per-project allowlist (sandbox.network.allowedDomains[ReadWrite])
+# here; each name is shape-checked (valid_domain_name) before it can seed a dnsmasq
+# address= record or a squid dstdomain ACL. A malformed entry is skipped with a
+# warning, not fatal: a junk value in a workspace's .claude/settings.json must not
+# brick the launch, and skipping it can only ever NARROW egress, never widen it.
+# Call ro first then rw so an explicit rw escalation wins when a domain is in both.
+add_project_domains() {
+  local access="$1" domain
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    if ! valid_domain_name "$domain"; then
+      echo "WARNING: ignoring malformed per-project $access domain '$domain'" >&2
+      continue
+    fi
+    # DOMAIN_ACCESS is the caller's global (declared in init-firewall.bash); we only
+    # write it here, so shellcheck can't see the reads at the call site.
+    # shellcheck disable=SC2034
+    DOMAIN_ACCESS["$domain"]="$access"
+  done
 }
 
 # BOGON_CIDRS — IPv4 ranges an allowlisted domain must never be allowed to reach:
@@ -85,36 +123,78 @@ prepare_squid_log_dir() {
 
 # batch_resolve_a RESOLVER BATCH_SIZE DOMAIN... — resolve A records for DOMAIN...
 # in groups of BATCH_SIZE (one `dig -f` per group) against RESOLVER (empty = the
-# system resolver), emitting `domain<TAB>ip` for every valid IPv4 answer.
+# system resolver), emitting `domain<TAB>ip` for every valid IPv4 answer, keyed by
+# the domain THAT WAS QUERIED.
 #
-# Batching is load-bearing, not cosmetic: Docker's embedded resolver silently
-# drops queries when ~150 arrive at once, so a single bulk `dig -f` over the whole
-# allowlist loses ~10% of domains. Capping each dig at BATCH_SIZE keeps every
-# request in flight. `+tries=2` lets dig itself re-send a query the resolver
-# dropped within one batch (matching expand-allowlist.bash); resolve_a_with_retries
-# below layers a second, cross-batch retry on top. Shared by the initial build and
-# the refresh loop so the two resolve identically; the tier (ro/rw) is deliberately
-# NOT a parameter — this function populates the ipset/DNS view, which must admit
-# every allowlisted domain regardless of tier, and a tier-blind signature makes
-# ro/rw-gating impossible here.
+# Attribution via the CNAME chain is the load-bearing part: when a domain is a
+# CNAME (objects.githubusercontent.com -> github.map.fastly.net, anything behind
+# Cloudflare/Fastly/CloudFront), dig's answer section owns the A record under the
+# *canonical* target, not the queried name. Keying output by the A record's owner
+# would mark the queried domain unresolved — exactly the bug that left ~18 CNAME'd
+# domains "unresolvable" and, worse, wrote their dnsmasq address= record under the
+# wrong name so the sandbox returned NODATA for the real host. So we build the
+# answer's CNAME map and follow each queried name to its terminal A records.
+#
+# Batching is also load-bearing: Docker's embedded resolver silently drops queries
+# when ~150 arrive at once, so a single bulk `dig -f` over the whole allowlist
+# loses ~10% of domains. Capping each dig at BATCH_SIZE keeps every request in
+# flight. `+tries=2` lets dig itself re-send a query the resolver dropped within
+# one batch; resolve_a_with_retries below layers a second, cross-batch retry on
+# top. Shared by the initial build, the refresh loop, AND live expansion so all
+# three resolve identically; the tier (ro/rw) is deliberately NOT a parameter —
+# this function populates the ipset/DNS view, which must admit every allowlisted
+# domain regardless of tier, and a tier-blind signature makes ro/rw-gating
+# impossible here.
 batch_resolve_a() {
   local resolver="$1" batch_size="$2"
   shift 2
   local server=()
   [[ -n "$resolver" ]] && server=(@"$resolver")
-  local all=("$@") i name type ip query
+  local all=("$@") i name _ttl _class type rdata d cur hops ip query
   for ((i = 0; i < ${#all[@]}; i += batch_size)); do
+    local batch=("${all[@]:i:batch_size}")
     query=$(mktemp /tmp/dns-query.XXXXXX)
-    printf '%s\n' "${all[@]:i:batch_size}" >"$query"
-    while IFS=$'\t' read -r name _ _ type ip; do
-      [[ "$type" == "A" ]] || continue
-      valid_ipv4 "$ip" || continue
-      if ! is_public_ipv4 "$ip"; then
-        printf 'WARN: %s resolved to non-public address %s; refusing to allowlist (possible DNS rebinding)\n' "${name%.}" "$ip" >&2
-        continue
-      fi
-      printf '%s\t%s\n' "${name%.}" "$ip"
-    done < <(dig +noall +answer +time=5 +tries=2 ${server[@]+"${server[@]}"} -f "$query" 2>/dev/null)
+    printf '%s\n' "${batch[@]}" >"$query"
+    # Per batch: cname[owner]=target and addr[owner]=newline-joined public IPs.
+    # seen_ip dedups (owner,ip): a shared canonical (e.g. github.map.fastly.net,
+    # the target of objects./raw./release-assets.githubusercontent.com) repeats its
+    # A record once per querying domain in a batched answer, and init-firewall does
+    # not dedup downstream — so collapse it here.
+    local -A cname=() addr=() seen_ip=()
+    while read -r name _ttl _class type rdata; do
+      name="${name%.}"
+      case "$type" in
+      CNAME) cname["$name"]="${rdata%.}" ;;
+      A)
+        ip="$rdata"
+        valid_ipv4 "$ip" || continue
+        if ! is_public_ipv4 "$ip"; then
+          printf 'WARN: %s resolved to non-public address %s; refusing to allowlist (possible DNS rebinding)\n' "$name" "$ip" >&2
+          continue
+        fi
+        [[ -n "${seen_ip["$name $ip"]:-}" ]] && continue
+        seen_ip["$name $ip"]=1
+        addr["$name"]+="$ip"$'\n'
+        ;;
+      esac
+    done < <(dig +noall +answer +time=5 +tries=2 "${server[@]+"${server[@]}"}" -f "$query" 2>/dev/null)
+    # Walk each queried name down its CNAME chain (bounded against loops) to the
+    # terminal owner, then emit that owner's A records under the QUERIED name.
+    for d in "${batch[@]}"; do
+      cur="${d%.}"
+      hops=0
+      while [[ -n "${cname[$cur]:-}" && $hops -lt 16 ]]; do
+        cur="${cname[$cur]}"
+        # `hops=$((...))` not `((hops++))`: the latter returns exit 1 when the
+        # pre-increment value is 0, which aborts this subshell under the callers'
+        # `set -e` on the very first hop — silently dropping every CNAME'd domain.
+        hops=$((hops + 1))
+      done
+      [[ -n "${addr[$cur]:-}" ]] || continue
+      while IFS= read -r ip; do
+        [[ -n "$ip" ]] && printf '%s\t%s\n' "$d" "$ip"
+      done <<<"${addr[$cur]}"
+    done
     rm -f "$query"
   done
 }
@@ -142,12 +222,12 @@ resolve_a_with_retries() {
       [[ -n "$name" ]] || continue
       seen["$name"]=1
       printf '%s\t%s\n' "$name" "$ip"
-    done < <(batch_resolve_a "$resolver" "$batch_size" ${pending[@]+"${pending[@]}"})
+    done < <(batch_resolve_a "$resolver" "$batch_size" "${pending[@]+"${pending[@]}"}")
     next=()
-    for d in ${pending[@]+"${pending[@]}"}; do
+    for d in "${pending[@]+"${pending[@]}"}"; do
       [[ -z "${seen[$d]:-}" ]] && next+=("$d")
     done
-    pending=(${next[@]+"${next[@]}"})
+    pending=("${next[@]+"${next[@]}"}")
     [[ ${#pending[@]} -eq 0 || "$attempt" -eq 3 ]] && break
     sleep "$delay"
     delay=$((delay * 2))
@@ -170,6 +250,39 @@ validate_access() {
   return 1
 }
 
+# Non-Venice LLM inference endpoints from domain-allowlist.json. In --privacy
+# private|e2ee the agent's inference is routed through the ccr->Venice sidecar and
+# the monitor is pinned to Venice, so none of these should be reachable. Keep in
+# sync with the allowlist's inference entries; api.venice.ai is intentionally
+# excluded — it is the one kept.
+NON_VENICE_INFERENCE_DOMAINS=(
+  api.anthropic.com
+  platform.claude.com
+  claude.ai
+  console.anthropic.com
+  openrouter.ai
+  api.together.xyz
+  api.replicate.com
+)
+
+# apply_privacy_inference_lockdown MODE — in --privacy private|e2ee, drop every
+# non-Venice inference domain from the global DOMAIN_ACCESS map so the session is
+# Venice-only for inference. Dropping them here removes their IPs from the
+# allowed-domains ipset, which the ccr/monitor sidecars (sharing the firewall
+# netns) are bound by too — so this blocks the agent AND the sidecars, not just
+# squid. No-op for any other mode.
+apply_privacy_inference_lockdown() {
+  case "${1:-}" in
+  private | e2ee) ;;
+  *) return 0 ;;
+  esac
+  local d
+  for d in "${NON_VENICE_INFERENCE_DOMAINS[@]}"; do
+    unset "DOMAIN_ACCESS[$d]"
+  done
+  echo "Privacy mode '$1': non-Venice inference APIs removed from allowlist (Venice-only egress)." >&2
+}
+
 # write_ro_domains OUTFILE [RO_DOMAIN...] — render squid's dstdomain ACL: one
 # `.domain` line per read-only domain. A domain whose parent is also read-only is
 # omitted, since dstdomain ".foo.com" already matches every subdomain. Output is
@@ -182,11 +295,11 @@ write_ro_domains() {
   [[ $# -gt 0 ]] && mapfile -t ro < <(printf '%s\n' "$@" | sort -u)
   : >"$outfile"
   local domain parent skip other
-  for domain in ${ro[@]+"${ro[@]}"}; do
+  for domain in "${ro[@]+"${ro[@]}"}"; do
     parent="${domain#*.}"
     skip=false
     while [[ "$parent" == *.* ]]; do
-      for other in ${ro[@]+"${ro[@]}"}; do
+      for other in "${ro[@]+"${ro[@]}"}"; do
         if [[ "$other" == "$parent" ]]; then
           skip=true
           break 2
@@ -194,23 +307,52 @@ write_ro_domains() {
       done
       parent="${parent#*.}"
     done
-    $skip || echo ".$domain" >>"$outfile"
+    "$skip" || echo ".$domain" >>"$outfile"
   done
 }
 
-# write_squid_conf SANDBOX_IP RO_DOMAINS_PATH — emit the squid.conf to stdout.
-# Pure text, no iptables or privilege, so CI can render the real config and run
-# `squid -k parse` against it. The compose-lifecycle smoke stubs init-firewall.bash
-# (iptables is unreliable on CI runners), so that render-and-parse — see
-# .github/workflows/squid-config.yaml — is the only automated check on this config.
+# write_rw_domains OUTFILE [RW_DOMAIN...] — render squid's dstdomain ACL for
+# read-write domains as EXACT entries (no leading dot). Exactness is the point: a
+# rw domain (e.g. api.anthropic.com) is often a subdomain of a read-only wildcard
+# (.anthropic.com from a ro `anthropic.com`); squid matches the wildcard against
+# the subdomain, so without an exact-match escape the rw child would be bumped and
+# its writes (POST) denied. The squid.conf splices rw_domains before bumping
+# readonly_domains so the apex stays read-only while the rw child is spliced.
+# Sorted for byte-stable regeneration, like write_ro_domains.
+write_rw_domains() {
+  local outfile="$1"
+  shift
+  : >"$outfile"
+  [[ $# -eq 0 ]] && return 0
+  printf '%s\n' "$@" | sort -u >>"$outfile"
+}
+
+# write_squid_conf SANDBOX_IP RO_DOMAINS_PATH [RW_DOMAINS_PATH] — emit the squid.conf
+# to stdout. Pure text, no iptables or privilege, so CI can render the real config
+# and run `squid -k parse` against it. The compose-lifecycle smoke stubs
+# init-firewall.bash (iptables is unreliable on CI runners), so that render-and-parse
+# — see .github/workflows/squid-config.yaml — is the only automated check on this config.
+# RW_DOMAINS_PATH is optional: when given, rw domains are spliced out of any
+# read-only wildcard that would otherwise bump (and POST-deny) them; omitting it
+# renders the plain read-only policy (no rw domains to protect).
 write_squid_conf() {
-  local SANDBOX_IP="$1" RO_DOMAINS="$2"
+  local SANDBOX_IP="$1" RO_DOMAINS="$2" RW_DOMAINS="${3:-}"
   # Fail loudly: an empty IP/path would emit a subtly broken config (e.g.
   # `http_port :3128`, an empty dstdomain file ref) that squid might still load.
   [[ -n "$SANDBOX_IP" && -n "$RO_DOMAINS" ]] || {
-    echo "ERROR: write_squid_conf needs <sandbox_ip> <readonly_domains_path>." >&2
+    echo "ERROR: write_squid_conf needs <sandbox_ip> <readonly_domains_path> [readwrite_domains_path]." >&2
     return 1
   }
+  # rw fragments are emitted only when a rw-domains file is supplied. Each is a
+  # full line (with trailing newline) or empty, so the heredoc reads cleanly in
+  # both shapes; rw_excl is the ` !rw_domains` suffix that exempts rw children
+  # from the read-only method/exfil filters.
+  local rw_acl_line="" rw_excl="" rw_splice_line=""
+  if [[ -n "$RW_DOMAINS" ]]; then
+    rw_acl_line="acl rw_domains dstdomain \"${RW_DOMAINS}\""$'\n'
+    rw_excl=" !rw_domains"
+    rw_splice_line="ssl_bump splice rw_domains"$'\n'
+  fi
   cat <<SQUID
 # Sandbox proxy: enforce GET/HEAD-only for read-only domains
 http_port ${SANDBOX_IP}:3128 ssl-bump \\
@@ -226,7 +368,11 @@ sslcrtd_program /usr/lib/squid/security_file_certgen -s /var/spool/squid/ssl_db 
 
 acl SSL_ports port 443
 acl readonly_domains dstdomain "${RO_DOMAINS}"
-acl safe_methods method GET HEAD OPTIONS
+# Exact-match read-write domains (when supplied). A rw domain is often a subdomain
+# of a read-only wildcard (api.anthropic.com under .anthropic.com); listed exactly
+# so it can be spliced out before the wildcard bumps it and the method filter
+# denies its POST.
+${rw_acl_line}acl safe_methods method GET HEAD OPTIONS
 acl CONNECT method CONNECT
 
 # Custom denial body for read-only-domain rejections (e.g. wandb.init,
@@ -248,21 +394,24 @@ deny_info ERR_SCCD_READONLY readonly_domains
 # GET URIs/headers can encode data; cap them to limit any GET-based exfil channel.
 request_header_max_size 16 KB
 acl exfil_uri url_regex .{2048}
-http_access deny exfil_uri readonly_domains
+http_access deny exfil_uri readonly_domains${rw_excl}
 
 # Only allow CONNECT to port 443 — blocks SSH (22), SMTP (25), etc.
 http_access deny CONNECT !SSL_ports
 http_access allow CONNECT
 
 # Deny non-GET/HEAD to read-only domains (inner requests, post-ssl_bump decrypt).
-http_access deny !safe_methods readonly_domains
+# Exclude rw_domains so a rw child of a read-only wildcard (api.anthropic.com under
+# .anthropic.com) is not method-restricted; it is spliced below in any case.
+http_access deny !safe_methods readonly_domains${rw_excl}
 
-# Bump read-only domains for method inspection; splice rw domains (no restriction
-# needed). Terminate anything unbumpable so a failed bump on a readonly domain
-# can't fall through to an uninspected splice.
+# Splice rw domains first so a rw child of a read-only wildcard escapes the bump;
+# then bump read-only domains for method inspection and splice everything else.
+# Terminate anything unbumpable so a failed bump on a readonly domain can't fall
+# through to an uninspected splice.
 acl step1 at_step SslBump1
 ssl_bump peek step1
-ssl_bump bump readonly_domains
+${rw_splice_line}ssl_bump bump readonly_domains
 ssl_bump splice !readonly_domains
 ssl_bump terminate all
 

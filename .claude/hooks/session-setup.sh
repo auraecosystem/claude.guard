@@ -5,6 +5,10 @@ set -uo pipefail
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
+# Single source of truth for the contract-test tool versions (shared with CI).
+# shellcheck source=.github/tool-versions.sh
+[ -f "$PROJECT_DIR/.github/tool-versions.sh" ] && . "$PROJECT_DIR/.github/tool-versions.sh"
+
 #######################################
 # Helpers
 #######################################
@@ -20,6 +24,19 @@ warn() {
 }
 is_root() { [ "$(id -u)" = "0" ]; }
 
+# Verify <file> matches sha256 <want>. Portable across Linux (sha256sum) and
+# macOS (shasum -a 256); non-zero when neither tool exists or the hash differs.
+_sha256_verify() {
+  local want="$1" file="$2"
+  if command -v sha256sum &>/dev/null; then
+    echo "${want}  ${file}" | sha256sum -c - >/dev/null 2>&1
+  elif command -v shasum &>/dev/null; then
+    echo "${want}  ${file}" | shasum -a 256 -c - >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
 # Install $cmd (pkg $2) via uv if missing; no-op when uv is unavailable.
 uv_install_if_missing() {
   local cmd="$1" pkg="${2:-$1}"
@@ -30,6 +47,17 @@ uv_install_if_missing() {
     fi
     uv tool install --quiet "$pkg" || warn "Failed to install $pkg"
   fi
+}
+
+# Install $cmd (crate $2) via cargo if missing; no-op when cargo is unavailable.
+cargo_install_if_missing() {
+  local cmd="$1" crate="${2:-$1}"
+  command -v "$cmd" &>/dev/null && return
+  if ! command -v cargo &>/dev/null; then
+    warn "Cannot install $crate: cargo not found"
+    return
+  fi
+  cargo install --quiet "$crate" || warn "Failed to install $crate"
 }
 
 # Install apt packages we rely on (signed by the distro keyring). No-op
@@ -60,9 +88,11 @@ apt_install_if_missing() {
 # PATH setup
 #######################################
 
-export PATH="$HOME/.local/bin:$PATH"
-if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
+# ~/.cargo/bin carries cargo-installed lint binaries (shellharden); keep it on
+# PATH so the pre-commit hooks that shell out to them resolve.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+if [ "${CLAUDE_ENV_FILE:-}" != "" ]; then
+  echo "export PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
 fi
 
 #######################################
@@ -85,7 +115,7 @@ if git remote get-url origin 2>/dev/null | grep -q 'local_proxy@'; then
 fi
 
 # Pre-fetch base branch so diffs against it work immediately (e.g. PRs). Non-fatal.
-if [ -n "${CLAUDE_CODE_BASE_REF:-}" ]; then
+if [ "${CLAUDE_CODE_BASE_REF:-}" != "" ]; then
   # Cap the fetch so an unreachable/slow remote can't stall session start (git's
   # own network timeout is very long). `timeout` is absent on some hosts, so fall
   # back to a bare fetch there. Non-fatal: diffs against the base just lag.
@@ -101,7 +131,7 @@ fi
 
 # Web-session remotes use a proxy URL (http://local_proxy@127.0.0.1:PORT/git/owner/repo)
 # gh can't parse, so extract owner/repo and export GH_REPO.
-if [ -z "${GH_REPO:-}" ]; then
+if [ "${GH_REPO:-}" = "" ]; then
   remote_url=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null)
   if [[ "$remote_url" =~ /git/([^/]+/[^/]+)$ ]]; then
     GH_REPO="${BASH_REMATCH[1]}"
@@ -112,7 +142,7 @@ if [ -z "${GH_REPO:-}" ]; then
     # [A-Za-z0-9._-].
     if [[ "$GH_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
       export GH_REPO
-      if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+      if [ "${CLAUDE_ENV_FILE:-}" != "" ]; then
         echo "export GH_REPO=\"$GH_REPO\"" >>"$CLAUDE_ENV_FILE"
       fi
     else
@@ -140,7 +170,73 @@ _install_apt_tools() {
   # drives the real binary (it is deliberately not stubbed), so a missing grepcidr
   # makes is_public_ipv4 fail closed and those tests error — install it to match
   # CI (validate-config.yaml) and the devcontainer image.
-  apt_install_if_missing gh jq shellcheck grepcidr
+  apt_install_if_missing jq shellcheck grepcidr
+  # gh runs in this same job (not a parallel one) so its apt-get can't deadlock the
+  # dpkg lock against the call above.
+  _install_gh
+}
+
+# gh is "current enough" if it's on PATH at >= the floor where `gh pr edit`/`pr view`
+# stopped requesting the removed classic-Projects `projectCards` field. The sandbox
+# image bakes a current gh from cli.github.com, so this lets the hook skip a needless
+# per-session reinstall there while still upgrading a stale distro gh (Ubuntu 2.45).
+_gh_is_current() {
+  command -v gh &>/dev/null || return 1
+  local v
+  v="$(gh --version 2>/dev/null | sed -n 's/^gh version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+  [ "$v" != "" ] || return 1
+  # v >= 2.50.0 iff the smaller of {v, 2.50.0} under version sort is 2.50.0.
+  [ "$(printf '%s\n2.50.0\n' "$v" | sort -V | head -1)" = "2.50.0" ]
+}
+
+# Provision gh through the platform package manager — one path for every OS. apt needs
+# special handling: Ubuntu ships gh 2.45, whose `gh pr edit`/`pr view` still request
+# the deprecated classic-Projects `projectCards` field GitHub now rejects, so on apt we
+# add GitHub's official repo and let apt fetch + signature-verify a current build. On
+# macOS Homebrew already ships a current gh. Best-effort: warns on a real failure,
+# no-ops where no known package manager is present.
+_install_gh() {
+  _gh_is_current && return 0
+  if command -v apt-get &>/dev/null; then
+    is_root || {
+      warn "Cannot install gh: needs root"
+      return
+    }
+    _ensure_github_apt_source || return
+    apt-get update -qq 2>/dev/null
+    apt-get install -y -qq gh || warn "Failed to install gh from cli.github.com"
+    return
+  fi
+  if command -v brew &>/dev/null; then
+    brew list gh &>/dev/null || brew install gh || warn "Failed to install gh via brew"
+  fi
+}
+
+# Add GitHub's official apt repo (https://cli.github.com) once. The only by-hand fetch
+# is the repo's GPG key — required to trust any third-party apt source; the gh package
+# itself is then apt-verified, not curled. The key is pinned: a download whose sha256
+# doesn't match GH_KEYRING_SHA256 (from .github/tool-versions.sh) is rejected, so a
+# tampered or silently-rotated keyring fails loud instead of being trusted.
+_ensure_github_apt_source() {
+  local keyring=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+  [ -f "$keyring" ] && return 0
+  command -v curl &>/dev/null || {
+    warn "Cannot install gh: curl not found"
+    return 1
+  }
+  install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o "$keyring" || {
+    warn "Cannot install gh: keyring fetch failed"
+    return 1
+  }
+  if [ "${GH_KEYRING_SHA256:-}" != "" ] && ! _sha256_verify "$GH_KEYRING_SHA256" "$keyring"; then
+    warn "Cannot install gh: keyring sha256 mismatch (expected $GH_KEYRING_SHA256) — refusing the source"
+    rm -f "$keyring"
+    return 1
+  fi
+  chmod go+r "$keyring"
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" \
+    >/etc/apt/sources.list.d/github-cli.list
 }
 
 _install_uv_toolchain() {
@@ -153,6 +249,84 @@ _install_uv_toolchain() {
   # runtime deps, leaving `uv run pytest` broken with ModuleNotFoundError every
   # session — so provision the full dev surface here (matches CI's --extra dev).
   uv sync --quiet --extra dev || warn "Failed to sync Python dependencies"
+}
+
+# shellharden is a `language: system` pre-commit hook (.pre-commit-config.yaml):
+# the binary must be on PATH or every commit touching a shell file dies with
+# "executable not found". It isn't packaged for apt or uv, so install it from
+# cargo. Whenever a new `language: system` hook depends on an external binary,
+# provision it here too (see CLAUDE.md § Pre-commit tooling).
+_install_cargo_tools() {
+  command -v shellharden &>/dev/null && return 0
+  local cargo
+  cargo="$(command -v cargo || echo "$HOME/.cargo/bin/cargo")"
+  if [ ! -x "$cargo" ]; then
+    warn "Cannot install shellharden: cargo not found (the shellharden pre-commit hook will fail)"
+    return 0
+  fi
+  "$cargo" install --quiet shellharden || warn "Failed to install shellharden"
+}
+
+# The devcontainer-CLI and cosign argument-contract tests
+# (tests/test_devcontainer_cli_contract.py, tests/test_resolve_image_cosign_contract.py)
+# drive the REAL binaries — they error, not skip, when absent (issue #373 doctrine).
+# CI installs them in the pytest job (the install-devcontainer-cli action + the
+# pinned sigstore/cosign-installer); provision the same here so `uv run pytest`
+# passes in a web session. Both land in ~/.local/bin (already on PATH), so neither
+# needs root.
+
+# @devcontainers/cli, pinned to the version the install-devcontainer-cli action uses.
+_install_devcontainer_cli() {
+  command -v devcontainer &>/dev/null && return 0
+  if ! command -v npm &>/dev/null; then
+    warn "Cannot install @devcontainers/cli: npm not found"
+    return
+  fi
+  npm install -g --prefix "$HOME/.local" "@devcontainers/cli@${DEVCONTAINER_CLI_VERSION}" &>/dev/null ||
+    warn "Failed to install @devcontainers/cli"
+}
+
+# cosign release binary (sigstore/cosign-installer fetches the same in CI).
+_install_cosign() {
+  command -v cosign &>/dev/null && return 0
+  if ! command -v curl &>/dev/null; then
+    warn "Cannot install cosign: curl not found"
+    return
+  fi
+  local arch
+  case "$(uname -m)" in
+  x86_64 | amd64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *)
+    warn "Cannot install cosign: unsupported arch $(uname -m)"
+    return
+    ;;
+  esac
+  local os
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  # Expected sha256 for this os/arch, pinned in tool-versions.sh. No pin for the
+  # platform → refuse rather than run an unverifiable binary.
+  local sha_var="COSIGN_SHA256_${os}_${arch}" want
+  want="${!sha_var:-}"
+  if [ "$want" = "" ]; then
+    warn "Cannot install cosign: no pinned sha256 for ${os}/${arch}"
+    return
+  fi
+  mkdir -p "$HOME/.local/bin"
+  local url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${os}-${arch}"
+  local tmp="$HOME/.local/bin/.cosign.$$"
+  if ! curl -fsSL "$url" -o "$tmp"; then
+    warn "Failed to download cosign"
+    rm -f "$tmp"
+    return
+  fi
+  if ! _sha256_verify "$want" "$tmp"; then
+    warn "Cosign sha256 mismatch (expected $want) — refusing the download"
+    rm -f "$tmp"
+    return
+  fi
+  chmod +x "$tmp"
+  mv "$tmp" "$HOME/.local/bin/cosign"
 }
 
 _install_node_deps() {
@@ -171,26 +345,36 @@ _install_node_deps() {
   fi
 }
 
+# Node deps gate the .mjs guardrail hooks (UserPromptSubmit/PreToolUse/PostToolUse),
+# which can fire before this SessionStart hook returns. Install them FIRST and
+# synchronously so node_modules is ready as early as possible — not racing the
+# slower apt/cargo/cosign jobs below for CPU and network. The hooks also fail closed
+# on a missing dep, so this shrinks the cold-start window rather than being the sole
+# guard.
+_install_node_deps
+
 _install_apt_tools &
 _install_uv_toolchain &
-_install_node_deps &
+_install_cargo_tools &
+_install_devcontainer_cli &
+_install_cosign &
 wait
 
 # .venv/bin on PATH so Python tools are available to hooks (uv sync ran above).
 if [ -d "$PROJECT_DIR/.venv/bin" ]; then
   export PATH="$PROJECT_DIR/.venv/bin:$PATH"
-  if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  if [ "${CLAUDE_ENV_FILE:-}" != "" ]; then
     echo "export PATH=\"$PROJECT_DIR/.venv/bin:\$PATH\"" >>"$CLAUDE_ENV_FILE"
   fi
 fi
 
 #######################################
-# GitHub CLI auth (after apt installs gh)
+# GitHub CLI auth (after the install jobs above provision gh)
 #######################################
 
 if ! command -v gh &>/dev/null; then
   warn "gh CLI not found"
-elif [ -z "${GH_TOKEN:-}" ]; then
+elif [ "${GH_TOKEN:-}" = "" ]; then
   warn "GH_TOKEN is not set — GitHub CLI requires authentication"
 fi
 
@@ -234,7 +418,7 @@ _check_monitor() {
   [ "${IS_SANDBOX:-}" = "yes" ] && return
   [ "${DANGEROUSLY_SKIP_MONITOR:-}" = "1" ] && return
 
-  if [ -z "${MONITOR_API_KEY:-}${ANTHROPIC_API_KEY:-}${VENICE_INFERENCE_KEY:-}${OPENROUTER_API_KEY:-}" ]; then
+  if [ "${MONITOR_API_KEY:-}${ANTHROPIC_API_KEY:-}${VENICE_INFERENCE_KEY:-}${OPENROUTER_API_KEY:-}" = "" ]; then
     # SessionStart output lands in the model's context, not the user's terminal,
     # so this is a terse note for the assistant to relay — not a shell tutorial
     # the user will read.

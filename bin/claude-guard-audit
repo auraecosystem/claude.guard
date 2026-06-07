@@ -144,7 +144,7 @@ fi
 
 vol="claude-audit-$(claude_volume_id "$workspace_folder")"
 
-if $print_path; then
+if "$print_path"; then
   printf '%s\n' "$vol"
   exit 0
 fi
@@ -160,12 +160,15 @@ if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1 &&
   live=true
 fi
 
-if $do_archive; then
-  if ! $live; then
+if "$do_archive"; then
+  if ! "$live"; then
     echo "claude-audit: no live audit volume '$vol' to archive (is the stack up?)." >&2
     exit 1
   fi
-  claude_archive_audit_volume "$vol" "$image" "$archive_root" "${CLAUDE_AUDIT_ARCHIVE_KEEP:-10}"
+  if ! claude_archive_audit_volume "$vol" "$image" "$archive_root" "${CLAUDE_AUDIT_ARCHIVE_KEEP:-10}"; then
+    echo "claude-audit: ERROR — read the audit log but could not write the archive under $archive_root (check permissions/free space)." >&2
+    exit 1
+  fi
   snap="$(claude_latest_audit_archive "$vol" "$archive_root")"
   if [[ -n "$snap" ]]; then
     echo "claude-audit: archived to $snap" >&2
@@ -175,7 +178,7 @@ if $do_archive; then
   exit 0
 fi
 
-if $do_verify; then
+if "$do_verify"; then
   # Reconcile the (tamper-EVIDENT) audit log against the (unforgeable) squid
   # egress log. We read BOTH streams through the same read-only, network-isolated
   # forensic reader the rest of this tool uses — never an agent-writable mount —
@@ -185,7 +188,7 @@ if $do_verify; then
   egress_vol="claude-egress-$(claude_volume_id "$workspace_folder")"
   audit_text=""
   egress_text=""
-  if $live; then
+  if "$live"; then
     audit_text="$(claude_read_audit_volume "$vol" "$image" 2>/dev/null || true)"
   else
     audit_archive="$(claude_latest_audit_archive "$vol" "$archive_root")"
@@ -198,10 +201,12 @@ if $do_verify; then
     docker volume inspect "$egress_vol" >/dev/null 2>&1; then
     egress_live=true
   fi
-  if $egress_live; then
+  if "$egress_live"; then
+    # kcov-ignore-start  multi-line command substitution credited to its closing line; the egress-live read is exercised by test_verify_live_both_volumes_clean
     egress_text="$(forensic_read_volume "$egress_vol" "$image" \
       "$(forensic_stream_field egress mountpath)" \
       "$(forensic_stream_field egress filename)" 2>/dev/null || true)"
+    # kcov-ignore-end
   else
     egress_archive="$(claude_latest_egress_archive "$egress_vol" "$(claude_egress_archive_dir)")"
     [[ -n "$egress_archive" ]] && egress_text="$(cat "$egress_archive" 2>/dev/null || true)"
@@ -219,8 +224,10 @@ if $do_verify; then
   reconcile_py="$self_dir/lib/audit-reconcile.py"
   python_bin="$(command -v python3 || command -v python || true)"
   if [[ -z "$python_bin" ]]; then
+    # kcov-ignore-start  reason: python3/python absent — untestable in CI where python3 is always present
     echo "claude-audit: --verify needs python3 (stdlib only) and none was found." >&2
     exit 2
+    # kcov-ignore-end
   fi
   # A nonzero exit here is a RESULT (1 = discrepancy, 3 = unsafe), not a failure
   # to run — so don't let `set -e`/`pipefail` abort before we propagate it.
@@ -231,9 +238,9 @@ fi
 
 # Fall back to the newest host snapshot when the live volume is gone.
 archive_file=""
-$live || archive_file="$(claude_latest_audit_archive "$vol" "$archive_root")"
+"$live" || archive_file="$(claude_latest_audit_archive "$vol" "$archive_root")"
 
-if ! $live && [[ -z "$archive_file" ]]; then
+if ! "$live" && [[ -z "$archive_file" ]]; then
   echo "claude-audit: no audit log for workspace:" >&2
   echo "claude-audit:   $workspace_folder" >&2
   echo "claude-audit: no live volume '$vol' and no host archive under $archive_root." >&2
@@ -246,11 +253,12 @@ fi
 # the stream. Newlines inside a summary (e.g. heredoc commands) collapse to
 # spaces so each entry stays one line.
 format() {
-  if $raw || ! command -v jq >/dev/null 2>&1; then
-    $raw || echo "claude-audit: jq not found; showing raw JSONL (install jq for the pretty view)." >&2
+  if "$raw" || ! command -v jq >/dev/null 2>&1; then
+    "$raw" || echo "claude-audit: jq not found; showing raw JSONL (install jq for the pretty view)." >&2 # kcov-ignore-line  reason: jq-absent message — unreachable when jq is always installed in CI
     cat
     return
   fi
+  # kcov-ignore-start  kcov counts each line of this single-quoted jq program, but it is one command credited to its first line; the format path is exercised by the display tests
   jq -rR --unbuffered '
     (fromjson?) as $e
     | select($e != null)
@@ -258,9 +266,10 @@ format() {
     | ($i.command // $i.file_path // $i.url // $i.query // $i.pattern // ($i | tojson)) as $summary
     | "\($e.ts // "?")  \($e.envelope.tool_name // "?")  \(($summary | tostring) | gsub("\n"; " "))"
   '
+  # kcov-ignore-end
 }
 
-if $live; then
+if "$live"; then
   echo "claude-audit: workspace $workspace_folder -> volume $vol" >&2
   # --network none: the reader only runs cat/tail over a local volume; it never
   # needs egress. :ro: even root in the throwaway container cannot mutate the log.
@@ -269,7 +278,7 @@ if $live; then
   # program rather than interpolating them into the script text: the values are
   # data, never code, so neither a path with a quote nor a future non-constant
   # input can break the quoting or inject shell.
-  if $follow; then
+  if "$follow"; then
     # -F follows by name and waits for the file to appear (it does not exist
     # until the first tool call is logged), unlike -f which errors on a missing
     # file.
@@ -278,16 +287,20 @@ if $live; then
     exit 0
   fi
   if [[ -n "$lines" ]]; then
+    # kcov-ignore-start  multi-line command substitution credited to its closing line; the live tail path is exercised by test_lines_with_live_volume_passes_count_to_tail
     output="$(docker "${run_flags[@]}" \
       sh -c 'tail -n "$1" "$0" 2>/dev/null || true' "$audit_path" "$lines")"
+    # kcov-ignore-end
   else
+    # kcov-ignore-start  multi-line command substitution credited to its closing line; the live cat path is exercised by test_lines_with_live_volume_no_lines_uses_cat
     output="$(docker "${run_flags[@]}" \
       sh -c 'cat "$0" 2>/dev/null || true' "$audit_path")"
+    # kcov-ignore-end
   fi
 else
   echo "claude-audit: live volume unavailable; reading archived snapshot:" >&2
   echo "claude-audit:   $archive_file" >&2
-  if $follow; then
+  if "$follow"; then
     echo "claude-audit: --follow has no effect on an archived snapshot." >&2
   fi
   if [[ -n "$lines" ]]; then
@@ -308,11 +321,12 @@ fi
 # totals match what's on screen. Skip on --raw (downstream tools don't want
 # chatter) and when jq isn't installed. Soft-fail on parse errors: a broken
 # summary line should never block the actual audit listing.
-if ! $raw && command -v jq >/dev/null 2>&1; then
+if ! "$raw" && command -v jq >/dev/null 2>&1; then
   # -Rn + `inputs | fromjson?` parses each line independently and skips
   # unparsable ones, so a partial / truncated tail entry never poisons the
   # summary. .meta.cost_usd is the new shape; .cost_usd is the legacy log
   # shape — fall back so older archives still tally.
+  # kcov-ignore-start  multi-line read-from-process-substitution with a single-quoted jq program; kcov counts each line but it's one statement credited to its closing line, exercised by the cost-summary display tests
   read -r total priced spend < <(
     printf '%s\n' "$output" | jq -Rrn '
       [inputs | fromjson?] as $entries
@@ -320,6 +334,7 @@ if ! $raw && command -v jq >/dev/null 2>&1; then
       | "\($entries | length) \($priced | length) \($priced | add // 0)"
     ' 2>/dev/null || echo "0 0 0"
   )
+  # kcov-ignore-end
   if [[ "${total:-0}" -gt 0 ]]; then
     printf 'claude-audit: %d calls, %d priced, monitor spend $%.2f\n' \
       "$total" "$priced" "$spend" >&2

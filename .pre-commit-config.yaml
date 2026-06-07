@@ -41,6 +41,19 @@ repos:
       - id: shfmt
         args: [-i, "2", -w]
 
+  - repo: local
+    hooks:
+      - id: shellharden
+        name: shellharden (bash quoting)
+        entry: shellharden --replace
+        language: system
+        types: [shell]
+      - id: no-unnamed-regex-groups
+        name: ban unnamed regex capture groups
+        entry: python .github/scripts/check-unnamed-regex-groups.py
+        language: system
+        types: [python]
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.5
     hooks:
@@ -85,8 +98,26 @@ repos:
         pass_filenames: false
         files: ^\.github/(workflows|actions)/
 
+      - id: check-pinned-downloads
+        name: enforce checksum/signature on downloaded artifacts
+        entry: python3 .github/scripts/check-pinned-downloads.py
+        language: system
+        files: '\.(sh|bash)$|(^|/)Dockerfile(\.[\w-]+)?$'
+
+      - id: check-pinned-base-images
+        name: enforce digest-pinned Docker base images
+        entry: python3 .github/scripts/check-pinned-base-images.py
+        language: system
+        files: '(^|/)Dockerfile(\.[\w-]+)?$'
+
       - id: no-future-import
         name: ban from __future__ import annotations
         entry: 'bash -c ''grep -n "from __future__" "$@" && exit 1 || exit 0'' --'
         language: system
         types: [python]
+
+      - id: no-stderr-suppression-on-launch
+        name: ban stderr suppression on container launch/build commands
+        entry: python3 .github/scripts/check-stderr-suppression.py
+        language: system
+        types: [shell]

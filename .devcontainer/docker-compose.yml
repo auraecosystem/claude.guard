@@ -1,5 +1,11 @@
 x-monitor-port: &monitor-port "9199"
 
+# The firewall/hardener/app share one image built from Dockerfile; it bakes the
+# security guardrail set into /opt/claude-guard from the repo root, reached via this
+# additional build context. Anchored so the three build blocks can't drift.
+x-guard-build-contexts: &guard-build-contexts
+  guard-src: ..
+
 services:
   firewall:
     # firewall, hardener and app share one image (same Dockerfile/context).
@@ -11,6 +17,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts: *guard-build-contexts
       args:
         TZ: ${TZ:-America/Los_Angeles}
     user: root
@@ -54,7 +61,15 @@ services:
           && exec sleep infinity
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/firewall-ready"]
+      # start_interval probes every 1s during start_period, so a container that
+      # becomes ready in a second is marked healthy ~1s later instead of waiting a
+      # full `interval` — the firewall gates the whole launch (hardener, monitor and
+      # app all depend on it being healthy), so this shortens every launch's critical
+      # path. The slower steady-state `interval` keeps polling cheap once up.
+      # Requires Compose 2.20+/Engine 25+; older Compose rejects the unknown key
+      # outright (no graceful fallback), so this sets the supported floor.
       interval: 5s
+      start_interval: 1s
       timeout: 2s
       retries: 12
       start_period: 60s
@@ -84,6 +99,9 @@ services:
       # these into the allowlist: RO = read-only (GET/HEAD), RW = full HTTP.
       PROJECT_ALLOWED_DOMAINS_RO: ${PROJECT_ALLOWED_DOMAINS_RO:-}
       PROJECT_ALLOWED_DOMAINS_RW: ${PROJECT_ALLOWED_DOMAINS_RW:-}
+      # --privacy private|e2ee: init-firewall.bash drops non-Venice inference
+      # endpoints from the allowlist so a Venice-routed session is Venice-only.
+      CLAUDE_PRIVACY_MODE: ${CLAUDE_PRIVACY_MODE:-}
     pids_limit: 32
     mem_limit: 256m
     cpus: 1
@@ -94,13 +112,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts: *guard-build-contexts
     user: root
     cap_drop:
       - ALL
+    # Each cap maps to a concrete operation entrypoint.bash performs as root:
+    #   DAC_OVERRIDE   cross-owner file access while hardening the workspace
+    #   CHOWN/FOWNER   chmod/chown the monitor dirs and user config
+    #   SETUID/SETGID  `su node` drops to the node user to run pnpm install, so the
+    #                  bind-mounted workspace's node_modules isn't left root-owned;
+    #                  setgroups()/setgid()/setuid() require these (as on firewall).
     cap_add:
       - DAC_OVERRIDE
       - CHOWN
       - FOWNER
+      - SETUID
+      - SETGID
+    # Blocks privilege *escalation* via setuid binaries; never blocks privilege
+    # *dropping*, so `su node` above still works.
     security_opt:
       - no-new-privileges:true
     volumes:
@@ -110,18 +139,18 @@ services:
       # write access; the app mounts the same volume read-only so the agent
       # cannot forge the "hardening complete" signal that gates the monitor.
       - hardening-state:/run/hardening
+    environment:
+      # Maintainer dev mode (set by the launcher): repoint the guardrail source
+      # from the baked /opt/claude-guard back to the live /workspace copy so hook
+      # edits take effect without a rebuild. entrypoint.bash fails closed if the
+      # workspace lacks the guardrail sources. Empty/unset = use the baked set.
+      CLAUDE_GUARD_DEV_MODE: ${CLAUDE_GUARD_DEV_MODE:-}
     command:
       - bash
       - -c
       - |
         bash /usr/local/bin/entrypoint.bash \
           && echo "Hardening complete"
-    healthcheck:
-      test: ["CMD", "test", "-f", "/run/hardening/complete"]
-      interval: 2s
-      timeout: 1s
-      retries: 60
-      start_period: 5s
     networks:
       sandbox: {}
     pids_limit: 64
@@ -137,6 +166,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts: *guard-build-contexts
       args:
         TZ: ${TZ:-America/Los_Angeles}
     # gVisor userspace sandbox; override with CONTAINER_RUNTIME if needed.
@@ -193,8 +223,12 @@ services:
       MONITOR_PORT: *monitor-port
       DANGEROUSLY_SKIP_FIREWALL: ${DANGEROUSLY_SKIP_FIREWALL:-}
     depends_on:
+      # The hardener is a one-shot: it writes the /run/hardening/complete sentinel
+      # and exits 0. Gate on completion, not health — a service_healthy wait races
+      # the exit (the container is gone before the healthcheck observes it healthy)
+      # and aborts the launch with "dependency failed to start: ... exited (0)".
       hardener:
-        condition: service_healthy
+        condition: service_completed_successfully
       firewall:
         condition: service_healthy
       monitor:
@@ -228,6 +262,9 @@ services:
       # Fail closed by default for the sidecar's own API outages; forwardable so
       # the sidecar can't silently diverge from the app container's fail mode.
       MONITOR_FAIL_MODE: ${MONITOR_FAIL_MODE:-ask}
+      # Experimental: redact the monitor's reason from the agent on a policy deny
+      # (--experimental-redact-monitor-reason). Off unless the launcher exports it.
+      MONITOR_REDACT_DENY_REASON: ${MONITOR_REDACT_DENY_REASON:-}
       MONITOR_PORT: *monitor-port
       # Bind only to the sandbox IP (shared via the firewall's netns) so the
       # sidecar is not exposed on the egress-facing interface. The app reaches
@@ -255,7 +292,9 @@ services:
           "-c",
           "import socket; s=socket.create_connection(('172.30.0.2', 9199), timeout=2); s.close()",
         ]
+      # The app waits on monitor health too; probe fast at startup (see firewall).
       interval: 3s
+      start_interval: 1s
       timeout: 2s
       retries: 10
       start_period: 10s
@@ -276,9 +315,15 @@ services:
     cap_drop:
       - ALL
     read_only: true
+    # `ccr start` writes ~/.claude.json and ~/.claude-code-router/ under
+    # $HOME=/home/node, so the whole home must be writable despite read_only:
+    # a tmpfs over /home/node (subsuming .npm) provides that without persistence
+    # (the router regenerates its config each start). Docker mounts a tmpfs
+    # world-writable (1777) by default, so the node user can create files in the
+    # otherwise root-owned mount.
     tmpfs:
       - /tmp:size=32m
-      - /home/node/.npm:size=32m
+      - /home/node:size=32m
     pids_limit: 32
     mem_limit: 256m
     cpus: 1
@@ -295,7 +340,10 @@ services:
           "-e",
           "const s=require('net').connect(3456,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))",
         ]
+      # The inference-routing (--pi) path waits on ccr health; probe fast at
+      # startup (see firewall) so routed launches aren't gated on a full interval.
       interval: 5s
+      start_interval: 1s
       timeout: 2s
       retries: 10
       start_period: 15s

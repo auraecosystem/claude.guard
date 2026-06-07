@@ -453,7 +453,7 @@ def test_wrapper_volume_id_branches_by_persistence_mode() -> None:
     formula, so the two can't drift. Both shared and ephemeral pin GC off without
     clobbering an explicit user choice."""
     content = WRAPPER.read_text()
-    start = content.index("if $_ephemeral; then")
+    start = content.index('if "$_ephemeral"; then')
     block = content[start:]
     assert 'CLAUDE_VOLUME_ID="$(ephemeral_volume_id)"' in block
     assert 'export CLAUDE_VOLUME_ID="shared-auth"' in block
@@ -1141,12 +1141,20 @@ def test_skip_container_malformed_project_settings_fails_closed(tmp_path: Path) 
 # ── Docker CLI plugin preflight (cold start) ─────────────────────────────────
 
 
-def _run_cold_start(tmp_path: Path, *, buildx: int, compose: int, debug: bool = False):
+def _run_cold_start(
+    tmp_path: Path,
+    *,
+    buildx: int,
+    compose: int,
+    debug: bool = False,
+    devcontainer_body: str | None = None,
+):
     """Drive the wrapper's COLD-start path (no running container) with a docker
     stub whose `buildx`/`compose version` exit codes are configurable, so the
     plugin preflight can be exercised. `devcontainer` writes a marker when invoked —
     the wrapper only calls it after the plugin guard, so the marker's presence proves
-    whether the guard passed. Returns (proc, reached_up).
+    whether the guard passed. Pass `devcontainer_body` to substitute the stub (e.g.
+    to simulate an interrupt mid-`up`). Returns (proc, reached_up).
     """
     _init_repo(tmp_path)
     stub = tmp_path / "stubs"
@@ -1165,13 +1173,19 @@ case "$1" in
       *) printf 'runsc\\n' ;;
     esac
     exit 0 ;;
+  exec)
+    # The fail-closed guardrail write-probe must be REJECTED (simulating the
+    # read-only overmount); every other exec (sync wait, snapshot, claude) succeeds.
+    case "$*" in *sccd_wcheck*) exit 1 ;; *) exit 0 ;; esac ;;
   *) exit 0 ;;   # ps (no running container), network, pull, etc.
 esac
 """,
     )
-    _make_exec(
-        stub / "devcontainer", f'#!/bin/bash\ntouch "{devcontainer_marker}"\nexit 0\n'
+    default_body = (
+        f'#!/bin/bash\nprintf "%s\\n" "$@" >> "{tmp_path}/dc_args"\n'
+        f'touch "{devcontainer_marker}"\nexit 0\n'
     )
+    _make_exec(stub / "devcontainer", devcontainer_body or default_body)
     cmd = [str(WRAPPER)]
     if debug:
         cmd.append("--debug")
@@ -1215,6 +1229,65 @@ def test_cold_start_working_plugins_pass_the_guard(tmp_path: Path) -> None:
     assert reached_up, "wrapper should reach `devcontainer up` when plugins work"
 
 
+def test_interrupt_during_devcontainer_up_tears_down_and_exits_cleanly(
+    tmp_path: Path,
+) -> None:
+    """A SIGTERM/Ctrl-C while `devcontainer up` runs must abort through the
+    interrupt trap — run the ephemeral teardown and exit 128+signal — not resume
+    into the "devcontainer up failed" diagnostics as if the build had errored.
+
+    The fake `devcontainer` signals the wrapper (its grandparent: bash → timeout
+    → devcontainer) and exits, so the wrapper's pending TERM trap fires the moment
+    the foreground `timeout` returns — deterministically exercising _on_interrupt.
+    """
+    # ps -o ppid= of our parent (timeout) is the wrapper's bash; signal it.
+    signaling_devcontainer = (
+        "#!/bin/bash\n"
+        'wrapper="$(ps -o ppid= -p "$PPID" | tr -d " ")"\n'
+        'kill -TERM "$wrapper"\n'
+        "exit 0\n"
+    )
+    r, _ = _run_cold_start(
+        tmp_path, buildx=0, compose=0, devcontainer_body=signaling_devcontainer
+    )
+    assert r.returncode == 143, (
+        f"want 128+SIGTERM; stdout={r.stdout}\nstderr={r.stderr}"
+    )
+    assert "tearing down throwaway volumes" in r.stderr, r.stderr
+    assert "devcontainer up failed" not in r.stderr, (
+        "interrupt must not be reported as a build failure"
+    )
+
+
+def test_cold_start_always_enforces_protective_config(tmp_path: Path) -> None:
+    """A target repo that ships its OWN .devcontainer/devcontainer.json must still
+    boot with claude-guard's protective config (firewall + monitor + gVisor), never
+    the repo's — otherwise any repo carrying a devcontainer would launch unsandboxed.
+    `--config` must point at the dotfiles' devcontainer.json regardless."""
+    # The workspace ships its own (untrusted) devcontainer before the wrapper runs.
+    own = tmp_path / ".devcontainer"
+    own.mkdir()
+    (own / "devcontainer.json").write_text("{}")
+    r, reached_up = _run_cold_start(tmp_path, buildx=0, compose=0)
+    assert reached_up, f"should reach `devcontainer up`; stderr: {r.stderr}"
+    dc_args = (tmp_path / "dc_args").read_text()
+    assert f"{own}/devcontainer.json" not in dc_args, (
+        "must not trust the repo's own config"
+    )
+    # --config points at a generated session config under the cache dir, NOT the
+    # workspace; its dockerComposeFile merges the dotfiles stack + the overmount file.
+    cfg_line = next(
+        ln
+        for ln in dc_args.splitlines()
+        if ln.endswith("/devcontainer.json") and "/devcontainer/" in ln
+    )
+    cfg = json.loads(Path(cfg_line).read_text())
+    assert cfg["dockerComposeFile"] == [
+        f"{REPO_ROOT}/.devcontainer/docker-compose.yml",
+        str(Path(cfg_line).parent / "overmounts.yml"),
+    ]
+
+
 def test_cold_start_local_build_announces_roomy_timeout(tmp_path: Path) -> None:
     """A local image build (no prebuilt pulled — SCCD_NO_PREBUILT=1 here, as on a
     fresh checkout without cosign) must set the expectation that the first build
@@ -1238,31 +1311,39 @@ WRAPPER_SRC = WRAPPER.read_text()
 
 def _parser_dangerous_flags() -> set[str]:
     """--dangerously-* labels handled in the wrapper's flag-strip case block."""
-    block = re.search(r'for _arg in "\$@"; do\n(.*?)\n\s*done', WRAPPER_SRC, re.S)
+    block = re.search(
+        r'for _arg in "\$@"; do\n(?P<loop_body>.*?)\n\s*done', WRAPPER_SRC, re.S
+    )
     assert block, "could not locate the flag-strip loop in bin/claude-guard"
-    return set(re.findall(r"(--dangerously-[a-z-]+)\)", block.group(1)))
+    return set(
+        re.findall(r"(?P<flag>--dangerously-[a-z-]+)\)", block.group("loop_body"))
+    )
 
 
 def _help_weakening_section() -> str:
     out = subprocess.run(
         [str(WRAPPER), "--help"], capture_output=True, text=True, check=True
     ).stdout
-    section = re.search(r"WEAKENING FLAGS.*?\n(.*?)\nENV TOGGLES", out, re.S)
+    section = re.search(r"WEAKENING FLAGS.*?\n(?P<section>.*?)\nENV TOGGLES", out, re.S)
     assert section, "could not locate the WEAKENING FLAGS section in --help"
-    return section.group(1)
+    return section.group("section")
 
 
 def test_help_documents_exactly_the_parsed_dangerous_flags() -> None:
     """Every --dangerously-* flag the parser handles is documented under
     WEAKENING FLAGS, and nothing is documented that the parser ignores."""
-    documented = set(re.findall(r"(--dangerously-[a-z-]+)", _help_weakening_section()))
+    documented = set(
+        re.findall(r"(?P<flag>--dangerously-[a-z-]+)", _help_weakening_section())
+    )
     assert documented == _parser_dangerous_flags()
 
 
 def test_help_env_aliases_are_actually_read_by_the_wrapper() -> None:
     """Each `(env alias: NAME=1)` in the help is read by the wrapper via the
     standard `${NAME:-}` form — so a documented alias can't be a dead promise."""
-    aliases = set(re.findall(r"env alias:\s*([A-Z_]+)=1", _help_weakening_section()))
+    aliases = set(
+        re.findall(r"env alias:\s*(?P<alias>[A-Z_]+)=1", _help_weakening_section())
+    )
     # One alias per weakening flag — the help must not under-document them.
     assert len(aliases) == len(_parser_dangerous_flags())
     for var in aliases:
