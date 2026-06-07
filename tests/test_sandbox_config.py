@@ -1285,7 +1285,7 @@ class TestDevLifecycleCheck:
         the script's own coverage guard must cross-check that at runtime."""
         settings = json.loads(self.SETTINGS.read_text())
         wired = {
-            re.search(r"hooks/(?P<f>[a-z-]+\.(?:mjs|bash))", h["command"]).group("f")
+            re.search(r"hooks/(?P<f>[a-z0-9-]+\.(?:mjs|bash))", h["command"]).group("f")
             for event in settings["hooks"].values()
             for matcher in event
             for h in matcher["hooks"]

@@ -33,7 +33,6 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$REPO_ROOT/bin/lib/check-harness.bash"
 
 PROJECT="dev-lifecycle-$$"
-MONITOR_IP="${MONITOR_IP:-172.30.0.2}"
 
 # Dev mode: repoint guardrails at the live /workspace copy, with /workspace = this repo
 # (the only checkout that actually ships the guardrail sources to source live).
@@ -254,7 +253,7 @@ ck_all_wired_hooks_covered() {
   wired=$("${DC[@]}" exec -T app jq -r \
     '[.hooks[][].hooks[] | select(.type=="command") | .command] | .[]' \
     /etc/claude-code/managed-settings.json 2>/dev/null |
-    grep -oE 'hooks/[a-z-]+\.(mjs|bash)' | sed 's#hooks/##' | sort -u) || wired=""
+    grep -oE 'hooks/[a-z0-9-]+\.(mjs|bash)' | sed 's#hooks/##' | sort -u) || wired=""
   [[ -n "$wired" ]] || {
     echo "could not read wired command hooks from managed-settings.json"
     return 1

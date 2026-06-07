@@ -285,7 +285,8 @@ ck_project_hook_sanitizes() {
   # /opt/claude-guard set). Run the project-tier sanitize-output as the agent would
   # (CLAUDE_PROJECT_DIR=/workspace): with deps present it strips the HTML/ANSI; with them
   # missing it fails CLOSED with "SANITIZATION FAILED". The ESC is a source escape so no
-  # real control byte lands in this file.
+  # real control byte lands in this file. We assert on stdout (not a stderr crash-scan),
+  # relying on sanitize-output's fail-closed contract to surface a missing dep.
   local esc body
   esc=$'\033'
   # shellcheck disable=SC2016  # $CLAUDE_PROJECT_DIR is expanded by the container's bash.
