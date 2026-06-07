@@ -37,12 +37,14 @@ def _stub_bin(tmp_path: Path, *, offline_ok: bool, online_ok: bool) -> Path:
     _write_exe(
         stub / "pnpm",
         f"""#!/bin/bash
-ignore=0; offline=0
+ignore=0; offline=0; prod=0
 for a in "$@"; do
   [[ "$a" == "--ignore-scripts" ]] && ignore=1
   [[ "$a" == "--offline" ]] && offline=1
+  [[ "$a" == "--prod" ]] && prod=1
 done
 [[ $ignore == 1 ]] || {{ echo "pnpm install without --ignore-scripts" >&2; exit 3; }}
+[[ $prod == 1 ]] || {{ echo "pnpm install without --prod" >&2; exit 4; }}
 [[ $offline == 1 ]] && exit {0 if offline_ok else 1}
 exit {0 if online_ok else 1}
 """,
@@ -185,3 +187,51 @@ def test_install_online_failure_propagates(tmp_path: Path) -> None:
     r = _run(f'install_deps "{proj}"', stub, HTTP_PROXY="http://172.30.0.2:3128")
     assert r.returncode != 0
     assert not (proj / STAMP).exists()
+
+
+def test_install_online_failure_dumps_memory_diagnostics(tmp_path: Path) -> None:
+    """A failed online install dumps cgroup memory stats so an OOM kill (bare 'Killed')
+    is self-diagnosing. Point _CGROUP_ROOT at a synthetic v2 tree and assert the limit
+    surfaces on stderr."""
+    proj = _make_project(tmp_path)
+    (proj / "node_modules").mkdir()
+    cg = tmp_path / "cgroup"
+    cg.mkdir()
+    (cg / "memory.max").write_text("268435456\n")
+    (cg / "memory.current").write_text("268000000\n")
+    (cg / "memory.events").write_text("oom_kill 1\n")
+    stub = _stub_bin(tmp_path, offline_ok=False, online_ok=False)
+    r = _run(
+        f'install_deps "{proj}"',
+        stub,
+        HTTP_PROXY="http://172.30.0.2:3128",
+        _CGROUP_ROOT=str(cg),
+    )
+    assert r.returncode != 0
+    assert "memory diagnostics" in r.stderr
+    assert "268435456" in r.stderr
+    assert "oom_kill 1" in r.stderr
+
+
+def test_report_mem_stats_cgroup_v1(tmp_path: Path) -> None:
+    """The diagnostics also read a cgroups-v1 layout when v2's memory.max is absent."""
+    cg = tmp_path / "cgroup"
+    (cg / "memory").mkdir(parents=True)
+    (cg / "memory" / "memory.limit_in_bytes").write_text("268435456\n")
+    (cg / "memory" / "memory.usage_in_bytes").write_text("268000000\n")
+    (cg / "memory" / "memory.oom_control").write_text(
+        "oom_kill_disable 0\noom_kill 2\n"
+    )
+    stub = _stub_bin(tmp_path, offline_ok=True, online_ok=True)
+    r = _run("_report_install_mem_stats /x", stub, _CGROUP_ROOT=str(cg))
+    assert "limit_in_bytes: 268435456" in r.stderr
+    assert "oom_kill 2" in r.stderr
+
+
+def test_report_mem_stats_no_cgroup_files(tmp_path: Path) -> None:
+    """When no cgroup memory files exist, the diagnostics say so rather than erroring."""
+    cg = tmp_path / "cgroup"
+    cg.mkdir()
+    stub = _stub_bin(tmp_path, offline_ok=True, online_ok=True)
+    r = _run("_report_install_mem_stats /x", stub, _CGROUP_ROOT=str(cg))
+    assert "cgroup memory files not found" in r.stderr

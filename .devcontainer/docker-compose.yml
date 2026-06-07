@@ -171,8 +171,8 @@ services:
     # failed". One knob drives the cap; memswap_limit references the SAME variable
     # so no-swap holds at any size. The container is transient (exits after
     # hardening) so the headroom is only held during launch.
-    mem_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-2048}m
-    memswap_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-2048}m
+    mem_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-4096}m
+    memswap_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-4096}m
     cpus: 1
     depends_on:
       firewall:

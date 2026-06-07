@@ -44,25 +44,49 @@ deps_mark_installed() {
 # wires it the proxy, so this gates whether an online install is even possible.
 _deps_have_proxy() { [[ -n "${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}" ]]; }
 
+# Emit cgroup memory stats to stderr when an install fails, to distinguish an OOM kill
+# (Killed, no other output) from a network error or lockfile conflict.
+# _CGROUP_ROOT may be overridden (e.g. in tests) to point at a synthetic cgroup tree.
+_report_install_mem_stats() {
+  local cg="${_CGROUP_ROOT:-/sys/fs/cgroup}"
+  echo "--- memory diagnostics at install failure in $1 ---" >&2
+  # cgroups v2 (Docker 20.10+, containerd default)
+  if [[ -f "$cg/memory.max" ]]; then
+    echo "  memory.max:     $(cat "$cg/memory.max")" >&2
+    echo "  memory.current: $(cat "$cg/memory.current" 2>/dev/null || echo n/a)" >&2
+    echo "  memory.events:  $(cat "$cg/memory.events" 2>/dev/null || echo n/a)" >&2
+  # cgroups v1 (older Docker / kernel)
+  elif [[ -f "$cg/memory/memory.limit_in_bytes" ]]; then
+    echo "  limit_in_bytes: $(cat "$cg/memory/memory.limit_in_bytes")" >&2
+    echo "  usage_in_bytes: $(cat "$cg/memory/memory.usage_in_bytes" 2>/dev/null || echo n/a)" >&2
+    echo "  oom_control:    $(grep 'oom_kill ' "$cg/memory/memory.oom_control" 2>/dev/null || echo n/a)" >&2
+  else
+    echo "  (cgroup memory files not found)" >&2
+  fi
+  echo "--- end memory diagnostics ---" >&2
+}
+
 # Install deps in $dir as the node user (so node_modules stays node-owned — no root leak
 # onto the host). Skip when the lockfile-keyed stamp is already current. Otherwise verify
-# OFFLINE first: pnpm confirms an already-complete tree against the lockfile with no
-# network (fast), and an incomplete tree fails FAST instead of hanging on sockets the
-# firewall drops (e.g. a macOS tree missing the lockfile's linux-only optional binaries).
-# Only when offline verification fails AND a proxy is configured do we fetch online.
-# --ignore-scripts on both: the hardener has egress, so a malicious package's lifecycle
-# script must never run (platform binaries ship as optional dependencies, not scripts, so
-# the fix still works). Stamps only after a fully successful install, so a partial/failed
-# install never records a false "up to date". Returns 0 on skip/success, non-zero when the
-# tree is incomplete and cannot be repaired (the caller decides whether that is fatal).
+# OFFLINE first with --prod: pnpm confirms the production tree against the lockfile with no
+# network (fast), skipping platform-specific optional bins that legitimately differ between
+# the host OS (macOS) and the container (linux). Only when offline verification fails AND
+# a proxy is configured do we fetch online, also --prod: the .mjs hooks only import
+# production deps, so devDependencies (e.g. playwright, ~500 MB) are never needed at
+# runtime. --ignore-scripts on both: the hardener has egress, so a malicious package's
+# lifecycle script must never run. Stamps only after a fully successful install, so a
+# partial/failed install never records a false "up to date". On failure, dumps cgroup
+# memory stats so an OOM kill is self-diagnosing rather than a bare "Killed". Returns 0
+# on skip/success, non-zero when the tree is incomplete and cannot be repaired (the caller
+# decides whether that is fatal).
 install_deps() {
   local dir="$1"
   if deps_up_to_date "$dir"; then
     echo "Dependencies in $dir already current (lockfile unchanged) — skipping install."
     return 0
   fi
-  echo "Verifying dependencies in $dir (offline)..."
-  if su node -c "cd '$dir' && pnpm install --frozen-lockfile --offline --ignore-scripts --silent" 2>/dev/null; then
+  echo "Verifying dependencies in $dir (offline, prod)..."
+  if su node -c "cd '$dir' && pnpm install --frozen-lockfile --offline --prod --ignore-scripts --silent" 2>/dev/null; then
     deps_mark_installed "$dir"
     return 0
   fi
@@ -71,7 +95,10 @@ install_deps() {
     echo "       Run 'pnpm install' on the host (or relaunch with the hardener granted proxy egress) so the tree is complete before launch." >&2
     return 1
   fi
-  echo "Installing dependencies in $dir (as node, via proxy)..."
-  su node -c "cd '$dir' && pnpm install --ignore-scripts --silent" || return $?
+  echo "Installing dependencies in $dir (as node, via proxy, prod only)..."
+  if ! su node -c "cd '$dir' && pnpm install --prod --ignore-scripts --silent"; then
+    _report_install_mem_stats "$dir"
+    return 1
+  fi
   deps_mark_installed "$dir"
 }
