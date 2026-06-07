@@ -776,6 +776,24 @@ ensure_shell_completions() {
   warn "Open a new shell to pick up claude-guard completions"
 }
 
+# Install the man page so `man claude-guard` and `man claude` both work. The XDG
+# man dir is on the default manpath on Linux and macOS, so no MANPATH edit is
+# needed. `claude` is a symlink to the same page (users invoke the alias, and
+# upstream Claude Code ships no man page of its own to shadow).
+ensure_man_page() {
+  local src man_dir
+  src="$SCRIPT_DIR/man/claude-guard.1"
+  if [[ ! -f "$src" ]]; then
+    warn "claude-guard man page not found at $src — skipping."
+    return 0
+  fi
+  man_dir="${XDG_DATA_HOME:-$HOME/.local/share}/man/man1"
+  mkdir -p "$man_dir"
+  cp "$src" "$man_dir/claude-guard.1"
+  ln -sf claude-guard.1 "$man_dir/claude.1"
+  status "Installed man page (man claude-guard / man claude) in $man_dir"
+}
+
 # ── Prewarm the sandbox image ───────────────────────────────────────────────
 # Get the sandbox images onto disk now so the user's FIRST `claude` launch is
 # fast instead of stalling on a multi-minute build (or a registry pull). Only
@@ -812,6 +830,7 @@ fi
 echo ""
 ensure_path_precedence
 ensure_shell_completions
+ensure_man_page
 
 if ! "$sandbox_ok"; then
   echo "" >&2

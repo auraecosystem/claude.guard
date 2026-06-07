@@ -46,6 +46,22 @@ remove_profile_completion_line() {
   status "Removed claude-guard completions line from $profile"
 }
 
+# remove_man_page — delete the man pages ensure_man_page installed (the real
+# claude-guard.1 and the claude.1 symlink). Idempotent.
+remove_man_page() {
+  local man_dir="${XDG_DATA_HOME:-$HOME/.local/share}/man/man1"
+  local removed=false page
+  for page in claude-guard.1 claude.1; do
+    if [[ -e "$man_dir/$page" || -L "$man_dir/$page" ]]; then
+      rm -f "$man_dir/$page"
+      removed=true
+    fi
+  done
+  if "$removed"; then
+    status "Removed claude-guard man page(s) from $man_dir"
+  fi
+}
+
 # remove_kata_shim <dst> — remove a kata shim symlink only if it points into
 # /opt/kata/bin (what setup_kata_shims_and_config created).
 remove_kata_shim() {
@@ -189,6 +205,9 @@ run_uninstall() {
   remove_profile_completion_line "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
   remove_profile_completion_line "${ZDOTDIR:-$HOME}/.zshrc"
   remove_profile_completion_line "$HOME/.bashrc"
+
+  # Man pages installed by ensure_man_page.
+  remove_man_page
 
   # Managed settings security merge.
   uninstall_managed_settings

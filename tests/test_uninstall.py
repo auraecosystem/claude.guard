@@ -184,6 +184,26 @@ def test_completion_source_line_stripped_but_other_profiles_untouched(
     assert "Removed claude-guard completions line" in r.stdout
 
 
+# ── man page ─────────────────────────────────────────────────────────────────
+
+
+def test_man_page_and_alias_symlink_removed(tmp_path: Path) -> None:
+    """An installed man page and its `claude.1` alias symlink are both removed,
+    exercising remove_man_page's removal branch end-to-end. (The nothing-to-remove
+    branch is hit by every other test here, where no man dir exists.)"""
+    home = _fake_home(tmp_path)
+    man_dir = home / ".local" / "share" / "man" / "man1"
+    man_dir.mkdir(parents=True)
+    (man_dir / "claude-guard.1").write_text(".TH CLAUDE-GUARD 1\n")
+    (man_dir / "claude.1").symlink_to("claude-guard.1")
+
+    r = _run(home, _stub_dir(tmp_path), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert not (man_dir / "claude-guard.1").exists()
+    assert not (man_dir / "claude.1").is_symlink()
+    assert "Removed claude-guard man page" in r.stdout
+
+
 # ── managed settings: restore / strip / refuse ───────────────────────────────
 
 # A managed-settings file with three PreToolUse hook groups: one marked by an
