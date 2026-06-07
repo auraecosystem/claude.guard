@@ -23,19 +23,28 @@ def _write_exe(path: Path, body: str) -> None:
 
 def _stub_bin(tmp_path: Path, *, offline_ok: bool, online_ok: bool) -> Path:
     """A PATH dir with `su` (runs `su node -c CMD` as the current user) and a `pnpm`
-    whose offline vs online install outcome is fixed by the flags."""
+    whose offline vs online install outcome is fixed by the flags. The pnpm stub
+    refuses to "install" without --ignore-scripts, so a regression that drops the flag
+    fails the suite (a lifecycle script would otherwise run with the hardener's egress)."""
     stub = tmp_path / "bin"
     stub.mkdir()
     # `su node -c "<cmd>"` → args: node -c <cmd>. Run the command as-is.
     _write_exe(stub / "su", '#!/bin/bash\nexec bash -c "$3"\n')
     # `pnpm install ... --offline ...` succeeds iff offline_ok; an online install
-    # (no --offline) succeeds iff online_ok.
+    # (no --offline) succeeds iff online_ok. Both require --ignore-scripts (exit 3 if
+    # absent) so a dropped flag fails the suite.
     _write_exe(
         stub / "pnpm",
-        "#!/bin/bash\n"
-        'for a in "$@"; do [[ "$a" == "--offline" ]] && '
-        f"exit {0 if offline_ok else 1}; done\n"
-        f"exit {0 if online_ok else 1}\n",
+        f"""#!/bin/bash
+ignore=0; offline=0
+for a in "$@"; do
+  [[ "$a" == "--ignore-scripts" ]] && ignore=1
+  [[ "$a" == "--offline" ]] && offline=1
+done
+[[ $ignore == 1 ]] || {{ echo "pnpm install without --ignore-scripts" >&2; exit 3; }}
+[[ $offline == 1 ]] && exit {0 if offline_ok else 1}
+exit {0 if online_ok else 1}
+""",
     )
     return stub
 

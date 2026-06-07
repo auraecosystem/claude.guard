@@ -153,11 +153,6 @@ services:
       # edits take effect without a rebuild. entrypoint.bash fails closed if the
       # workspace lacks the guardrail sources. Empty/unset = use the baked set.
       CLAUDE_GUARD_DEV_MODE: ${CLAUDE_GUARD_DEV_MODE:-}
-      # The install now has egress, so do NOT run package lifecycle scripts: a
-      # malicious postinstall could otherwise exfiltrate through the proxy. Mirrors
-      # the app container. Platform binaries (esbuild/rollup) ship as optional
-      # *dependencies*, not scripts, so the missing-linux-deps fix still works.
-      NPM_CONFIG_IGNORE_SCRIPTS: "true"
     command:
       - bash
       - -c

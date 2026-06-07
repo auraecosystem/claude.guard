@@ -272,11 +272,17 @@ def test_hardener_is_proxied_for_dependency_fetch(compose: dict) -> None:
     assert fw_ip in hardener.get("dns", [])
 
 
-def test_hardener_install_ignores_lifecycle_scripts(compose: dict) -> None:
+def test_hardener_install_ignores_lifecycle_scripts() -> None:
     """Granting the hardener egress means a malicious package postinstall could
-    exfiltrate; NPM_CONFIG_IGNORE_SCRIPTS=true closes that, mirroring the app."""
-    env = compose["services"]["hardener"]["environment"]
-    assert env.get("NPM_CONFIG_IGNORE_SCRIPTS") == "true"
+    exfiltrate; install_deps must pass --ignore-scripts to EVERY pnpm install to close
+    that. (Asserted on the source so it can't drift from the egress grant above.)"""
+    pnpm_installs = [
+        ln
+        for ln in DEPS_INSTALL.read_text().splitlines()
+        if "su node" in ln and "pnpm install" in ln
+    ]
+    assert pnpm_installs, "no pnpm install found in deps-install.bash"
+    assert all("--ignore-scripts" in ln for ln in pnpm_installs)
 
 
 # ── Cross-service consistency ────────────────────────────────────────

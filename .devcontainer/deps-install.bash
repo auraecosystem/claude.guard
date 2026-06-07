@@ -13,12 +13,14 @@ _deps_have_proxy() { [[ -n "${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_p
 # (fast, the common relaunch case), and an incomplete tree fails FAST instead of hanging
 # on sockets the firewall drops (e.g. a macOS tree missing the lockfile's linux-only
 # optional binaries). Only when offline verification fails AND a proxy is configured do
-# we fetch online. Returns 0 on success, non-zero when the tree is incomplete and cannot
-# be repaired (the caller decides whether that is fatal).
+# we fetch online. --ignore-scripts on both: the hardener has egress, so a malicious
+# package's lifecycle script must never run (platform binaries ship as optional
+# dependencies, not scripts, so the fix still works). Returns 0 on success, non-zero when
+# the tree is incomplete and cannot be repaired (the caller decides whether that is fatal).
 install_deps() {
   local dir="$1"
   echo "Verifying dependencies in $dir (offline)..."
-  if su node -c "cd '$dir' && pnpm install --frozen-lockfile --offline --silent" 2>/dev/null; then
+  if su node -c "cd '$dir' && pnpm install --frozen-lockfile --offline --ignore-scripts --silent" 2>/dev/null; then
     return 0
   fi
   if ! _deps_have_proxy; then
@@ -27,5 +29,5 @@ install_deps() {
     return 1
   fi
   echo "Installing dependencies in $dir (as node, via proxy)..."
-  su node -c "cd '$dir' && pnpm install --silent"
+  su node -c "cd '$dir' && pnpm install --ignore-scripts --silent"
 }
