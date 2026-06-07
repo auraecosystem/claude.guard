@@ -170,6 +170,7 @@ def generate_chart(history: list, current_entry: dict, shorten: bool = False) ->
         title=f"Sanitization stages + PromptArmor live — last {len(window)} runs "
         "(log₁₀ s)",
         begin_at_zero=False,
+        inline_labels=True,
     )
     return f"![Monitor stage timing chart]({url})\n" if url else ""
 
