@@ -22,25 +22,26 @@ fail() {
   FAILURES=$((FAILURES + 1))
 }
 
-# `runsc install` writes the runtime into daemon.json, but Docker exposes it only
-# after a restart, which on CI can be slow or miss the new runtime on the first
-# try. Restart, wait for the daemon, confirm runsc appears, and retry once.
+# `runsc install` writes the runtime into daemon.json. Newer Docker daemons
+# (live-restore mode) pick it up immediately via inotify — restarting in that
+# case would briefly drop the runtime while Docker cycles, causing the
+# post-registration check to race and fail. Only restart if the daemon hasn't
+# auto-loaded the runtime; then poll until it appears. Retry the whole
+# sequence once in case the first restart doesn't take.
 register_runsc() {
   local attempt i
   for attempt in 1 2; do
     sudo /usr/local/bin/runsc install
+    # If the daemon already picked up the runtime (live-reload), skip the
+    # restart entirely — triggering one would only create a race window.
+    docker info 2>/dev/null | grep -q runsc && return 0
     sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null || true
     for ((i = 0; i < 60; i++)); do
       docker info >/dev/null 2>&1 && break
       sleep 1
     done
     for ((i = 0; i < 30; i++)); do
-      if docker info 2>/dev/null | grep -q runsc; then
-        # Confirm Docker has fully stabilised with runsc before returning —
-        # a single detection can be transient if the daemon is mid-restart.
-        sleep 1
-        docker info 2>/dev/null | grep -q runsc && return 0
-      fi
+      docker info 2>/dev/null | grep -q runsc && return 0
       sleep 1
     done
     warn "runsc not registered after restart (attempt $attempt/2); retrying install..."
