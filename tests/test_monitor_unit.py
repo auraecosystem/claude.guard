@@ -1845,6 +1845,30 @@ def test_extract_openai_verdict_skips_bad_tool_call_then_uses_content(mon, tool_
     assert mon._extract_openai_verdict(data) == '{"decision":"deny"}'
 
 
+def test_extract_openai_verdict_skips_bad_tool_call_then_uses_later_call(mon):
+    # A bad element must be skipped (continue), not abort the scan (break): a valid
+    # emit_verdict call after it still wins over message content.
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        None,
+                        {
+                            "function": {
+                                "name": "emit_verdict",
+                                "arguments": '{"decision":"ask"}',
+                            }
+                        },
+                    ],
+                    "content": '{"decision":"deny"}',
+                }
+            }
+        ]
+    }
+    assert mon._extract_openai_verdict(data) == '{"decision":"ask"}'
+
+
 def test_verdict_tool_anthropic_shape(mon):
     # Anthropic Messages tool-use contract: tools[].input_schema + a
     # tool_choice that forces this tool. Wrong shape => the API rejects the

@@ -48,7 +48,7 @@ harness_result() {
   local name="$1" x
   # The arrays are empty before the first check records an outcome; the
   # "${arr[@]+...}" guard keeps the expansion legal under `set -u` on bash < 4.4
-  # (macOS /bin/bash 3.2), which the rest of this codebase guards the same way.
+  # (macOS /bin/bash 3.2), where a bare "${arr[@]}" on an empty array aborts.
   for x in "${HARNESS_PASSED[@]+"${HARNESS_PASSED[@]}"}"; do [[ "$x" == "$name" ]] && {
     echo pass
     return 0
