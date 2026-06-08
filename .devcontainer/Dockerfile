@@ -98,6 +98,16 @@ ENV DEVCONTAINER=true
 RUN mkdir -p /workspace /home/node/.claude && \
   chown -R node:node /workspace /home/node/.claude
 
+# The bind-mounted /workspace keeps its HOST ownership — we deliberately never chown
+# it (that leaked root onto the host; see entrypoint.bash and the read-only-overmount
+# model). On a native-Linux host whose checkout uid != node's 1000, git as node would
+# reject /workspace with "dubious ownership", breaking session-setup's git calls
+# (core.hooksPath, fetch, remote) and Claude Code's own git use. Trust /workspace
+# explicitly via the system gitconfig; this touches no host ownership and is scoped to
+# the one path (not "*"), so it doesn't weaken git's protection elsewhere. macOS Docker
+# backends remap the mount to node and never hit this; the entry is simply inert there.
+RUN git config --system --add safe.directory /workspace
+
 WORKDIR /workspace
 
 ENV COREPACK_HOME=/usr/local/share/corepack
