@@ -6,6 +6,20 @@ x-monitor-port: &monitor-port "9199"
 x-guard-build-contexts: &guard-build-contexts
   guard-src: ..
 
+# Proxy env for the agent (app) and the dependency-fetch hardener — the one place
+# the squid endpoint is defined. SANDBOX_IP is the per-session firewall IP
+# (bin/lib/sandbox-net.bash; octet-0 fallback for a bare `docker compose up`).
+# This lives in `environment:` rather than proxy.env because Compose interpolates
+# ${SANDBOX_IP} here but NOT inside an env_file. The sidecars (monitor, ccr)
+# deliberately omit it: they egress directly, never through squid.
+x-sandbox-proxy-env: &sandbox-proxy-env
+  http_proxy: http://${SANDBOX_IP:-172.30.0.2}:3128
+  https_proxy: http://${SANDBOX_IP:-172.30.0.2}:3128
+  HTTP_PROXY: http://${SANDBOX_IP:-172.30.0.2}:3128
+  HTTPS_PROXY: http://${SANDBOX_IP:-172.30.0.2}:3128
+  no_proxy: localhost,127.0.0.1,${SANDBOX_IP:-172.30.0.2}
+  NO_PROXY: localhost,127.0.0.1,${SANDBOX_IP:-172.30.0.2}
+
 services:
   firewall:
     # firewall, hardener and app share one image (same Dockerfile/context).
@@ -75,7 +89,7 @@ services:
       start_period: 60s
     networks:
       sandbox:
-        ipv4_address: 172.30.0.2
+        ipv4_address: ${SANDBOX_IP:-172.30.0.2}
       egress: {}
     volumes:
       # Persist the GitHub /meta response across firstboots so we don't re-hit
@@ -94,6 +108,12 @@ services:
     environment:
       MONITOR_PORT: *monitor-port
       DANGEROUSLY_SKIP_FIREWALL: ${DANGEROUSLY_SKIP_FIREWALL:-}
+      # Per-session sandbox subnet + firewall IP (bin/lib/sandbox-net.bash); the
+      # octet-0 fallbacks keep a bare `docker compose up` on 172.30.0.0/24.
+      # init-firewall.bash binds dnsmasq to SANDBOX_IP and scopes its iptables
+      # INPUT/OUTPUT rules to SANDBOX_SUBNET.
+      SANDBOX_IP: ${SANDBOX_IP:-172.30.0.2}
+      SANDBOX_SUBNET: ${SANDBOX_SUBNET:-172.30.0.0/24}
       # Per-project allowlist from the workspace's .claude/settings(.local).json,
       # read and validated by the launcher (bin/claude). init-firewall.bash merges
       # these into the allowlist: RO = read-only (GET/HEAD), RW = full HTTP.
@@ -146,8 +166,9 @@ services:
     # ssl_bump CA is baked into this shared image, so HTTPS to `ro` registries works.
     env_file: proxy.env
     dns:
-      - 172.30.0.2
+      - ${SANDBOX_IP:-172.30.0.2}
     environment:
+      <<: *sandbox-proxy-env
       # Maintainer dev mode (set by the launcher): repoint the guardrail source
       # from the baked /opt/claude-guard back to the live /workspace copy so hook
       # edits take effect without a rebuild. entrypoint.bash fails closed if the
@@ -196,7 +217,7 @@ services:
     networks:
       sandbox: {}
     dns:
-      - 172.30.0.2
+      - ${SANDBOX_IP:-172.30.0.2}
     pids_limit: 512
     # Driven by a single knob (DEVCONTAINER_APP_MEM_MB, in MB) so the cgroup cap
     # and the Node heap below cannot drift; the launcher derives the heap as half
@@ -220,6 +241,10 @@ services:
       - monitor-secret:/run/monitor-secret:ro
     env_file: proxy.env
     environment:
+      <<: *sandbox-proxy-env
+      # Per-session firewall IP, so monitor-dispatch.bash reaches the sidecar at the
+      # right address (octet-0 fallback for a bare `docker compose up`).
+      SANDBOX_IP: ${SANDBOX_IP:-172.30.0.2}
       # Heap is half the mem_limit above (the launcher derives it from
       # DEVCONTAINER_APP_MEM_MB). Default 4096 pairs with the 8192m default.
       NODE_OPTIONS: "--max-old-space-size=${DEVCONTAINER_APP_NODE_HEAP_MB:-4096}"
@@ -285,9 +310,9 @@ services:
       MONITOR_REDACT_DENY_REASON: ${MONITOR_REDACT_DENY_REASON:-}
       MONITOR_PORT: *monitor-port
       # Bind only to the sandbox IP (shared via the firewall's netns) so the
-      # sidecar is not exposed on the egress-facing interface. The app reaches
-      # it at 172.30.0.2:9199; iptables already scopes INPUT to the subnet.
-      MONITOR_BIND: 172.30.0.2
+      # sidecar is not exposed on the egress-facing interface. The app reaches it
+      # at that IP on the monitor port; iptables already scopes INPUT to the subnet.
+      MONITOR_BIND: ${SANDBOX_IP:-172.30.0.2}
       MONITOR_LOG: /tmp/monitor.jsonl
       AUDIT_LOG: /var/log/claude-audit/audit.jsonl
     network_mode: "service:firewall"
@@ -308,7 +333,7 @@ services:
           "CMD",
           "python3",
           "-c",
-          "import socket; s=socket.create_connection(('172.30.0.2', 9199), timeout=2); s.close()",
+          "import socket; s=socket.create_connection(('${SANDBOX_IP:-172.30.0.2}', 9199), timeout=2); s.close()",
         ]
       # The app waits on monitor health too; probe fast at startup (see firewall).
       interval: 3s
@@ -373,7 +398,7 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+        - subnet: ${SANDBOX_SUBNET:-172.30.0.0/24}
   egress:
     driver: bridge
 

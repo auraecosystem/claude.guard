@@ -64,6 +64,15 @@ def allowlist() -> dict:
     return json.loads(DOMAIN_ALLOWLIST.read_text())
 
 
+def _default(value: str) -> str:
+    """Resolve a compose ``${VAR:-x}`` interpolation to its fallback ``x`` (pass
+    plain values through), so the network-topology tests can assert the octet-0
+    default a bare ``docker compose up`` resolves to. The per-session subnet/IP
+    (bin/lib/sandbox-net.bash) make these values ``${SANDBOX_IP:-…}`` shaped."""
+    m = re.fullmatch(r"\$\{[^:}]+:-(?P<fallback>[^}]*)\}", value)
+    return m.group("fallback") if m else value
+
+
 # ── Security invariants ─────────────────────────────────────────────
 # These test structural properties that must hold regardless of the
 # specific values — if any of these break, isolation is silently lost.
@@ -216,27 +225,60 @@ def test_firewall_bridges_both_networks(compose: dict) -> None:
     assert "sandbox" in networks and "egress" in networks
 
 
+def _firewall_ip(compose: dict) -> str:
+    return _default(
+        compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
+    )
+
+
 def test_app_dns_points_to_firewall(compose: dict) -> None:
-    """App DNS must resolve to the firewall's static IP (wherever it is)."""
-    fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
-    assert fw_ip in compose["services"]["app"]["dns"]
+    """App DNS must resolve to the firewall's IP (parametrized per session, but the
+    app's dns entry and the firewall's ipv4_address share the same interpolation)."""
+    fw_ip = _firewall_ip(compose)
+    assert fw_ip in [_default(d) for d in compose["services"]["app"]["dns"]]
 
 
 def test_app_loads_proxy_env_file(compose: dict) -> None:
     assert compose["services"]["app"]["env_file"] == "proxy.env"
 
 
-def test_proxy_points_to_firewall(compose: dict, proxy_env: dict) -> None:
-    """All proxy env vars must point to the firewall's IP."""
-    fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
+def test_proxy_points_to_firewall(compose: dict) -> None:
+    """All proxy env vars (now in app environment so ${SANDBOX_IP} interpolates,
+    which an env_file cannot) must point to the firewall's IP."""
+    fw_ip = _firewall_ip(compose)
+    env = compose["services"]["app"]["environment"]
     for var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]:
-        assert var in proxy_env, f"{var} missing from proxy.env"
-        assert fw_ip in proxy_env[var], f"{var} does not reference firewall IP {fw_ip}"
+        assert var in env, f"{var} missing from app environment"
+        assert fw_ip in env[var], f"{var} does not reference firewall IP {fw_ip}"
 
 
-def test_no_proxy_includes_firewall(compose: dict, proxy_env: dict) -> None:
+def test_no_proxy_includes_firewall(compose: dict) -> None:
+    fw_ip = _firewall_ip(compose)
+    assert fw_ip in compose["services"]["app"]["environment"]["no_proxy"]
+
+
+def test_sandbox_subnet_and_ip_are_per_session(compose: dict) -> None:
+    """Concurrency depends on the subnet + firewall IP being interpolated from the
+    launcher's allocation (bin/lib/sandbox-net.bash), not hardcoded — otherwise two
+    sessions collide on one /24. The octet-0 fallback preserves the bare-compose
+    default."""
+    subnet = compose["networks"]["sandbox"]["ipam"]["config"][0]["subnet"]
     fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
-    assert fw_ip in proxy_env["no_proxy"]
+    assert (
+        subnet.startswith("${SANDBOX_SUBNET:-") and _default(subnet) == "172.30.0.0/24"
+    )
+    assert fw_ip.startswith("${SANDBOX_IP:-") and _default(fw_ip) == "172.30.0.2"
+
+
+def test_proxy_env_anchor_is_single_source(compose: dict) -> None:
+    """The squid endpoint is defined once (the x-sandbox-proxy-env anchor) and
+    shared by the app and the dependency-fetch hardener, so the two cannot drift."""
+    anchor = compose["x-sandbox-proxy-env"]
+    assert "http_proxy" in anchor
+    for svc in ("app", "hardener"):
+        env = compose["services"][svc]["environment"]
+        for key, val in anchor.items():
+            assert env.get(key) == val, f"{svc} env did not merge proxy anchor {key}"
 
 
 @pytest.mark.parametrize("svc", ["monitor", "ccr"])
@@ -967,19 +1009,23 @@ class TestDangerouslySkipFirewall:
         else:
             assert needle.lower() not in section.lower()
 
-    def test_wrapper_clears_all_proxy_env_vars(self, proxy_env: dict) -> None:
-        """Every proxy var in proxy.env must be cleared by the wrapper's
-        noproxy_flags — otherwise requests fail through the missing squid
-        when the firewall is skipped."""
-        assert proxy_env, "proxy.env is empty — test is stale"
+    def test_wrapper_clears_all_proxy_env_vars(
+        self, compose: dict, proxy_env: dict
+    ) -> None:
+        """Every proxy/CA var the app container gets — the compose proxy anchor plus
+        proxy.env's CA path — must be cleared by the wrapper's noproxy_flags, else
+        requests fail through the missing squid when the firewall is skipped."""
+        proxy_vars = {*compose["x-sandbox-proxy-env"], *proxy_env}
+        assert proxy_vars, "no proxy/CA vars found — test is stale"
 
         noproxy_start = self.wrapper.index("noproxy_flags=")
         noproxy_end = self.wrapper.index("exec docker exec", noproxy_start)
         noproxy_block = self.wrapper[noproxy_start:noproxy_end]
 
-        for var in proxy_env:
+        for var in proxy_vars:
             assert f"-e {var}=" in noproxy_block, (
-                f"proxy.env sets {var} but wrapper does not clear it in noproxy_flags"
+                f"the container gets {var} but the wrapper does not clear it in "
+                "noproxy_flags"
             )
 
 
