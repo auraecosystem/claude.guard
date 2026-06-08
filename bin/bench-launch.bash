@@ -124,6 +124,14 @@ monitor_answering() {
 t_start=$(now_ms)
 "${DC[@]}" build --quiet
 
+# The firewall mounts the shared gh-meta cache (fixed name claude-gh-meta-cache,
+# docker-compose.yml) — a global, non-ephemeral volume a real deployment reuses
+# across sessions rather than one `up` materializes per launch. On a fresh host
+# `up` aborts resolving it ("external volume ... not found") and nothing boots,
+# so create it idempotently before timing. Not part of the launch's own work, so
+# it sits before the up clock.
+docker volume create claude-gh-meta-cache >/dev/null
+
 # One real `up`, backgrounded so we can timestamp milestones as docker brings
 # the stack up in dependency order (a foreground `up -d` blocks until every
 # healthy-gated dependency is satisfied, hiding the intermediate steps). The
