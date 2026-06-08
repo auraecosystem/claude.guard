@@ -8,7 +8,11 @@ that pattern is reliable.
 
 # covers: bin/lib/onboarding.bash
 import os
+import pty
+import select
 import stat
+import subprocess
+import time
 from pathlib import Path
 
 from tests._helpers import REPO_ROOT, mirror_path_excluding, run_capture, write_exe
@@ -216,3 +220,67 @@ def test_gh_app_noninteractive_prints_hint(tmp_path: Path) -> None:
     r = _run(f'onboarding_offer_gh_app "{app}"', env=_cfg(tmp_path))
     assert r.returncode == 0
     assert f"{app} create" in r.stderr
+
+
+def _recording_app(tmp_path: Path) -> tuple[Path, Path]:
+    """A fake github-app binary that appends each subcommand ($1) to a sink, so a
+    test can assert whether `create`/`install` ran. Returns (binary, sink)."""
+    sink = tmp_path / "app-calls"
+    app = write_exe(
+        tmp_path / "claude-github-app",
+        f'#!/bin/sh\nprintf "%s\\n" "$1" >>"{sink}"\n',
+    )
+    return app, sink
+
+
+def _drive_gh_app_pty(tmp_path: Path, app: Path, feed: bytes) -> None:
+    """Run onboarding_offer_gh_app under a real pty (so _ob_interactive's `-t 0`
+    holds) and send `feed` as the user's keystrokes. Use b"\\x04" (Ctrl-D) to
+    signal EOF at the prompt — the same read-returns-non-zero path as a timeout,
+    without waiting out the real 60s."""
+    script = (
+        f'set -euo pipefail\n{_STUBS}source {LIB}\nonboarding_offer_gh_app "{app}"\n'
+    )
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        ["bash", "-c", script],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env={**os.environ, **_cfg(tmp_path)},
+    )
+    os.close(slave)
+    time.sleep(0.3)  # let the prompt's read() arm before sending the keystroke
+    os.write(master, feed)
+    # Drain so the child never blocks on a full pty buffer and can exit cleanly.
+    while select.select([master], [], [], 5)[0]:
+        try:
+            if not os.read(master, 1024):
+                break
+        except OSError:  # slave hung up after the child exited
+            break
+    proc.wait(timeout=10)
+    os.close(master)
+
+
+def test_gh_app_eof_declines_does_not_open_browser(tmp_path: Path) -> None:
+    """Regression: a timed-out/EOF read at the (Y/n) prompt is a DECLINE, not
+    consent. An absent user must not have `create` (which opens a browser) run.
+    Ctrl-D drives the same read-non-zero path as the 60s timeout."""
+    app, sink = _recording_app(tmp_path)
+    _drive_gh_app_pty(tmp_path, app, b"\x04")
+    assert not sink.exists(), "EOF at the prompt must not launch the App-creation flow"
+
+
+def test_gh_app_enter_accepts_default_yes(tmp_path: Path) -> None:
+    """The default is Y: a bare Enter at the prompt runs create + install."""
+    app, sink = _recording_app(tmp_path)
+    _drive_gh_app_pty(tmp_path, app, b"\n")
+    assert sink.read_text().split() == ["create", "install"]
+
+
+def test_gh_app_explicit_no_declines(tmp_path: Path) -> None:
+    """Typing 'n' declines: neither create nor install runs."""
+    app, sink = _recording_app(tmp_path)
+    _drive_gh_app_pty(tmp_path, app, b"n\n")
+    assert not sink.exists()
