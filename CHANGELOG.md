@@ -40,6 +40,15 @@ adhere to [Semantic Versioning](https://semver.org/).
   so the agent drops straight to the prompt. Only the narrow host setup-token enters
   the sandbox, and the seeded file is deleted shortly after startup. Headless
   `claude -p` is unchanged (still injected as the env var).
+- `setup.bash` now prints the exact paste-ready `export PATH=…` command(s) to
+  activate a freshly updated PATH in the current shell, instead of telling you
+  to run `exec $SHELL`. A child process can't mutate its parent shell, so one
+  copy-paste (or a new terminal) is still required — but it no longer forces a
+  full shell reload.
+- When an earlier-PATH `claude` actively shadows the installed alias, the
+  end-of-setup hint now follows up with a loud boxed alert naming the unguarded
+  binary, so the dangerous "typing `claude` bypasses the sandbox until you
+  reload" window can't be skimmed past.
 
 ### Fixed
 
