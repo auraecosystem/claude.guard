@@ -44,7 +44,12 @@ brew install alexander-turner/tap/claude-guard
    Commit and push the tap. `brew install alexander-turner/tap/claude-guard`
    now resolves the new version.
 
-The formula installs the wrapper and sandbox stack but does **not** provision
-Docker or the npm-distributed CLIs; its `caveats` point the user at those and at
-`claude-guard doctor`. The bundled `setup.bash` remains the full provisioning
-path for a source install.
+The formula installs the wrapper and sandbox stack, the `devcontainer` CLI
+(homebrew-core's `@devcontainers/cli`), and `bash`/`git`/`jq`/`node`. The
+container runtime and the host Claude Code CLI are **not** `depends_on`, because
+OrbStack, Docker Desktop, and the `claude-code` CLI are casks (formulae can't
+depend on casks, and casks are macOS-only), Homebrew deps are unconditional, and
+a brew `docker` would collide with the apt engine on Linux. The bundled
+`setup.bash` detects an existing runtime and provisions one only when missing;
+the formula's `caveats` point the user at it, the optional `claude-code` cask,
+`claude setup-token`, and `claude-guard doctor`.

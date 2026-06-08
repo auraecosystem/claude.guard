@@ -11,10 +11,22 @@ class ClaudeGuard < Formula
 
   # The host wrapper is bash with associative arrays and ${var,,}; macOS ships
   # bash 3.2, so a modern bash must win on PATH. jq parses the firewall
-  # allowlist; git drives the worktree/snapshot features.
+  # allowlist; git drives the worktree/snapshot features; node/npm back pnpm and
+  # the in-image install. `devcontainer` is homebrew-core's @devcontainers/cli,
+  # the one host CLI the launcher shells out to — so depend on it directly.
+  #
+  # The container daemon (Docker engine / Colima / OrbStack / Docker Desktop)
+  # and the host Claude Code CLI are NOT depends_on: OrbStack, Docker Desktop,
+  # and the `claude-code` CLI are casks (a formula cannot depend on a cask, and
+  # casks are macOS-only), brew deps are unconditional (no "install only if a
+  # runtime is missing"), and a brew `docker` would collide with the apt engine
+  # on Linux. The bundled setup.bash detects an existing runtime and provisions
+  # the rest platform-correctly, only when absent — see caveats.
   depends_on "bash"
+  depends_on "devcontainer"
   depends_on "git"
   depends_on "jq"
+  depends_on "node"
 
   def install
     # The launcher builds the sandbox image locally (a Homebrew install is not a
@@ -39,15 +51,21 @@ class ClaudeGuard < Formula
 
   def caveats
     <<~EOS
-      claude-guard installs the host CLI and sandbox stack. Before first use you
-      also need, on the host:
-        - Docker running (Docker Desktop, Colima, or OrbStack)
-        - the Claude Code and devcontainer CLIs:
-            pnpm add -g @anthropic-ai/claude-code @devcontainers/cli
-        - a captured Claude auth token:
-            claude setup-token
+      claude-guard and the devcontainer CLI are installed. The container runtime
+      is not a brew dependency (OrbStack/Docker Desktop are casks; brew deps are
+      unconditional), so run the bundled provisioner once — it detects an
+      existing Docker Desktop / OrbStack / Colima and only installs a runtime
+      when none is found (idempotent; prompts per install, or SCCD_ASSUME_YES=1):
 
-      Verify the full protection state with:
+        #{opt_libexec}/setup.bash
+
+      The pinned `claude` that runs your session lives in the sandbox image. For
+      a host `claude` (for `claude setup-token` and --dangerously-skip-container)
+      on macOS:  brew install --cask claude-code
+
+      Then capture an auth token and verify protection:
+
+        claude setup-token
         claude-guard doctor
 
       To route the bare `claude` command through the sandbox, add to your shell
