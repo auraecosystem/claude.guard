@@ -1160,7 +1160,13 @@ class TestBakedGuardrails:
         """The wired .mjs hooks import production deps resolved by walking up to
         /opt/claude-guard/node_modules, so the bake must install them."""
         assert "pnpm install --prod" in self.dockerfile
-        assert "package.json pnpm-lock.yaml /opt/claude-guard/" in self.dockerfile
+        assert (
+            "package.json pnpm-lock.yaml pnpm-workspace.yaml /opt/claude-guard/"
+            in self.dockerfile
+        )
+        # pnpm-workspace.yaml's patchedDependencies points at patches/, which the
+        # frozen install needs on disk or it aborts on a config/lockfile mismatch.
+        assert "patches /opt/claude-guard/patches/" in self.dockerfile
 
     def test_dockerfile_strips_test_artifacts_from_bake(self) -> None:
         """The whole-dir hooks COPY pulls in *.test.mjs + the test helper + bytecode

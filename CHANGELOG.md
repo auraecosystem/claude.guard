@@ -24,6 +24,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Upgraded the project's pinned `pnpm` from 10.28.1 to 11.5.2. pnpm 11 promotes
+  ignored dependency build scripts to a fatal install error, so a root
+  `pnpm-workspace.yaml` now records `@anthropic-ai/claude-code`'s build script as
+  explicitly skipped (the devcontainer builds it separately with `--allow-build`),
+  and the devcontainer's global pnpm bin directory moved to `$PNPM_HOME/bin`.
 - The launcher now prefers an existing local sandbox image build over pulling the
   prebuilt from GHCR: when the `<service>:local` image set is already on disk, it
   is used instead of re-pulling and re-verifying the prebuilt for the same commit.

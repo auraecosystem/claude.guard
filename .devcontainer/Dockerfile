@@ -118,13 +118,15 @@ ENV COREPACK_HOME=/usr/local/share/corepack
 RUN mkdir -p "$COREPACK_HOME" && \
   npm install -g corepack@latest && \
   corepack enable && \
-  corepack prepare pnpm@10 --activate && \
+  corepack prepare pnpm@11 --activate && \
   chmod -R a+rX "$COREPACK_HOME"
 
 USER node
 
 ENV PNPM_HOME=/usr/local/share/pnpm-global
-ENV PATH=$PATH:$PNPM_HOME
+# pnpm 11 installs global binaries under $PNPM_HOME/bin and hard-errors on
+# `pnpm add -g` if that dir isn't on PATH (ERR: "global bin directory not in PATH").
+ENV PATH=$PATH:$PNPM_HOME/bin
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true
 
 ENV EDITOR=nano
@@ -204,7 +206,12 @@ COPY --from=guard-src user-config/settings.json /opt/claude-guard/user-config/se
 # hadolint ignore=DL3022
 COPY --from=guard-src bin/merge-user-settings.sh /opt/claude-guard/bin/merge-user-settings.sh
 # hadolint ignore=DL3022
-COPY --from=guard-src package.json pnpm-lock.yaml /opt/claude-guard/
+COPY --from=guard-src package.json pnpm-lock.yaml pnpm-workspace.yaml /opt/claude-guard/
+# pnpm-workspace.yaml carries patchedDependencies; the frozen install below errors
+# on a config/lockfile mismatch unless that config and the patch it points to are
+# both present, even though the patched dep (yargs, via c8) is dev-only.
+# hadolint ignore=DL3022
+COPY --from=guard-src patches /opt/claude-guard/patches/
 COPY harden-monitor.bash monitor-policy.txt domain-allowlist.json /opt/claude-guard/.devcontainer/
 # The wired .mjs hooks import production deps (remark/rehype/unified/strip-ansi/...);
 # Node resolves them by walking up from the hooks dir to /opt/claude-guard/node_modules.
@@ -222,7 +229,8 @@ COPY harden-monitor.bash monitor-policy.txt domain-allowlist.json /opt/claude-gu
 RUN --mount=type=cache,target=/root/.pnpm-store,sharing=locked \
     cd /opt/claude-guard && \
     pnpm install --prod --frozen-lockfile --ignore-scripts --store-dir /root/.pnpm-store && \
-    rm -f /opt/claude-guard/package.json /opt/claude-guard/pnpm-lock.yaml \
+    rm -rf /opt/claude-guard/package.json /opt/claude-guard/pnpm-lock.yaml \
+      /opt/claude-guard/pnpm-workspace.yaml /opt/claude-guard/patches \
       /opt/claude-guard/.claude/hooks/*.test.mjs \
       /opt/claude-guard/.claude/hooks/test-helpers.mjs && \
     find /opt/claude-guard -depth -type d -name __pycache__ -exec rm -rf {} +
