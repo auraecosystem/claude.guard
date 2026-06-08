@@ -300,7 +300,9 @@ def _fake_provider(chk, monkeypatch, provider="anthropic", model="haiku"):
 def test_make_history_entry_basic(chk, monkeypatch):
     _fake_provider(chk, monkeypatch)
     entry = chk.make_history_entry(_run(1), live=None, commit_sha="abc1234567")
-    assert entry["connections"] == 1
+    # The connection count is a constant (always 1) gated via the baseline, not a
+    # trend — it is deliberately NOT recorded in the rolling history.
+    assert "connections" not in entry
     assert entry["commit_sha"] == "abc1234"
     assert entry["provider"] == "anthropic"
     assert "live_warm_p50_ms" not in entry
@@ -849,6 +851,21 @@ def test_armor_section_live_skipped(chk):
     armor = {"calls": 8, "nokey_p50_ms": 12.5, "live_skipped": "no key"}
     text = chk.armor_section(armor)
     assert "live run skipped (no key)" in text
+
+
+def test_armor_section_live_shows_cost_cap(chk):
+    # live cost fields present -> the calls/cost-cap clause is appended.
+    armor = {
+        "calls": 10,
+        "nokey_p50_ms": 12.5,
+        "live_p50_ms": 220.0,
+        "live_calls": 6,
+        "live_max_cost_usd": 0.0496,
+        "cost_limit_usd": 0.05,
+    }
+    text = chk.armor_section(armor)
+    assert "live filter p50 **220.0 ms**" in text
+    assert "(6 calls, ≤ $0.0496 of $0.05 cap)" in text
 
 
 def test_compare_appends_armor_section(chk):

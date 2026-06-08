@@ -18,6 +18,8 @@ _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_self_dir/guard-dir.bash"
 # shellcheck source=deps-install.bash disable=SC1091
 source "$_self_dir/deps-install.bash"
+# shellcheck source=credential-scan.bash disable=SC1091
+source "$_self_dir/credential-scan.bash"
 if ! GUARD_DIR="$(resolve_guard_dir "$WORKSPACE" "$BAKED_GUARD_DIR")"; then
   exit 1
 fi
@@ -47,20 +49,7 @@ echo "Scanning workspace for credential files..."
 CRED_FILES=()
 while IFS= read -r -d '' f; do
   CRED_FILES+=("$f")
-done < <(find "$WORKSPACE" \
-  \( -name '.env' -o -name '.env.*' -o -name '*.pem' \
-  -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \
-  -o -name 'credentials' -o -name 'credentials.json' \
-  -o -name '.netrc' -o -name '.npmrc' -o -name '.pypirc' \
-  -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*.keystore' \
-  -o -name 'service-account*.json' -o -name 'gcloud-*.json' \
-  -o -name 'terraform.tfstate' -o -name 'terraform.tfstate.backup' \
-  -o -name '.vault-token' \) \
-  -not -path '*/node_modules/*' -not -path '*/.git/*' \
-  -not -path '*/.venv/*' -not -path '*/venv/*' \
-  -not -path '*/__pycache__/*' -not -path '*/.tox/*' \
-  -not -path '*/vendor/*' -not -path '*/.cache/*' \
-  -print0 2>/dev/null)
+done < <(scan_credential_files "$WORKSPACE")
 
 if [[ ${#CRED_FILES[@]} -gt 0 ]]; then
   UNIGNORED=()
@@ -169,12 +158,10 @@ echo "Lockdown complete."
 # Signal completion via the shared /run/hardening volume (writable here, read-only
 # in the app); the dispatcher and lib-checks gate on it. (Compose gates the app on
 # this container's exit 0 via service_completed_successfully, not on the sentinel.)
-# Reaching this line means every step succeeded (set -e), so it's only written on
-# a fully successful run.
-# Best-effort: the smoke test re-runs this in the app container where the mount is
-# read-only — failing there must not abort the test (nothing reads it there). In
-# the real hardener the mount is writable; a genuinely missing dir warns rather
-# than silently skipping.
+# Reaching this line means every step succeeded under set -e, so it's only written
+# on success. Best-effort: the smoke test re-runs this in the app container's
+# read-only mount, where the write fails harmlessly (nothing reads it there); a
+# genuinely missing dir in the real (writable) hardener warns rather than skipping.
 SENTINEL_DIR="/run/hardening"
 SENTINEL="$SENTINEL_DIR/complete"
 if mkdir -p "$SENTINEL_DIR" 2>/dev/null && touch "$SENTINEL" 2>/dev/null; then

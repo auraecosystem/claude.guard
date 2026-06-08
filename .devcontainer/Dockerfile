@@ -98,6 +98,18 @@ ENV DEVCONTAINER=true
 RUN mkdir -p /workspace /home/node/.claude && \
   chown -R node:node /workspace /home/node/.claude
 
+# The bind-mounted /workspace presents the HOST checkout's ownership — we deliberately
+# never chown it onto the host (that leaked root onto the host; see entrypoint.bash and
+# the read-only-overmount model). Whether that ownership maps to node's uid 1000 inside
+# the container depends on the Docker file-sharing backend, and it does NOT always —
+# observed on a native macOS host as well as on Linux checkouts owned by uid != 1000.
+# When it doesn't match, git as node rejects /workspace with "dubious ownership",
+# breaking session-setup's git calls (core.hooksPath, fetch, remote) and Claude Code's
+# own git use. Trust /workspace explicitly via the system gitconfig; scoped to the one
+# path (not "*") and touching no host ownership, so it neither weakens git's protection
+# elsewhere nor regresses the overmount model. Harmless when ownership already matches.
+RUN git config --system --add safe.directory /workspace
+
 WORKDIR /workspace
 
 ENV COREPACK_HOME=/usr/local/share/corepack
@@ -129,7 +141,7 @@ RUN --mount=type=cache,uid=1000,gid=1000,target=/home/node/.pnpm-store,sharing=l
     NPM_CONFIG_IGNORE_SCRIPTS=false pnpm add -g --store-dir /home/node/.pnpm-store \
     --allow-build=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-COPY init-firewall.bash expand-allowlist.bash firewall-lib.bash rotate-egress-log.bash entrypoint.bash guard-dir.bash deps-install.bash install-claude.bash domain-allowlist.json /usr/local/bin/
+COPY init-firewall.bash expand-allowlist.bash firewall-lib.bash rotate-egress-log.bash entrypoint.bash guard-dir.bash deps-install.bash credential-scan.bash install-claude.bash domain-allowlist.json /usr/local/bin/
 USER root
 RUN chmod +x /usr/local/bin/init-firewall.bash /usr/local/bin/expand-allowlist.bash /usr/local/bin/rotate-egress-log.bash /usr/local/bin/entrypoint.bash /usr/local/bin/install-claude.bash
 

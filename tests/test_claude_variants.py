@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import git_env, init_test_repo, write_exe
+from tests._helpers import git_env, init_test_repo, stub_envchain, write_exe
 
 REPO_ROOT = Path(
     subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
@@ -299,6 +299,33 @@ def test_paranoid_fails_closed_without_venice_key(tmp_path: Path) -> None:
     assert "https://venice.ai" in r.stderr
 
 
+def test_e2ee_resolves_venice_key_from_envchain_namespace(tmp_path: Path) -> None:
+    """--privacy e2ee picks up VENICE_INFERENCE_KEY from envchain (e.g. the 'ai'
+    namespace) when the var is absent from the environment."""
+    stub_dir = tmp_path / "stubs"
+    stub_envchain(
+        stub_dir, "ai", "test-venice-from-envchain", var="VENICE_INFERENCE_KEY"
+    )
+    env = {
+        **os.environ,
+        "CLAUDE_PRIVATE_DRY_RUN": "1",
+        "VENICE_CACHE_DIR": str(tmp_path / "cache"),
+        "VENICE_MODELS_URL": "http://127.0.0.1:1/models",
+        "VENICE_INFERENCE_KEY": "",
+        "PATH": f"{stub_dir}:{os.environ['PATH']}",
+    }
+    r = subprocess.run(
+        [str(CLAUDE_GUARD), "--privacy", "e2ee"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "VENICE_INFERENCE_KEY is required" not in r.stderr
+    assert "envchain namespace 'ai'" in r.stderr
+
+
 def test_paranoid_nosandbox_unreachable_ccr_fails_closed(tmp_path: Path) -> None:
     """With DANGEROUSLY_SKIP_CONTAINER=1 and no dry-run, --privacy e2ee must abort on
     an unreachable ccr (exit 1) instead of exec-ing claude against a dead sidecar."""
@@ -474,13 +501,6 @@ def test_resolver_caches_resolved_id_or_fallback(
         curl = bindir / "curl"
         curl.write_text(f"#!/bin/bash\nprintf '%s' {shlex.quote(payload)}\n")
         curl.chmod(0o755)
-        # The resolver parses the response via `uv run python3 -c …`. Stub uv as
-        # a passthrough to the rest of its argv (dropping the `run` subcommand)
-        # so the test resolves without depending on uv being installed — the
-        # smoke-tests CI runner installs deps via pip, not uv.
-        uv = bindir / "uv"
-        uv.write_text('#!/bin/bash\n[ "$1" = run ] && shift\nexec "$@"\n')
-        uv.chmod(0o755)
         env["PATH"] = f"{bindir}:{os.environ['PATH']}"
     _cache_venice(env)
     assert (cache_dir / "default_code").read_text().strip() == expected
@@ -503,16 +523,12 @@ def test_cache_trait_alerts_on_fallback(tmp_path: Path) -> None:
 
 
 def _fake_venice_bin(tmp_path: Path, payload: dict) -> "tuple[Path, dict[str, str]]":
-    """A fakebin dir whose curl emits ``payload`` and whose uv is a passthrough,
-    plus the cache dir, returned as (cache_dir, env)."""
+    """A fakebin dir whose curl emits ``payload``, plus the cache dir, returned as (cache_dir, env)."""
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
     curl = bindir / "curl"
     curl.write_text(f"#!/bin/bash\nprintf '%s' {shlex.quote(json.dumps(payload))}\n")
     curl.chmod(0o755)
-    uv = bindir / "uv"
-    uv.write_text('#!/bin/bash\n[ "$1" = run ] && shift\nexec "$@"\n')
-    uv.chmod(0o755)
     cache_dir = tmp_path / "cache"
     env = {
         **os.environ,

@@ -2,12 +2,10 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-# Fail loudly and locatably. With set -e a denied syscall — e.g. a chmod that
-# needs a capability the firewall service dropped — aborts with only the failing
-# tool's terse stderr and no context, which surfaces downstream as an opaque
-# launch hang (the firewall healthcheck never flips, so every dependent service
-# waits out the timeout). Name the script, line, and command so `docker logs
-# <firewall>` shows the real cause. set -E propagates the trap into functions.
+# Fail loudly and locatably. With set -e a denied syscall (e.g. a chmod needing a
+# capability the firewall service dropped) aborts with only terse stderr, surfacing
+# as an opaque launch hang (the healthcheck never flips). Name script/line/command
+# so `docker logs <firewall>` shows the cause. set -E propagates the trap into functions.
 trap 'echo "init-firewall.bash: FAILED at line ${LINENO} running: ${BASH_COMMAND}" >&2' ERR
 
 # Where there is no controlled external egress (CI runners, the cap check), the
@@ -56,9 +54,9 @@ if [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]]; then
   echo "WARNING: Firewall disabled (--dangerously-skip-firewall)"
   echo "The model has UNRESTRICTED internet access."
   echo "================================================================"
-  # App DNS points here (172.30.0.2): run a forwarding-only dnsmasq so DNS still
+  # App DNS points at the firewall IP: run a forwarding-only dnsmasq so DNS still
   # works, skip everything else.
-  SANDBOX_IP="172.30.0.2"
+  SANDBOX_IP="${SANDBOX_IP:-172.30.0.2}"
   DOCKER_DNS=$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf)
   if [[ -z "$DOCKER_DNS" ]]; then
     echo "ERROR: no nameserver in /etc/resolv.conf — cannot configure DNS forwarding"
@@ -172,13 +170,14 @@ fi
 # Temporarily allow DNS for initial resolution + the verification curls below
 # (resolv.conf is repointed at local dnsmasq only at the DNS lockdown step).
 # Scope to the Docker resolver, not any host:53, so the bootstrap window isn't a
-# blanket DNS-egress hole; fall back to unscoped if the resolver is unknown.
+# blanket DNS-egress hole. If resolv.conf names no resolver, scope to loopback
+# (Docker's embedded resolver lives at 127.0.0.11) rather than leaving :53
+# unscoped — a working container always names a resolver here, so this only
+# narrows the abnormal no-nameserver case, it never breaks real DNS.
 DNS_SERVER=$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf || true)
-dns_dst=() dns_src=()
-if [[ -n "$DNS_SERVER" ]]; then
-  dns_dst=(-d "$DNS_SERVER")
-  dns_src=(-s "$DNS_SERVER")
-fi
+dns_scope="${DNS_SERVER:-127.0.0.0/8}"
+dns_dst=(-d "$dns_scope")
+dns_src=(-s "$dns_scope")
 iptables -A OUTPUT -p udp --dport 53 "${dns_dst[@]+"${dns_dst[@]}"}" -j ACCEPT
 iptables -A INPUT -p udp --sport 53 "${dns_src[@]+"${dns_src[@]}"}" -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 "${dns_dst[@]+"${dns_dst[@]}"}" -j ACCEPT
@@ -276,7 +275,8 @@ mkdir -p "$(dirname "$ALLOWLIST_OVERLAY")"
 : >"$ALLOWLIST_OVERLAY"
 chmod 600 "$ALLOWLIST_OVERLAY"
 
-SANDBOX_IP="172.30.0.2"
+SANDBOX_IP="${SANDBOX_IP:-172.30.0.2}"
+SANDBOX_SUBNET="${SANDBOX_SUBNET:-172.30.0.0/24}"
 
 cat >/etc/dnsmasq.conf <<DNSMASQ_BASE
 no-resolv
@@ -355,10 +355,10 @@ iptables -P OUTPUT DROP
 
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport 3128 -j ACCEPT
-iptables -A INPUT -s 172.30.0.0/24 -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport "${MONITOR_PORT:-9199}" -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p tcp --dport 3128 -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p udp --dport 53 -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p tcp --dport 53 -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p tcp --dport "${MONITOR_PORT:-9199}" -j ACCEPT
 
 # Refuse egress to internal/metadata ranges at the packet layer, regardless of
 # what the allowed-domains ipset holds — a backstop for ingestion paths that do
@@ -369,7 +369,7 @@ iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport "${MONITOR_PORT:-9199}" -j ACC
 # Placed before the allowed-domains ACCEPT so a bogon can't fall through to it;
 # allowed-domains only ever hold public IPs, so this never shadows the quota rule.
 iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
-iptables -A OUTPUT -d 172.30.0.0/24 -j ACCEPT
+iptables -A OUTPUT -d "$SANDBOX_SUBNET" -j ACCEPT
 for _bogon in "${BOGON_CIDRS[@]}"; do
   iptables -A OUTPUT -d "$_bogon" -j DROP
 done
@@ -407,20 +407,37 @@ echo "Firewall configuration complete"
 if [[ "$SKIP_VERIFY" == "1" ]]; then
   echo "Skipping egress reachability verification (SCCD_FIREWALL_SKIP_VERIFY=1 — no controlled external egress here)"
 else
-  echo "Verifying firewall rules..."
-  if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
+  echo "Verifying firewall rules (deny + allow probes in parallel)..."
+  # Run both probes concurrently so the deny probe's wait overlaps the allow probe
+  # instead of serializing: on a correctly-DROP-ing firewall the deny probe never
+  # receives a SYN-ACK and so spends its whole connect-timeout, which would otherwise
+  # be dead time before the allow probe even started.
+  #
+  # The deny probe uses a SHORTER connect-timeout (2s) than the allow probe (5s): a
+  # genuinely-reachable host completes its TCP handshake in well under a second, so 2s
+  # still CATCHES a real egress leak while not paying curl's longer wait on the block
+  # we expect. The allow probe keeps the generous 5s so a slow-but-working path doesn't
+  # false-fail and abort a legitimate launch.
+  curl --connect-timeout 2 https://example.com >/dev/null 2>&1 &
+  _deny_pid=$!
+  curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1 &
+  _allow_pid=$!
+  # `if wait` keeps a probe's non-zero exit from tripping `set -e`; curl exits 0 only
+  # when it actually connected, so these flags read the reachability off it directly.
+  _deny_reachable=0
+  if wait "$_deny_pid"; then _deny_reachable=1; fi
+  _allow_ok=0
+  if wait "$_allow_pid"; then _allow_ok=1; fi
+  if [[ "$_deny_reachable" == 1 ]]; then
     echo "ERROR: Firewall verification failed - was able to reach https://example.com"
     exit 1
-  else
-    echo "Firewall verification passed - unable to reach https://example.com as expected"
   fi
-
-  if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
+  echo "Firewall verification passed - unable to reach https://example.com as expected"
+  if [[ "$_allow_ok" != 1 ]]; then
     echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"
     exit 1
-  else
-    echo "Firewall verification passed - able to reach https://api.github.com as expected"
   fi
+  echo "Firewall verification passed - able to reach https://api.github.com as expected"
 fi
 
 # === DNS lockdown ===
@@ -514,23 +531,18 @@ set_mode_then_owner 644 root:proxy "$SQUID_ERR_DIR/ERR_SCCD_READONLY"
 # Lock down squid configs — node user cannot read or modify
 set_mode_then_owner 640 root:proxy "$SQUID_CONF" "$RO_DOMAINS" "$RW_DOMAINS"
 
-# squid (running as proxy) must be able to write access.log into its log dir. The image
-# bakes /var/log/squid as proxy:proxy 750, so the egress-log volume mount is already
-# proxy-owned (fresh: seeded from the image; persisted: from the prior init).
-# prepare_squid_log_dir (firewall-lib.bash) just verifies that and fails loud otherwise —
-# it never chmods/chowns, which the firewall can't do without CAP_FOWNER and which some
-# volume backends silently ignore.
+# squid (proxy) writes access.log here. The image bakes /var/log/squid proxy:proxy
+# 750, so the volume mount is already proxy-owned. prepare_squid_log_dir verifies
+# that and fails loud otherwise; it never chmods/chowns (the firewall lacks
+# CAP_FOWNER, and some volume backends ignore an in-container chown).
 prepare_squid_log_dir /var/log/squid
 
-# Validate the generated config before starting squid, and surface squid's own
-# diagnostics on failure instead of hiding them (the old 2>/dev/null swallowed
-# the reason a bad directive broke the proxy). No CI job runs this config — the
-# compose-lifecycle smoke stubs init-firewall — so this per-launch parse is the
-# first place a squid.conf regression is caught. Abort on a parse failure rather
-# than starting squid anyway: a non-fatal parse warning would otherwise launch a
-# proxy the "will not start" message claims it won't. Exiting non-zero fails the
-# firewall healthcheck and the launch (fail-closed: a broken proxy gets no
-# session).
+# Validate the generated config before starting squid, surfacing squid's own
+# diagnostics on failure. No CI job runs this config — the compose-lifecycle smoke
+# stubs init-firewall — so this per-launch parse is the first place a squid.conf
+# regression is caught. Abort on parse failure rather than starting squid anyway
+# (a non-fatal parse warning would otherwise launch a proxy that won't serve);
+# exiting non-zero fails the firewall healthcheck and the launch (fail-closed).
 if squid_parse_out=$(squid -k parse 2>&1); then
   echo "squid config valid"
 else
@@ -612,16 +624,21 @@ else
       # sheds — both opened in the window above — so a domain the embedded resolver
       # drops is recovered this cycle (via retry or fallback) instead of being evicted
       # on the swap below.
-      local _rdomain _rip
+      local _rdomain _rip _resolved=0
       while IFS=$'\t' read -r _rdomain _rip; do
         ipset add "$new_set" "$_rip" 2>/dev/null || true
         echo "address=/$_rdomain/$_rip" >>"$new_conf"
+        _resolved=$((_resolved + 1))
       done < <(resolve_with_fallback "$DOCKER_DNS" "${DNS_BATCH_SIZE:-30}" "${!_cycle_access[@]}")
       close_dns_window
 
-      # Atomic swap, then destroy the now-old set. Skip the swap on an empty set
-      # (e.g. total DNS outage) so we never blow away a working allowlist.
-      if [[ "$(ipset list "$new_set" 2>/dev/null | grep -c '^[0-9]')" -gt 0 ]]; then
+      # Atomic swap, then destroy the now-old set. Skip the swap when nothing
+      # resolved this cycle (e.g. total DNS outage) so we never blow away a working
+      # allowlist. Gating on the resolution count — not the set size — is
+      # load-bearing: new_set is pre-seeded with the carried-forward GitHub CIDRs,
+      # so a size check would pass on a total outage and still evict every
+      # DNS-resolved IP from the live set.
+      if [[ "$_resolved" -gt 0 ]]; then
         ipset swap "$new_set" allowed-domains
       fi
       ipset destroy "$new_set" 2>/dev/null || true

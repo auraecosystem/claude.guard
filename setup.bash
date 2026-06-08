@@ -16,6 +16,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_ARGS=("$@")
 
+# True when setup.bash runs from a Homebrew install (under Cellar or the opt
+# symlink, both rooted at .../libexec), where brew already owns the on-PATH
+# wrappers, shell completions, and man page. We still provision prerequisites and
+# the runtime, but skip re-linking those — a ~/.local/bin symlink into the
+# versioned Cellar would dangle on `brew upgrade`, and the completion/man/PATH
+# edits would duplicate brew's. A source checkout runs setup.bash from the repo
+# root, never .../libexec, so this is false there.
+running_from_homebrew() {
+  case "$SCRIPT_DIR" in
+  */Cellar/claude-guard/*/libexec | */opt/claude-guard/libexec) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 # Wrapper scripts under bin/ that get symlinked into ~/.local/bin (and removed
 # on --uninstall). Update once; both loops below pick it up.
 WRAPPER_SCRIPTS=(
@@ -287,6 +301,92 @@ if "$UNINSTALL"; then
   run_uninstall
 fi
 
+# ensure_modern_bash — install bash ≥ 5 via the OS package manager if the
+# running shell is older, then re-exec setup.bash under the new binary.
+# Must stay bash 3.2-compatible: it runs before any bash-5 features can appear.
+# On macOS the system bash is frozen at 3.2 (Apple's GPL2 licensing choice);
+# `brew install bash` installs 5.x into the brew prefix.
+ensure_modern_bash() {
+  [[ ${BASH_VERSINFO[0]} -ge 5 ]] && return 0
+
+  local pm
+  pm="$(detect_pkg_manager)"
+  if [[ -z "$pm" ]]; then
+    warn "No package manager found; please install bash ≥ 5 manually, then re-run setup.bash."
+    return 0
+  fi
+
+  # offer_install short-circuits when the binary already exists, but here bash IS
+  # installed — just an old version. Prompt directly and call pkg_run_install.
+  local cmd reply
+  cmd="$(pkg_install_cmd "$pm" bash 2>/dev/null)" || cmd="$pm install bash"
+  if [[ "${SCCD_ASSUME_YES:-}" == 1 ]]; then
+    status "bash ${BASH_VERSION} < 5.0; installing modern bash via $pm..."
+    pkg_run_install "$pm" bash || {
+      warn "Could not install bash ≥ 5; please install it manually, then re-run setup.bash."
+      return 0
+    }
+  elif [[ -t 0 ]]; then
+    printf '!! bash %s is below 5.0 — bash ≥ 5 is needed. Install via %s (%s)? [Y/n] ' \
+      "$BASH_VERSION" "$pm" "$cmd" >&2
+    read -r reply
+    if [[ ! "$reply" =~ ^[Nn] ]]; then
+      pkg_run_install "$pm" bash || {
+        warn "Could not install bash ≥ 5; please install it manually, then re-run setup.bash."
+        return 0
+      }
+    else
+      warn "Skipping bash upgrade; bash ≥ 5 is needed — re-run setup.bash to install."
+      return 0
+    fi
+  else
+    warn "bash ${BASH_VERSION} < 5.0 and no TTY for prompt; run: $cmd, then re-run setup.bash."
+    return 0
+  fi
+
+  # On macOS/Homebrew the new binary lands in the brew prefix, which may not be
+  # in PATH yet (depends on when the shell profile runs). Check there first.
+  local new_bash=""
+  if [[ "$pm" == "brew" ]]; then
+    local brew_bash
+    brew_bash="$(brew --prefix 2>/dev/null)/bin/bash"
+    [[ -x "$brew_bash" ]] && new_bash="$brew_bash"
+  fi
+  [[ -z "$new_bash" ]] && new_bash="$(command -v bash 2>/dev/null || true)"
+  if [[ -z "$new_bash" ]]; then
+    warn "Cannot locate new bash binary; please re-run setup.bash manually."
+    return 0
+  fi
+
+  local ver
+  # shellcheck disable=SC2016  # single quotes intentional: expand in $new_bash, not here
+  ver="$("$new_bash" -c 'echo ${BASH_VERSINFO[0]}')"
+  if [[ "$ver" -lt 5 ]]; then
+    warn "Newly installed bash reports version $ver < 5; please re-run setup.bash after installing bash ≥ 5."
+    return 0
+  fi
+
+  # Put the new bash first on PATH for the re-exec'd run and its children
+  # (prewarm, the final doctor), not just future shells — else they re-resolve
+  # the old bash and the doctor reports a false DEGRADED.
+  local new_bash_dir
+  new_bash_dir="$(dirname "$new_bash")"
+  case ":$PATH:" in
+  *":$new_bash_dir:"*) ;;
+  *) export PATH="$new_bash_dir:$PATH" ;;
+  esac
+
+  status "Re-launching setup under bash $("$new_bash" --version | head -1 | cut -d' ' -f1-4)..."
+  # Pass original args through. The (( ${#arr} )) guard keeps this 3.2-safe
+  # with set -u: ${#SCRIPT_ARGS[@]} is always a number even for empty arrays.
+  if ((${#SCRIPT_ARGS[@]})); then
+    exec "$new_bash" "$SCRIPT_DIR/setup.bash" "${SCRIPT_ARGS[@]}"
+  else
+    exec "$new_bash" "$SCRIPT_DIR/setup.bash"
+  fi
+}
+ensure_modern_bash
+
 # ── Prerequisites ──────────────────────────────────────────────────────────
 section "Prerequisites"
 # Offer to install the host tools that have a real package. jq and curl are
@@ -374,14 +474,18 @@ if ! command_exists cosign; then
     warn "cosign not installed (optional — prebuilt images fall back to a local build)."
 fi
 
-status "Linking wrapper scripts into ~/.local/bin/..."
+if running_from_homebrew; then
+  status "Homebrew install — wrappers, completions, and man page are managed by brew; skipping ~/.local/bin links."
+else
+  status "Linking wrapper scripts into ~/.local/bin/..."
 
-mkdir -p "$HOME/.local/bin"
-for script in "${WRAPPER_SCRIPTS[@]}"; do
-  safe_symlink "$SCRIPT_DIR/bin/$script" \
-    "$HOME/.local/bin/$script" "$script"
-done
-maybe_link_claude_alias
+  mkdir -p "$HOME/.local/bin"
+  for script in "${WRAPPER_SCRIPTS[@]}"; do
+    safe_symlink "$SCRIPT_DIR/bin/$script" \
+      "$HOME/.local/bin/$script" "$script"
+  done
+  maybe_link_claude_alias
+fi
 
 # macOS lacks GNU `timeout`, which the claude wrapper uses to bound `devcontainer
 # up`. Homebrew's coreutils ships it as `gtimeout`; install that and expose a
@@ -663,11 +767,17 @@ onboarding_offer_claude_auth
 onboarding_offer_gh_app "$SCRIPT_DIR/bin/claude-github-app"
 
 # ── PATH precedence ─────────────────────────────────────────────────────────
+# True once ensure_path_precedence finds the live shell's PATH stale; consumed by
+# print_shell_activation_hint after the final doctor.
+_SHELL_PATH_STALE=false
+
 # Append `line` to the user's shell `profile` under a one-time `marker`, unless
 # the marker is already present (idempotent across re-runs). `label` names the
-# entry for the status/warn lines.
+# entry for the status lines. Callers reach here only when the live shell lacks
+# the entry, so flag the shell stale (see print_shell_activation_hint).
 append_path_entry() {
   local profile="$1" marker="$2" line="$3" label="$4"
+  _SHELL_PATH_STALE=true
   if [[ -f "$profile" ]] && grep -qF "$marker" "$profile"; then
     status "PATH entry for $label already in $profile — open a new shell to pick it up"
     return 0
@@ -675,7 +785,28 @@ append_path_entry() {
   mkdir -p "$(dirname "$profile")"
   printf '\n%s\n%s\n' "$marker" "$line" >>"$profile"
   status "Added $label to PATH in $profile"
-  warn "Open a new shell to pick up the PATH change in $profile"
+}
+
+# print_shell_activation_hint — setup runs as a subprocess and can't mutate its
+# parent shell, so the PATH edits above only take effect in a fresh shell. When
+# this run found the live shell stale, print the one command that activates them
+# in place — else a correct install looks broken (the doctor re-resolving the old
+# /bin/bash 3.2) until a new terminal happens to be opened.
+print_shell_activation_hint() {
+  "$_SHELL_PATH_STALE" || return 0
+  local shell reload
+  shell="$(basename "${SHELL:-sh}")"
+  # SC2016: the `*)` fallback's single quotes are intentional — the user pastes
+  # `exec "$SHELL"` so it expands in their shell, not here.
+  # shellcheck disable=SC2016
+  case "$shell" in
+  bash | zsh | fish) reload="exec $shell" ;;
+  *) reload='exec "$SHELL"' ;;
+  esac
+  echo "" >&2
+  warn "Your shell profile was updated, but your CURRENT shell still has the old PATH."
+  warn "Any 'claude-guard doctor' output above reflects THIS shell, not the fixed config."
+  warn "Activate it now without opening a new terminal:  $reload"
 }
 
 # The wrapper only protects you if typing `claude-guard` resolves to ~/.local/bin
@@ -684,7 +815,7 @@ append_path_entry() {
 # to the user's shell profile (idempotent) so new shells pick them up without any
 # hand-editing. Each entry is skipped when it already resolves on PATH.
 ensure_path_precedence() {
-  local profile localbin_line pnpm_line pnpm_literal
+  local profile localbin_line pnpm_line pnpm_literal brew_prefix brew_bin_line
   # fish reads neither .profile nor POSIX `export`, so it needs fish-native lines
   # in its own config; the POSIX `export` form serves every other shell. Single-
   # quote the ~/.local/bin line so the literal $HOME/$PATH expand at shell startup,
@@ -694,38 +825,66 @@ ensure_path_precedence() {
   # APPENDED, never prepended: both it and ~/.local/bin ship a `claude`, and the
   # guard's wrapper alias under ~/.local/bin must win, so pnpm stays behind it.
   pnpm_literal="${PNPM_HOME:+${PNPM_HOME/#$HOME/\$HOME}/bin}"
+  # Brew prefix is resolved at install time (stable path, no per-session expansion).
+  brew_prefix="$(brew --prefix 2>/dev/null || true)"
   # shellcheck disable=SC2016
   case "$(basename "${SHELL:-sh}")" in
   zsh)
     profile="${ZDOTDIR:-$HOME}/.zshrc"
     localbin_line='export PATH="$HOME/.local/bin:$PATH"'
     pnpm_line="export PATH=\"\$PATH:$pnpm_literal\""
+    brew_bin_line="${brew_prefix:+export PATH=\"$brew_prefix/bin:\$PATH\"}"
     ;;
   bash)
     profile="$HOME/.bashrc"
     localbin_line='export PATH="$HOME/.local/bin:$PATH"'
     pnpm_line="export PATH=\"\$PATH:$pnpm_literal\""
+    brew_bin_line="${brew_prefix:+export PATH=\"$brew_prefix/bin:\$PATH\"}"
     ;;
   fish)
     profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
     # --move forces ~/.local/bin ahead of an already-present pnpm bin.
     localbin_line='fish_add_path --move "$HOME/.local/bin"'
     pnpm_line="fish_add_path --append \"$pnpm_literal\""
+    # --move forces brew bin ahead of /bin even when it's already on PATH but
+    # behind it (the exact case that lets /bin/bash 3.2 keep winning).
+    brew_bin_line="${brew_prefix:+fish_add_path --move \"$brew_prefix/bin\"}"
     ;;
   *)
     profile="$HOME/.profile"
     localbin_line='export PATH="$HOME/.local/bin:$PATH"'
     pnpm_line="export PATH=\"\$PATH:$pnpm_literal\""
+    brew_bin_line="${brew_prefix:+export PATH=\"$brew_prefix/bin:\$PATH\"}"
     ;;
   esac
 
-  if [[ "$(command -v claude-guard 2>/dev/null || true)" == "$HOME/.local/bin/claude-guard" ]]; then
+  if running_from_homebrew; then
+    : # brew put claude-guard on PATH (its own bin); no ~/.local/bin entry needed.
+  elif [[ "$(command -v claude-guard 2>/dev/null || true)" == "$HOME/.local/bin/claude-guard" ]]; then
     status "PATH OK — 'claude-guard' resolves to ~/.local/bin/claude-guard"
   else
     # SC2088: the tilde here is a display label for status output, not a path to expand.
     # shellcheck disable=SC2088
     append_path_entry "$profile" "# claude-guard: ~/.local/bin on PATH" \
       "$localbin_line" "~/.local/bin"
+  fi
+
+  # Brew bin: macOS freezes /bin/bash at 3.2, so brew's bash ≥ 5 must come FIRST
+  # on PATH. Presence isn't enough — Homebrew's bin commonly sits AFTER /bin (other
+  # brew tools resolve only because they have no /bin twin; bash does), so /bin/bash
+  # keeps winning. Prepend the brew block unless `bash` already resolves to brew's
+  # copy. Gated on a real brew bash so we never prepend in vain.
+  if [[ -n "$brew_prefix" && -x "$brew_prefix/bin/bash" ]]; then
+    if [[ "$(command -v bash 2>/dev/null)" == "$brew_prefix/bin/bash" ]]; then
+      status "PATH OK — bash resolves to brew's $brew_prefix/bin/bash"
+    else
+      append_path_entry "$profile" "# claude-guard: brew bin on PATH" \
+        "$brew_bin_line" "brew bin ($brew_prefix/bin)"
+      # Also fix THIS run's PATH so the final doctor resolves brew bash ≥ 5.
+      # (When ensure_modern_bash already re-exec'd with brew first, the PATH-OK
+      # branch above runs instead and this is skipped.)
+      export PATH="$brew_prefix/bin:$PATH"
+    fi
   fi
 
   # Nothing to persist for pnpm when it isn't installed (PNPM_HOME unset) or its
@@ -740,6 +899,65 @@ ensure_path_precedence() {
       "$pnpm_line" "the pnpm global bin ($PNPM_HOME/bin)"
     ;;
   esac
+}
+
+# Enable tab-completion for `claude-guard` (and the `claude` alias) by sourcing
+# the repo's completion script from the user's shell profile. Mirrors the PATH
+# persistence above: current-$SHELL only, idempotent via a one-time marker. The
+# completion scripts live in completions/ and self-guard the `claude` alias, so
+# sourcing is a no-op for a real, un-wrapped `claude`.
+ensure_shell_completions() {
+  local shell ext profile comp marker
+  shell="$(basename "${SHELL:-sh}")"
+  case "$shell" in
+  fish)
+    ext=fish
+    if [[ -f "$HOME/.extras.fish" ]]; then
+      profile="$HOME/.extras.fish"
+    else
+      profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+    fi
+    ;;
+  zsh) ext=zsh profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
+  bash) ext=bash profile="$HOME/.bashrc" ;;
+  *)
+    status "No completion script for '$shell' — skipping shell completions."
+    return 0
+    ;;
+  esac
+  comp="$SCRIPT_DIR/completions/claude-guard.$ext"
+  if [[ ! -f "$comp" ]]; then
+    warn "claude-guard completion script not found at $comp — skipping completions."
+    return 0
+  fi
+  marker="# claude-guard: shell completions"
+  if [[ -f "$profile" ]] && grep -qF "$marker" "$profile"; then
+    status "claude-guard $ext completions already enabled in $profile"
+    return 0
+  fi
+  mkdir -p "$(dirname "$profile")"
+  # Double quotes work as a source argument in bash, zsh, and fish alike.
+  printf '\n%s\nsource "%s"\n' "$marker" "$comp" >>"$profile"
+  status "Enabled claude-guard $ext completions in $profile"
+  warn "Open a new shell to pick up claude-guard completions"
+}
+
+# Install the man page so `man claude-guard` and `man claude` both work. The XDG
+# man dir is on the default manpath on Linux and macOS, so no MANPATH edit is
+# needed. `claude` is a symlink to the same page (users invoke the alias, and
+# upstream Claude Code ships no man page of its own to shadow).
+ensure_man_page() {
+  local src man_dir
+  src="$SCRIPT_DIR/man/claude-guard.1"
+  if [[ ! -f "$src" ]]; then
+    warn "claude-guard man page not found at $src — skipping."
+    return 0
+  fi
+  man_dir="${XDG_DATA_HOME:-$HOME/.local/share}/man/man1"
+  mkdir -p "$man_dir"
+  cp "$src" "$man_dir/claude-guard.1"
+  ln -sf claude-guard.1 "$man_dir/claude.1"
+  status "Installed man page (man claude-guard / man claude) in $man_dir"
 }
 
 # ── Prewarm the sandbox image ───────────────────────────────────────────────
@@ -777,6 +995,10 @@ else
 fi
 echo ""
 ensure_path_precedence
+if ! running_from_homebrew; then
+  ensure_shell_completions
+  ensure_man_page
+fi
 
 if ! "$sandbox_ok"; then
   echo "" >&2
@@ -791,3 +1013,4 @@ fi
 echo ""
 status "Verifying your protection state with claude-guard doctor..."
 "$SCRIPT_DIR/bin/claude-guard-doctor" || true
+print_shell_activation_hint

@@ -33,6 +33,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from tests._helpers import REPO_ROOT, run_capture, slice_bash_function, write_exe
 
 SETUP = REPO_ROOT / "setup.bash"
@@ -61,6 +63,32 @@ def _make_stubs_dir(tmp_path: Path, *, extra: dict[str, str] | None = None) -> P
         for name, body in extra.items():
             write_exe(stubs / name, body)
     return stubs
+
+
+# ---------------------------------------------------------------------------
+# running_from_homebrew — true under Cellar/opt .../libexec (brew owns the
+# wrappers, completions, man page there), false for a source checkout.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("script_dir", "is_brew"),
+    [
+        ("/opt/homebrew/Cellar/claude-guard/0.1.0/libexec", True),
+        ("/home/linuxbrew/.linuxbrew/Cellar/claude-guard/1.2.3/libexec", True),
+        ("/opt/homebrew/opt/claude-guard/libexec", True),
+        ("/usr/local/opt/claude-guard/libexec", True),
+        ("/home/user/.local/share/claude-guard", False),
+        ("/home/user/src/claude-guard", False),
+        ("/opt/claude-guard", False),  # checkout cloned to /opt, not a libexec install
+    ],
+)
+def test_running_from_homebrew(tmp_path: Path, script_dir: str, is_brew: bool) -> None:
+    harness = (
+        slice_bash_function(SETUP, "running_from_homebrew")
+        + f'\nSCRIPT_DIR="{script_dir}"\n'
+        + "running_from_homebrew && echo yes || echo no\n"
+    )
+    r = run_capture([BASH, "-c", harness])
+    assert r.stdout.strip() == ("yes" if is_brew else "no")
 
 
 # ---------------------------------------------------------------------------
@@ -336,42 +364,26 @@ def test_ensure_path_precedence_noop_when_marker_in_profile(tmp_path: Path) -> N
     assert "already in" in r.stdout
 
 
-def test_ensure_path_precedence_writes_bash_profile(tmp_path: Path) -> None:
-    """bash shell → writes marker+export to ~/.bashrc."""
-    r = _run_ensure_path(tmp_path, shell="bash")
+@pytest.mark.parametrize(
+    ("shell", "profile_rel", "marker"),
+    [
+        ("bash", ".bashrc", "claude-guard: ~/.local/bin on PATH"),
+        ("zsh", ".zshrc", "claude-guard: ~/.local/bin on PATH"),
+        ("fish", ".config/fish/config.fish", "fish_add_path"),
+        ("sh", ".profile", "claude-guard: ~/.local/bin on PATH"),
+    ],
+)
+def test_ensure_path_precedence_writes_profile(
+    tmp_path: Path, shell: str, profile_rel: str, marker: str
+) -> None:
+    """Each shell writes its PATH marker to that shell's profile file."""
+    r = _run_ensure_path(tmp_path, shell=shell)
     assert r.returncode == 0, r.stderr
-    profile = tmp_path / "home" / ".bashrc"
+    profile = tmp_path / "home" / profile_rel
     assert profile.exists()
-    assert "claude-guard: ~/.local/bin on PATH" in profile.read_text()
-    assert "Added ~/.local/bin to PATH" in r.stdout
-
-
-def test_ensure_path_precedence_writes_zsh_profile(tmp_path: Path) -> None:
-    """zsh shell → writes marker+export to ~/.zshrc."""
-    r = _run_ensure_path(tmp_path, shell="zsh")
-    assert r.returncode == 0, r.stderr
-    profile = tmp_path / "home" / ".zshrc"
-    assert profile.exists()
-    assert "claude-guard: ~/.local/bin on PATH" in profile.read_text()
-
-
-def test_ensure_path_precedence_writes_fish_profile(tmp_path: Path) -> None:
-    """fish shell → writes fish_add_path to config.fish."""
-    r = _run_ensure_path(tmp_path, shell="fish")
-    assert r.returncode == 0, r.stderr
-    profile = tmp_path / "home" / ".config" / "fish" / "config.fish"
-    assert profile.exists()
-    text = profile.read_text()
-    assert "fish_add_path" in text
-
-
-def test_ensure_path_precedence_writes_default_profile(tmp_path: Path) -> None:
-    """Unknown shell → writes marker+export to ~/.profile."""
-    r = _run_ensure_path(tmp_path, shell="sh")
-    assert r.returncode == 0, r.stderr
-    profile = tmp_path / "home" / ".profile"
-    assert profile.exists()
-    assert "claude-guard: ~/.local/bin on PATH" in profile.read_text()
+    assert marker in profile.read_text()
+    if shell == "bash":
+        assert "Added ~/.local/bin to PATH" in r.stdout
 
 
 # ---------------------------------------------------------------------------

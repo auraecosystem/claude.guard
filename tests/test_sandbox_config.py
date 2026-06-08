@@ -30,7 +30,6 @@ USER_CONFIG = REPO_ROOT / "user-config" / "settings.json"
 CLAUDE_WRAPPER = REPO_ROOT / "bin" / "claude-guard"
 CCR_LAUNCH = REPO_ROOT / "bin" / "lib" / "ccr-launch.bash"
 COMPOSE_FILE = REPO_ROOT / ".devcontainer" / "docker-compose.yml"
-PROXY_ENV = REPO_ROOT / ".devcontainer" / "proxy.env"
 DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
 ENTRYPOINT = REPO_ROOT / ".devcontainer" / "entrypoint.bash"
 DEPS_INSTALL = REPO_ROOT / ".devcontainer" / "deps-install.bash"
@@ -48,20 +47,17 @@ def compose() -> dict:
 
 
 @pytest.fixture
-def proxy_env() -> dict:
-    result = {}
-    for line in PROXY_ENV.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        result[key] = value
-    return result
-
-
-@pytest.fixture
 def allowlist() -> dict:
     return json.loads(DOMAIN_ALLOWLIST.read_text())
+
+
+def _default(value: str) -> str:
+    """Resolve a compose ``${VAR:-x}`` interpolation to its fallback ``x`` (pass
+    plain values through), so the network-topology tests can assert the octet-0
+    default a bare ``docker compose up`` resolves to. The per-session subnet/IP
+    (bin/lib/sandbox-net.bash) make these values ``${SANDBOX_IP:-…}`` shaped."""
+    m = re.fullmatch(r"\$\{[^:}]+:-(?P<fallback>[^}]*)\}", value)
+    return m.group("fallback") if m else value
 
 
 # ── Security invariants ─────────────────────────────────────────────
@@ -216,27 +212,66 @@ def test_firewall_bridges_both_networks(compose: dict) -> None:
     assert "sandbox" in networks and "egress" in networks
 
 
+def _firewall_ip(compose: dict) -> str:
+    return _default(
+        compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
+    )
+
+
 def test_app_dns_points_to_firewall(compose: dict) -> None:
-    """App DNS must resolve to the firewall's static IP (wherever it is)."""
-    fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
-    assert fw_ip in compose["services"]["app"]["dns"]
+    """App DNS must resolve to the firewall's IP (parametrized per session, but the
+    app's dns entry and the firewall's ipv4_address share the same interpolation)."""
+    fw_ip = _firewall_ip(compose)
+    assert fw_ip in [_default(d) for d in compose["services"]["app"]["dns"]]
 
 
-def test_app_loads_proxy_env_file(compose: dict) -> None:
-    assert compose["services"]["app"]["env_file"] == "proxy.env"
+def test_app_trusts_squid_ca(compose: dict) -> None:
+    """The agent must trust squid's ssl_bump CA so its proxied HTTPS verifies. The
+    path rides the proxy anchor (an env var, not an env_file) so the launcher's warm
+    path has no relative-path file to stage beside the generated compose."""
+    assert (
+        compose["services"]["app"]["environment"]["NODE_EXTRA_CA_CERTS"]
+        == "/etc/squid/ssl_cert/ca-cert.pem"
+    )
 
 
-def test_proxy_points_to_firewall(compose: dict, proxy_env: dict) -> None:
-    """All proxy env vars must point to the firewall's IP."""
-    fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
+def test_proxy_points_to_firewall(compose: dict) -> None:
+    """All proxy env vars (now in app environment so ${SANDBOX_IP} interpolates,
+    which an env_file cannot) must point to the firewall's IP."""
+    fw_ip = _firewall_ip(compose)
+    env = compose["services"]["app"]["environment"]
     for var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]:
-        assert var in proxy_env, f"{var} missing from proxy.env"
-        assert fw_ip in proxy_env[var], f"{var} does not reference firewall IP {fw_ip}"
+        assert var in env, f"{var} missing from app environment"
+        assert fw_ip in env[var], f"{var} does not reference firewall IP {fw_ip}"
 
 
-def test_no_proxy_includes_firewall(compose: dict, proxy_env: dict) -> None:
+def test_no_proxy_includes_firewall(compose: dict) -> None:
+    fw_ip = _firewall_ip(compose)
+    assert fw_ip in compose["services"]["app"]["environment"]["no_proxy"]
+
+
+def test_sandbox_subnet_and_ip_are_per_session(compose: dict) -> None:
+    """Concurrency depends on the subnet + firewall IP being interpolated from the
+    launcher's allocation (bin/lib/sandbox-net.bash), not hardcoded — otherwise two
+    sessions collide on one /24. The octet-0 fallback preserves the bare-compose
+    default."""
+    subnet = compose["networks"]["sandbox"]["ipam"]["config"][0]["subnet"]
     fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
-    assert fw_ip in proxy_env["no_proxy"]
+    assert (
+        subnet.startswith("${SANDBOX_SUBNET:-") and _default(subnet) == "172.30.0.0/24"
+    )
+    assert fw_ip.startswith("${SANDBOX_IP:-") and _default(fw_ip) == "172.30.0.2"
+
+
+def test_proxy_env_anchor_is_single_source(compose: dict) -> None:
+    """The squid endpoint is defined once (the x-sandbox-proxy-env anchor) and
+    shared by the app and the dependency-fetch hardener, so the two cannot drift."""
+    anchor = compose["x-sandbox-proxy-env"]
+    assert "http_proxy" in anchor
+    for svc in ("app", "hardener"):
+        env = compose["services"][svc]["environment"]
+        for key, val in anchor.items():
+            assert env.get(key) == val, f"{svc} env did not merge proxy anchor {key}"
 
 
 @pytest.mark.parametrize("svc", ["monitor", "ccr"])
@@ -244,8 +279,8 @@ def test_sidecars_are_not_proxied(compose: dict, svc: str) -> None:
     """monitor and ccr egress DIRECTLY (no proxy), so they never transit squid
     and the ro/rw method split cannot restrict them — that is why a ro provider
     endpoint (openrouter.ai, api.venice.ai) is reachable for their POSTs. They
-    must neither load proxy.env nor set any *_proxy var. The agent's proxying
-    (which makes ro/rw meaningful for it) is covered by test_app_loads_proxy_env_file.
+    must neither load an env_file nor set any *_proxy var. The agent's proxying
+    (which makes ro/rw meaningful for it) is covered by test_app_trusts_squid_ca.
     Runtime counterpart: check-compose-lifecycle.bash."""
     service = compose["services"][svc]
     assert "env_file" not in service, (
@@ -264,12 +299,29 @@ def test_sidecars_are_not_proxied(compose: dict, svc: str) -> None:
 
 def test_hardener_is_proxied_for_dependency_fetch(compose: dict) -> None:
     """The hardener fetches workspace deps the bind-mounted node_modules lacks, so it
-    routes through squid (proxy.env + firewall DNS) like the app — NOT directly. Its
+    routes through squid (proxy anchor + firewall DNS) like the app — NOT directly. Its
     egress is bounded by the same allowlist."""
     hardener = compose["services"]["hardener"]
-    assert hardener.get("env_file") == "proxy.env"
+    assert (
+        hardener["environment"]["NODE_EXTRA_CA_CERTS"]
+        == "/etc/squid/ssl_cert/ca-cert.pem"
+    )
     fw_ip = compose["services"]["firewall"]["networks"]["sandbox"]["ipv4_address"]
     assert fw_ip in hardener.get("dns", [])
+
+
+def test_hardener_memory_fits_install_and_has_no_swap(compose: dict) -> None:
+    """The hardener runs a one-shot online `pnpm install` of the workspace tree,
+    which OOM-kills under a 256m cap on a heavy tree (the bug: a bare `Killed`
+    and a fatal "dependency install failed"). The cap is a single launcher-managed
+    knob, and mem_limit/memswap_limit reference the SAME variable so no-swap holds
+    at any size."""
+    hardener = compose["services"]["hardener"]
+    assert "${DEVCONTAINER_HARDENER_MEM_MB:-" in str(hardener["mem_limit"])
+    assert hardener["memswap_limit"] == hardener["mem_limit"]
+    # Default must clear 256m so an install fits out of the box.
+    default = int(str(hardener["mem_limit"]).split(":-")[1].split("}")[0].rstrip("m"))
+    assert default >= 1024
 
 
 def test_hardener_install_ignores_lifecycle_scripts() -> None:
@@ -718,26 +770,9 @@ class TestEntrypointHardening:
         # The ownership read-hide lives after the guard (in its else branch), not before.
         assert content.index(guard) < content.index('chown root:root "$MONITOR"')
 
-    @pytest.mark.parametrize(
-        "name",
-        [
-            # IaC / secrets-manager artifacts that hold plaintext credentials but
-            # carry no key-ish extension, so they slip past *.pem / *.key globs.
-            "terraform.tfstate",
-            "terraform.tfstate.backup",
-            ".vault-token",
-        ],
-    )
-    def test_credential_scan_covers_iac_secret_files(self, name: str) -> None:
-        # Static mirror of TestEntrypointHardening's other checks: the workspace
-        # credential scan can't run wholesale outside root (it chowns to root).
-        # Scope the assertion to the find name-match group (between `find
-        # "$WORKSPACE"` and the `-not -path` exclusions) so the name must live in
-        # the active filter, not merely somewhere in the file.
-        name_group = self.content.split('find "$WORKSPACE"', 1)[1].split(
-            "-not -path", 1
-        )[0]
-        assert f"-name '{name}'" in name_group
+    # The credential scan itself moved to .devcontainer/credential-scan.bash and is
+    # exercised for real (real temp workspace, every pattern + the prune set) in
+    # tests/test_credential_scan.py — no static mirror needed here.
 
 
 # ── Firewall invariants ─────────────────────────────────────────────
@@ -953,19 +988,22 @@ class TestDangerouslySkipFirewall:
         else:
             assert needle.lower() not in section.lower()
 
-    def test_wrapper_clears_all_proxy_env_vars(self, proxy_env: dict) -> None:
-        """Every proxy var in proxy.env must be cleared by the wrapper's
-        noproxy_flags — otherwise requests fail through the missing squid
+    def test_wrapper_clears_all_proxy_env_vars(self, compose: dict) -> None:
+        """Every proxy/CA var the app container gets — the compose proxy anchor, which
+        carries both the squid endpoint vars and NODE_EXTRA_CA_CERTS — must be cleared
+        by the wrapper's noproxy_flags, else requests fail through the missing squid
         when the firewall is skipped."""
-        assert proxy_env, "proxy.env is empty — test is stale"
+        proxy_vars = set(compose["x-sandbox-proxy-env"])
+        assert proxy_vars, "no proxy/CA vars found — test is stale"
 
         noproxy_start = self.wrapper.index("noproxy_flags=")
         noproxy_end = self.wrapper.index("exec docker exec", noproxy_start)
         noproxy_block = self.wrapper[noproxy_start:noproxy_end]
 
-        for var in proxy_env:
+        for var in proxy_vars:
             assert f"-e {var}=" in noproxy_block, (
-                f"proxy.env sets {var} but wrapper does not clear it in noproxy_flags"
+                f"the container gets {var} but the wrapper does not clear it in "
+                "noproxy_flags"
             )
 
 

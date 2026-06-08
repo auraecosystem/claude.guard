@@ -2,16 +2,14 @@
 # Read-only guardrail overmounts — protect the workspace's guardrail paths from the
 # agent with read-only bind mounts instead of chowning them to root.
 #
-# Why: the hardener used to `chown root:root` + `chmod a-w` the guardrail paths in
-# the bind-mounted workspace so a prompt-injected agent couldn't edit them. On a
-# bind mount that ownership change lands on the HOST inodes too, so after a session
-# the user couldn't `git pull`, edit, or reinstall deps without sudo. A read-only
-# bind mount gives the agent the identical read-only view — kernel-enforced, so even
-# in-container root can't write it, strictly stronger than `a-w` — WITHOUT touching
-# host ownership. No host leak, no restore dance. (Read-HIDING the monitor's own
-# detection source still needs root ownership; that lives in harden-monitor.bash and
-# is the one irreducible case, scoped to two paths that only exist when the workspace
-# IS the claude-guard repo.) See SECURITY.md.
+# Why: chowning the guardrail paths to root on a bind mount lands the ownership
+# change on the HOST inodes too, leaving the user unable to `git pull`/edit/reinstall
+# without sudo. A read-only bind mount gives the agent the identical read-only view —
+# kernel-enforced, so even in-container root can't write it, strictly stronger than
+# `a-w` — WITHOUT touching host ownership. (Read-HIDING the monitor's own detection
+# source still needs root ownership; that lives in harden-monitor.bash and is the one
+# irreducible case, scoped to two paths that only exist when the workspace IS the
+# claude-guard repo.) See SECURITY.md.
 #
 # The launcher generates a per-workspace compose override adding these :ro binds to
 # the app service, merges it over the dotfiles stack via a derived devcontainer.json,
@@ -63,6 +61,28 @@ write_session_devcontainer_config() {
   local base_dc="$1" compose_abs="$2" override_abs="$3" out="$4"
   jq --arg a "$compose_abs" --arg b "$override_abs" \
     '.dockerComposeFile = [$a, $b]' "$base_dc" >"$out"
+}
+
+# Write a copy of compose file <in> to <out> with every service's `build:` section
+# removed, so a warm-path `docker compose build` — which `devcontainer up` always runs —
+# has nothing to evaluate. Safe ONLY when the images are already resolved by tag (the
+# launcher exports SCCD_PULL_POLICY=never alongside SCCD_IMAGE_* for the verified
+# prebuilt set): each service keeps its `image:` and `pull_policy`, so compose runs the
+# verified prebuilt and never tries to build. Used only on that resolved warm path; a
+# stripped service with no image source would otherwise have no way to obtain its image.
+#
+# The strip keys off this repo's own compose layout — `build:` at the 4-space
+# service-property indent, its children deeper: a `build:` line opens a block whose
+# more-indented lines are dropped until the next same-or-shallower key. test_overmounts.py
+# asserts the result is build-free AND still valid compose, so a reformat of the source
+# that breaks this assumption fails loud in CI rather than silently shipping a bad file.
+strip_compose_build() {
+  local in="$1" out="$2"
+  awk '
+    /^    build:[[:space:]]*$/ { inbuild = 1; next }
+    inbuild && /^     / { next }
+    { inbuild = 0; print }
+  ' "$in" >"$out"
 }
 
 # Fail-closed verification: the read-only overmounts are a security control, so prove

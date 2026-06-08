@@ -13,10 +13,14 @@ on:
     branches: [main]
     paths:
       - .claude/hooks/monitor.py
+      - .claude/hooks/prompt-armor.py
+      - .claude/hooks/monitorlib/api.py
       - bin/bench-monitor.py
+      - bin/bench-armor.py
       - bin/check-monitor-perf.py
+      - bin/lib/cost_cap.py
+      - bin/persist-perf-history.sh
       - .github/monitor-perf-baseline.json
-      - .github/monitor-perf-history.json
       - .github/workflows/monitor-perf.yaml
   workflow_dispatch:
     inputs:
@@ -66,9 +70,19 @@ jobs:
         run: |
           python3 bin/bench-monitor.py --e2e --calls 20 --json > e2e.json || \
             echo '{"skipped":"e2e run failed"}' > e2e.json
+      - name: Load monitor history from the perf-history branch
+        run: bin/persist-perf-history.sh read --branch perf-history --file .github/monitor-perf-history.json
       - name: Regenerate baseline
         run: python3 bin/check-monitor-perf.py --update --calls 30 --history-json .github/monitor-perf-history.json --live-json live.json --armor-json armor.json --e2e-json e2e.json --commit-sha "${{ github.sha }}"
-      - name: Open PR if the baseline changed
+      - name: Persist the monitor history to the perf-history branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bin/persist-perf-history.sh write --branch perf-history --file .github/monitor-perf-history.json --message "chore(perf): append monitor latency history [skip ci]"
+      - name: Open PR if the baseline (gate threshold) changed
+        # Only the baseline lives on main now — it is the pass/fail gate reference,
+        # so a change to it is rare and worth a review. The rolling latency history
+        # goes to the perf-history branch above, never a PR.
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v7
         with:
           commit-message: "chore(perf): refresh monitor performance baseline"
@@ -79,7 +93,6 @@ jobs:
           branch: chore/monitor-perf-baseline
           add-paths: |
             .github/monitor-perf-baseline.json
-            .github/monitor-perf-history.json
 
   live:
     if: github.event_name == 'workflow_dispatch'

@@ -103,23 +103,18 @@ function redactSecrets(text) {
   if (!SECRET_HINT.test(text) && !hasEnvBoundSecret(text)) return null;
   /* c8 ignore next -- sentinel written by the ignored detect-secrets catch block; same untestable dependency */
   if (existsSync(DS_UNAVAILABLE_SENTINEL)) return null;
+  let result;
   try {
-    const result = execFileSync(
-      "python3",
-      [join(__dirname, "redact-secrets.py")],
-      {
-        input: text,
-        encoding: "utf8",
-        timeout: 10000,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: [VENV_BIN, process.env.PATH].filter(Boolean).join(":"),
-        },
+    result = execFileSync("python3", [join(__dirname, "redact-secrets.py")], {
+      input: text,
+      encoding: "utf8",
+      timeout: 10000,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        PATH: [VENV_BIN, process.env.PATH].filter(Boolean).join(":"),
       },
-    );
-    if (!result.trim()) return null;
-    return JSON.parse(result);
+    });
     /* c8 ignore start -- fires when detect-secrets binary is missing or crashes; requires uninstalling an OS package mid-test */
   } catch (err) {
     try {
@@ -128,6 +123,12 @@ function redactSecrets(text) {
     throw err;
   }
   /* c8 ignore stop */
+  // Parse outside the catch: a malformed line from a valid-exit subprocess is a
+  // transient fault Layer 4's caller surfaces loudly per call — it must not write
+  // the unavailable-sentinel and disable redaction for the rest of the session,
+  // which only a missing/crashing binary (the catch above) should do.
+  if (!result.trim()) return null;
+  return JSON.parse(result);
 }
 
 // ─── Layer 5: semantic prompt-injection filtering (web ingress only) ─────────
@@ -421,13 +422,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     input = await readStdinJson();
 
-    // PostToolUse delivers the tool's output in `tool_response`. Its shape varies
-    // per tool — a plain string, or a structured object like Bash's
-    // `{stdout, stderr, interrupted, isImage}`. sanitizeValue rewrites every
-    // string leaf and preserves the surrounding structure, because the harness
-    // only honors an updatedToolOutput whose shape matches the tool's schema; a
-    // flat string handed back for an object-shaped tool is silently dropped and
-    // the raw output reaches the model.
+    // PostToolUse delivers the tool's output in `tool_response` (a string or a
+    // structured object). sanitizeValue rewrites every string leaf and preserves
+    // the shape (see its doc — a shape mismatch is silently dropped by the harness).
     const toolOutput = input.tool_response;
     if (toolOutput === null || toolOutput === undefined) process.exit(0);
 
