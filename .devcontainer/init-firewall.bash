@@ -56,9 +56,9 @@ if [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]]; then
   echo "WARNING: Firewall disabled (--dangerously-skip-firewall)"
   echo "The model has UNRESTRICTED internet access."
   echo "================================================================"
-  # App DNS points here (172.30.0.2): run a forwarding-only dnsmasq so DNS still
+  # App DNS points at the firewall IP: run a forwarding-only dnsmasq so DNS still
   # works, skip everything else.
-  SANDBOX_IP="172.30.0.2"
+  SANDBOX_IP="${SANDBOX_IP:-172.30.0.2}"
   DOCKER_DNS=$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf)
   if [[ -z "$DOCKER_DNS" ]]; then
     echo "ERROR: no nameserver in /etc/resolv.conf — cannot configure DNS forwarding"
@@ -276,7 +276,8 @@ mkdir -p "$(dirname "$ALLOWLIST_OVERLAY")"
 : >"$ALLOWLIST_OVERLAY"
 chmod 600 "$ALLOWLIST_OVERLAY"
 
-SANDBOX_IP="172.30.0.2"
+SANDBOX_IP="${SANDBOX_IP:-172.30.0.2}"
+SANDBOX_SUBNET="${SANDBOX_SUBNET:-172.30.0.0/24}"
 
 cat >/etc/dnsmasq.conf <<DNSMASQ_BASE
 no-resolv
@@ -355,10 +356,10 @@ iptables -P OUTPUT DROP
 
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport 3128 -j ACCEPT
-iptables -A INPUT -s 172.30.0.0/24 -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport "${MONITOR_PORT:-9199}" -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p tcp --dport 3128 -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p udp --dport 53 -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p tcp --dport 53 -j ACCEPT
+iptables -A INPUT -s "$SANDBOX_SUBNET" -p tcp --dport "${MONITOR_PORT:-9199}" -j ACCEPT
 
 # Refuse egress to internal/metadata ranges at the packet layer, regardless of
 # what the allowed-domains ipset holds — a backstop for ingestion paths that do
@@ -369,7 +370,7 @@ iptables -A INPUT -s 172.30.0.0/24 -p tcp --dport "${MONITOR_PORT:-9199}" -j ACC
 # Placed before the allowed-domains ACCEPT so a bogon can't fall through to it;
 # allowed-domains only ever hold public IPs, so this never shadows the quota rule.
 iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
-iptables -A OUTPUT -d 172.30.0.0/24 -j ACCEPT
+iptables -A OUTPUT -d "$SANDBOX_SUBNET" -j ACCEPT
 for _bogon in "${BOGON_CIDRS[@]}"; do
   iptables -A OUTPUT -d "$_bogon" -j DROP
 done

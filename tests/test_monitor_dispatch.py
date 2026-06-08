@@ -233,7 +233,7 @@ def _fake_curl(tmp_path: Path, response: str) -> str:
     """Put a fake `curl` on PATH that prints `response` and exits 0.
 
     Lets the devcontainer branch exercise sidecar-response handling without a
-    live monitor at 172.30.0.2.
+    live monitor sidecar.
     """
     bindir = tmp_path / "fakebin"
     bindir.mkdir(exist_ok=True)

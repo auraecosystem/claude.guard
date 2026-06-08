@@ -55,8 +55,8 @@ add_project_domains() {
 # endpoint), RFC1918 + CGNAT private space, multicast and reserved. Single source
 # of truth, consumed by both the resolve-time filter (is_public_ipv4) and the
 # packet-layer egress DROP rules in init-firewall.bash, so the two cannot drift.
-# The sandbox subnet 172.30.0.0/24 falls inside 172.16/12, so a rebind onto the
-# monitor sidecar or squid is covered.
+# The per-session sandbox subnets (172.30.x.0/24) fall inside 172.16/12, so a
+# rebind onto the monitor sidecar or squid is covered.
 BOGON_CIDRS=(
   0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16
   172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4

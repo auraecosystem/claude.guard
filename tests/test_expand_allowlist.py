@@ -316,7 +316,7 @@ def test_init_firewall_drops_bogons_before_allowing_domains() -> None:
     # unfiltered ingestion path (GitHub-meta or static CIDR) still can't egress.
     src = INIT_FIREWALL.read_text()
     lo = src.index("iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT")
-    sandbox = src.index("iptables -A OUTPUT -d 172.30.0.0/24 -j ACCEPT")
+    sandbox = src.index('iptables -A OUTPUT -d "$SANDBOX_SUBNET" -j ACCEPT')
     drop = src.index('for _bogon in "${BOGON_CIDRS[@]}"')
     allow = src.index("--match-set allowed-domains dst")
     assert lo < drop and sandbox < drop, "carve-outs must precede the bogon DROP"
