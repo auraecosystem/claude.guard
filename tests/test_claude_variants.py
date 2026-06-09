@@ -25,7 +25,6 @@ import pytest
 from tests._helpers import (
     git_env,
     init_test_repo,
-    pop_skip_flags,
     stub_envchain,
     write_exe,
 )
@@ -58,9 +57,9 @@ def _run(
     wrapper: Path,
     args: list[str],
     cache_dir: Path,
+    *skip_flags: str,
     **env_overrides: str,
 ) -> subprocess.CompletedProcess[str]:
-    skip_flags = pop_skip_flags(env_overrides)
     env = {
         **os.environ,
         "CLAUDE_PRIVATE_DRY_RUN": "1",
@@ -85,6 +84,7 @@ def _run(
 def _run_real(
     args: list[str],
     tmp_path: Path,
+    *extra_flags: str,
     **env_overrides: str,
 ) -> subprocess.CompletedProcess[str]:
     """Drive `--privacy private/e2ee` for real — no dry-run. With the container
@@ -103,11 +103,12 @@ def _run_real(
         env=git_env(),
         check=True,
     )
-    # _run_real is always host-routed (see docstring); pass the flag, plus any
-    # the caller expressed via the DANGEROUSLY_SKIP_* kwargs.
-    skip_flags = pop_skip_flags(env_overrides)
-    if "--dangerously-skip-container" not in skip_flags:
-        skip_flags.insert(0, "--dangerously-skip-container")
+    # _run_real is always host-routed; --dangerously-skip-container is implicit.
+    skip_flags = (
+        ("--dangerously-skip-container", *extra_flags)
+        if "--dangerously-skip-container" not in extra_flags
+        else extra_flags
+    )
     stripped = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")

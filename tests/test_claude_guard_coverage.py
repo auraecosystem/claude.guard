@@ -20,7 +20,6 @@ from pathlib import Path
 from tests._helpers import (
     REPO_ROOT,
     mirror_path_excluding,
-    pop_skip_flags,
     run_capture,
     write_exe,
 )
@@ -132,6 +131,8 @@ exit 0
 
 _CONTAINER_ENV_STRIP = {
     "DANGEROUSLY_SKIP_CONTAINER",
+    "DANGEROUSLY_SKIP_FIREWALL",
+    "DANGEROUSLY_SKIP_MONITOR",
     "DEVCONTAINER",
     "CLAUDE_CODE_OAUTH_TOKEN",
 }
@@ -169,17 +170,16 @@ def _container_env(tmp_path: Path, **overrides: str) -> tuple[Path, Path, dict]:
 
 def _run_container(repo: Path, env: dict, *args: str):
     """Run the wrapper down the container path from inside git repo `repo`."""
-    # Container path: translate only firewall/monitor skip kwargs into flags.
-    skip_flags = [f for f in pop_skip_flags(env) if f != "--dangerously-skip-container"]
-    return run_capture([str(WRAPPER), *skip_flags, *args], env=env, cwd=repo)
+    return run_capture([str(WRAPPER), *args], env=env, cwd=repo)
 
 
-def _run_guard(cwd: Path, args: list[str], path_dir: Path, **env: str):
+def _run_guard(
+    cwd: Path, args: list[str], path_dir: Path, *skip_flags: str, **env: str
+):
     """Invoke the wrapper with `args`, PATH front-loaded by `path_dir`. Strips
     any PATH entry that ships `devcontainer` or a real `claude` so the host path
     is deterministic: a test gets a real claude only if its `path_dir` provides
     a fake one (otherwise the not-found branches are reachable)."""
-    skip_flags = pop_skip_flags(env)
     stripped = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -208,7 +208,7 @@ def test_skip_monitor_and_debug_flags_are_stripped(tmp_path: Path) -> None:
         tmp_path,
         ["--dangerously-skip-monitor", "--debug", "hello"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
     )
     assert r.returncode == 0, r.stderr
     args_line = next(ln for ln in r.stdout.splitlines() if ln.startswith("args:"))
@@ -234,7 +234,7 @@ def test_experimental_redact_flag_exports_env_and_is_stripped(tmp_path: Path) ->
         tmp_path,
         ["--experimental-redact-monitor-reason", "hello"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
     )
     assert r.returncode == 0, r.stderr
     args_line = next(ln for ln in r.stdout.splitlines() if ln.startswith("args:"))
@@ -256,7 +256,7 @@ def test_private_non_dry_run_execs_through_ccr(tmp_path: Path) -> None:
         tmp_path,
         ["--privacy", "private", "hello"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         VENICE_INFERENCE_KEY="test-venice-key",
         VENICE_CACHE_DIR=str(tmp_path / "vcache"),
         # Closed port so the resolver can't reach the live Venice API — forces the
@@ -358,8 +358,8 @@ def test_host_mode_without_real_binary_exits_127(tmp_path: Path) -> None:
         tmp_path,
         [],
         empty,
-        DANGEROUSLY_SKIP_CONTAINER="1",
-        DANGEROUSLY_SKIP_FIREWALL="1",
+        "--dangerously-skip-container",
+        "--dangerously-skip-firewall",
     )
     assert r.returncode == 127
     assert "real binary not found" in r.stderr
@@ -382,8 +382,8 @@ def test_cwd_outside_workspace_warns(tmp_path: Path) -> None:
         outside,
         [],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
-        DANGEROUSLY_SKIP_FIREWALL="1",
+        "--dangerously-skip-container",
+        "--dangerously-skip-firewall",
         CLAUDE_WORKSPACE=str(workspace),
     )
     # Host mode suppresses the outside-workspace warning by design; assert the
@@ -403,8 +403,8 @@ def test_worktree_creation_failure_aborts(tmp_path: Path) -> None:
         tmp_path,
         [],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
-        DANGEROUSLY_SKIP_FIREWALL="1",
+        "--dangerously-skip-container",
+        "--dangerously-skip-firewall",
         CLAUDE_WORKTREE="1",
     )
     assert r.returncode == 1
@@ -435,7 +435,7 @@ def test_host_mode_announces_project_domain(tmp_path: Path) -> None:
         tmp_path,
         [],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         CLAUDE_WORKSPACE=str(tmp_path),
     )
     assert r.returncode == 0, r.stderr
@@ -495,8 +495,8 @@ def test_skip_firewall_clears_proxy_env_into_container(tmp_path: Path) -> None:
     """--dangerously-skip-firewall passes empty proxy vars into `docker exec` so
     the container isn't pointed at the (now-absent) egress proxy."""
     _init_repo(tmp_path)
-    _, log, env = _container_env(tmp_path, DANGEROUSLY_SKIP_FIREWALL="1")
-    r = _run_container(tmp_path, env)
+    _, log, env = _container_env(tmp_path)
+    r = _run_container(tmp_path, env, "--dangerously-skip-firewall")
     assert r.returncode == 0, r.stderr
     assert "http_proxy=" in log.read_text()
 
@@ -1113,7 +1113,7 @@ def test_private_dry_run_default_tier(tmp_path: Path) -> None:
         tmp_path,
         ["--privacy", "private", "hello"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         CLAUDE_PRIVATE_DRY_RUN="1",
         VENICE_INFERENCE_KEY="test-venice-key",
         CLAUDE_PRIVATE_INFERENCE_NON_STRICT_DEFAULT_MODEL="venice,test-model",
@@ -1132,7 +1132,7 @@ def test_private_dry_run_think_tier(tmp_path: Path) -> None:
         tmp_path,
         ["--privacy", "private"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         CLAUDE_PRIVATE_DRY_RUN="1",
         CLAUDE_PRIVATE_THINK="1",
         VENICE_INFERENCE_KEY="test-venice-key",
@@ -1147,9 +1147,6 @@ def test_private_strict_no_key_exits(tmp_path: Path) -> None:
     _init_repo(tmp_path)
     real_dir = tmp_path / "stubs"
     real_dir.mkdir()
-    env_overrides = {
-        "DANGEROUSLY_SKIP_CONTAINER": "1",
-    }
     # Ensure VENICE_INFERENCE_KEY is absent.
     stripped = ":".join(
         p
@@ -1161,10 +1158,13 @@ def test_private_strict_no_key_exits(tmp_path: Path) -> None:
     full_env = {
         **os.environ,
         "PATH": f"{real_dir}:{stripped}",
-        **env_overrides,
     }
     full_env.pop("VENICE_INFERENCE_KEY", None)
-    r = run_capture([str(WRAPPER), "--privacy", "e2ee"], env=full_env, cwd=tmp_path)
+    r = run_capture(
+        [str(WRAPPER), "--dangerously-skip-container", "--privacy", "e2ee"],
+        env=full_env,
+        cwd=tmp_path,
+    )
     assert r.returncode == 1
     assert "VENICE_INFERENCE_KEY is required" in r.stderr
 
@@ -1178,7 +1178,7 @@ def test_private_strict_with_key_dry_run(tmp_path: Path) -> None:
         tmp_path,
         ["--privacy", "e2ee"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         CLAUDE_PRIVATE_DRY_RUN="1",
         VENICE_INFERENCE_KEY="test-venice-key",
         CLAUDE_PRIVATE_INFERENCE_STRICT_MODEL="venice,strict-model",
@@ -1198,7 +1198,7 @@ def test_private_strict_sidecar_unreachable(tmp_path: Path) -> None:
         tmp_path,
         ["--privacy", "e2ee"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         VENICE_INFERENCE_KEY="test-venice-key",
         CLAUDE_PRIVATE_INFERENCE_STRICT_MODEL="venice,strict-model",
         # Point at a port guaranteed to refuse connections.
@@ -1220,8 +1220,8 @@ def test_private_exec_launches_wrapper(tmp_path: Path) -> None:
         tmp_path,
         ["--privacy", "private"],
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
-        DANGEROUSLY_SKIP_FIREWALL="1",
+        "--dangerously-skip-container",
+        "--dangerously-skip-firewall",
         VENICE_INFERENCE_KEY="test-venice-key",
         CLAUDE_PRIVATE_INFERENCE_NON_STRICT_DEFAULT_MODEL="venice,test-model",
     )

@@ -19,8 +19,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests._helpers import pop_skip_flags
-
 REPO_ROOT = Path(
     subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
 )
@@ -46,7 +44,9 @@ def _make_exec(path: Path, body: str) -> Path:
     return path
 
 
-def _run_sandboxed(cwd: Path, stub_dir: Path, home: Path, **env_overrides: str):
+def _run_sandboxed(
+    cwd: Path, stub_dir: Path, home: Path, *skip_flags: str, **env_overrides: str
+):
     """Drive the wrapper through its real sandboxed (devcontainer) path.
 
     Fakes `docker` and `devcontainer` so the wrapper passes its daemon check,
@@ -78,11 +78,9 @@ esac
     # never invoked on the warm-container path — `devcontainer up` only fires on
     # cold start, which the running-container fake skips.
     _make_exec(stub_dir / "devcontainer", "#!/bin/bash\nexit 0\n")
-    # This runner always exercises the container path, so translate only the
-    # firewall/monitor skip kwargs into flags; never the container one.
-    skip_flags = [
-        f for f in pop_skip_flags(env_overrides) if f != "--dangerously-skip-container"
-    ]
+    # This runner always exercises the container path; drop any accidental
+    # --dangerously-skip-container flag passed by the caller.
+    skip_flags = tuple(f for f in skip_flags if f != "--dangerously-skip-container")
     env = {
         **os.environ,
         "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
@@ -139,13 +137,12 @@ def _init_repo(path: Path) -> None:
     )
 
 
-def _run(cwd: Path, real_claude_dir: Path, **env_overrides: str):
+def _run(cwd: Path, real_claude_dir: Path, *skip_flags: str, **env_overrides: str):
     """Invoke the wrapper with PATH front-loaded by the fake claude dir.
 
     PATH-strips devcontainer/docker so the wrapper hits its 'no devcontainer
     CLI' branch and falls through to host claude — keeps tests hermetic.
     """
-    skip_flags = pop_skip_flags(env_overrides)
     stripped_path = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -167,30 +164,36 @@ def _run(cwd: Path, real_claude_dir: Path, **env_overrides: str):
 
 
 @pytest.mark.parametrize(
-    "env,expect_worktree,desc",
+    "flags,env,expect_worktree,desc",
     [
-        ({"DEVCONTAINER": "1"}, False, "DEVCONTAINER=1 pass-through"),
+        ([], {"DEVCONTAINER": "1"}, False, "DEVCONTAINER=1 pass-through"),
         (
-            {"DANGEROUSLY_SKIP_CONTAINER": "1"},
+            ["--dangerously-skip-container"],
+            {},
             False,
             "skip-container, worktree default-off",
         ),
         (
-            {"DANGEROUSLY_SKIP_CONTAINER": "1", "CLAUDE_WORKTREE": "1"},
+            ["--dangerously-skip-container"],
+            {"CLAUDE_WORKTREE": "1"},
             True,
             "explicit worktree opt-in",
         ),
     ],
 )
 def test_wrapper_bypass_paths(
-    tmp_path: Path, env: dict[str, str], expect_worktree: bool, desc: str
+    tmp_path: Path,
+    flags: list[str],
+    env: dict[str, str],
+    expect_worktree: bool,
+    desc: str,
 ) -> None:
     _init_repo(tmp_path)
     real_dir = tmp_path / "stubs"
     real_dir.mkdir()
     _make_fake_claude(real_dir)
 
-    r = _run(tmp_path, real_dir, **env)
+    r = _run(tmp_path, real_dir, *flags, **env)
     assert r.returncode == 0, f"{desc}\nstderr: {r.stderr}"
     assert "fake-claude-here:" in r.stdout, desc
 
@@ -218,7 +221,7 @@ def test_wrapper_no_git_repo(tmp_path: Path) -> None:
     real_dir.mkdir()
     _make_fake_claude(real_dir)
 
-    r = _run(tmp_path, real_dir, DANGEROUSLY_SKIP_CONTAINER="1")
+    r = _run(tmp_path, real_dir, "--dangerously-skip-container")
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert "fake-claude-here:" in r.stdout
     assert "no git repo detected" in r.stderr
@@ -241,7 +244,7 @@ def test_wrapper_claude_workspace_suppresses_no_repo_notice(tmp_path: Path) -> N
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         CLAUDE_WORKSPACE=str(workspace),
     )
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -258,7 +261,7 @@ def test_wrapper_claude_workspace_nonexistent_errors(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         CLAUDE_WORKSPACE=str(tmp_path / "does-not-exist"),
     )
     assert r.returncode == 1
@@ -425,7 +428,7 @@ def test_wrapper_firewall_tip_absent_in_host_mode(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         XDG_STATE_HOME=str(tmp_path / "state"),
     )
@@ -450,7 +453,7 @@ def test_wrapper_firewall_tip_absent_when_firewall_skipped_via_env(
         tmp_path,
         stub,
         home,
-        DANGEROUSLY_SKIP_FIREWALL="1",
+        "--dangerously-skip-firewall",
         XDG_STATE_HOME=str(tmp_path / "state"),
     )
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -526,7 +529,7 @@ def test_wrapper_passes_provider_key_through(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         ANTHROPIC_API_KEY="sk-from-env",
     )
@@ -546,7 +549,7 @@ def test_wrapper_resolves_key_from_envchain(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         **_NO_KEY_ENV,
     )
@@ -567,7 +570,7 @@ def test_wrapper_pins_envchain_namespace(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         CLAUDE_MONITOR_ENVCHAIN_NS="vault",
         MONITOR_PROVIDER="venice",
@@ -589,7 +592,7 @@ def test_wrapper_monitor_api_key_stays_monitor_only(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         MONITOR_API_KEY="sk-monitor-only",
         **_NO_KEY_ENV,
@@ -611,7 +614,7 @@ def test_wrapper_resolves_monitor_key_from_envchain(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         **_NO_KEY_ENV,
     )
@@ -632,10 +635,9 @@ def test_wrapper_prints_setup_help_when_no_key(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         MONITOR_API_KEY="",
-        DANGEROUSLY_SKIP_MONITOR="",
         **_NO_KEY_ENV,
     )
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -659,10 +661,10 @@ def test_wrapper_no_setup_help_when_disabled(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
+        "--dangerously-skip-monitor",
         HOME=str(tmp_path),
         MONITOR_API_KEY="",
-        DANGEROUSLY_SKIP_MONITOR="1",
         **_NO_KEY_ENV,
     )
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -679,10 +681,9 @@ def test_wrapper_no_setup_help_when_key_present(tmp_path: Path) -> None:
     r = _run(
         tmp_path,
         real_dir,
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        "--dangerously-skip-container",
         HOME=str(tmp_path),
         MONITOR_API_KEY="",
-        DANGEROUSLY_SKIP_MONITOR="",
         VENICE_INFERENCE_KEY="",
         OPENROUTER_API_KEY="",
         ANTHROPIC_API_KEY="sk-test",
@@ -703,18 +704,16 @@ def test_wrapper_monitor_help_shown_once_then_suppressed(tmp_path: Path) -> None
     _stub_empty_envchain(real_dir)
     state = tmp_path / "state"
     common = dict(
-        DANGEROUSLY_SKIP_CONTAINER="1",
         HOME=str(tmp_path),
         MONITOR_API_KEY="",
-        DANGEROUSLY_SKIP_MONITOR="",
         XDG_STATE_HOME=str(state),
         **_NO_KEY_ENV,
     )
-    r1 = _run(tmp_path, real_dir, **common)
+    r1 = _run(tmp_path, real_dir, "--dangerously-skip-container", **common)
     assert r1.returncode == 0, f"stderr: {r1.stderr}"
     assert _HELP_MARKER in r1.stderr, "first keyless launch shows the full help"
 
-    r2 = _run(tmp_path, real_dir, **common)
+    r2 = _run(tmp_path, real_dir, "--dangerously-skip-container", **common)
     assert r2.returncode == 0, f"stderr: {r2.stderr}"
     assert _HELP_MARKER not in r2.stderr, "marker should suppress the verbose help"
     assert "--dangerously-skip-monitor" in r2.stderr, "concise pointer stays"
@@ -788,7 +787,7 @@ def test_wrapper_respects_explicit_container_runtime(tmp_path: Path) -> None:
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     r = _run(
-        tmp_path, real_dir, DANGEROUSLY_SKIP_CONTAINER="1", CONTAINER_RUNTIME="runsc"
+        tmp_path, real_dir, "--dangerously-skip-container", CONTAINER_RUNTIME="runsc"
     )
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert "CONTAINER_RUNTIME=runsc" in r.stdout
@@ -874,7 +873,6 @@ def _run_with_args(
     cwd: Path, real_claude_dir: Path, args: list[str], **env_overrides: str
 ):
     """Like _run but accepts positional args for the wrapper."""
-    skip_flags = pop_skip_flags(env_overrides)
     stripped_path = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -886,7 +884,7 @@ def _run_with_args(
         **env_overrides,
     }
     return subprocess.run(
-        [str(WRAPPER), *skip_flags, *args],
+        [str(WRAPPER), *args],
         env=env,
         cwd=cwd,
         capture_output=True,
@@ -905,8 +903,7 @@ def test_skip_firewall_flag_stripped_from_args(tmp_path: Path) -> None:
     r = _run_with_args(
         tmp_path,
         real_dir,
-        ["--dangerously-skip-firewall", "--version"],
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        ["--dangerously-skip-container", "--dangerously-skip-firewall", "--version"],
     )
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert "--dangerously-skip-firewall" not in r.stdout
@@ -940,8 +937,7 @@ def test_skip_firewall_warning(tmp_path: Path) -> None:
     r = _run_with_args(
         tmp_path,
         real_dir,
-        ["--dangerously-skip-firewall"],
-        DANGEROUSLY_SKIP_CONTAINER="1",
+        ["--dangerously-skip-container", "--dangerously-skip-firewall"],
     )
     assert r.returncode == 0, r.stderr
     assert "firewall disabled" in r.stderr.lower()
@@ -970,11 +966,10 @@ def test_skip_firewall_env_propagation(
         r = _run_with_args(
             tmp_path,
             real_dir,
-            ["--dangerously-skip-firewall"],
-            DANGEROUSLY_SKIP_CONTAINER="1",
+            ["--dangerously-skip-container", "--dangerously-skip-firewall"],
         )
     else:
-        r = _run(tmp_path, real_dir, DANGEROUSLY_SKIP_CONTAINER="1")
+        r = _run(tmp_path, real_dir, "--dangerously-skip-container")
     assert r.returncode == 0, f"{desc}\nstderr: {r.stderr}"
     assert f"DANGEROUSLY_SKIP_FIREWALL={expected_val}" in r.stdout, desc
     assert ("firewall disabled" in r.stderr.lower()) == warns, desc

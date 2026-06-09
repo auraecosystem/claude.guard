@@ -70,7 +70,6 @@ def test_panic_snapshots_none_yet(tmp_path: Path) -> None:
         home,
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_PANIC_DIR=str(panic_dir),
     )
     assert "none under" in r.stdout
@@ -90,7 +89,6 @@ def test_panic_snapshots_shows_latest(tmp_path: Path) -> None:
         home,
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_PANIC_DIR=str(panic_dir),
     )
     assert "latest snapshot:" in r.stdout
@@ -119,7 +117,6 @@ def test_managed_settings_group_writable_degrades(tmp_path: Path) -> None:
         home,
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_MANAGED_SETTINGS=str(ms),
         CLAUDE_GUARD_MANAGED_SETTINGS_OWNER=str(os.getuid()),
     )
@@ -147,7 +144,6 @@ def test_invalid_managed_settings_owner_env_exits_2(tmp_path: Path) -> None:
         home,
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_MANAGED_SETTINGS=str(ms),
         CLAUDE_GUARD_MANAGED_SETTINGS_OWNER="not-a-number",
     )

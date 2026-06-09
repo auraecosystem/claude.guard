@@ -146,7 +146,9 @@ def _run(
 def test_bare_host_reports_unprotected(tmp_path: Path) -> None:
     """Empty PATH save coreutils: devcontainer/uv/docker absent => cannot launch."""
     r = _run(
-        None, tmp_path / "home", CONTAINER_RUNTIME="runsc", DANGEROUSLY_SKIP_MONITOR=""
+        None,
+        tmp_path / "home",
+        CONTAINER_RUNTIME="runsc",
     )
     assert r.returncode == 2
     assert "VERDICT: UNPROTECTED" in r.stdout
@@ -161,7 +163,6 @@ def test_all_tools_present_managed_settings_absent_degrades(tmp_path: Path) -> N
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
     )
     assert r.returncode == 1
     assert "VERDICT: DEGRADED" in r.stdout
@@ -180,7 +181,6 @@ def test_missing_user_claude_md_degrades(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_USER_CLAUDE_MD=str(tmp_path / "absent" / "CLAUDE.md"),
     )
     assert r.returncode == 1
@@ -199,7 +199,6 @@ def test_user_claude_md_with_marker_is_not_a_degrade_reason(tmp_path: Path) -> N
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_USER_CLAUDE_MD=str(md),
     )
     assert "present (no-bypass instructions)" in r.stdout
@@ -217,7 +216,6 @@ def test_user_claude_md_without_marker_degrades(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_USER_CLAUDE_MD=str(md),
     )
     assert r.returncode == 1
@@ -250,7 +248,6 @@ def test_broken_secret_redactor_is_a_degrade_reason(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_REDACTOR=str(broken),
     )
     assert r.returncode == 1
@@ -270,7 +267,6 @@ def test_working_secret_redactor_is_reported_healthy(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_REDACTOR=str(ok),
     )
     assert "working (detect-secrets)" in r.stdout
@@ -300,7 +296,6 @@ def test_redactor_probe_prefers_project_venv_python(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_REDACTOR=str(redactor),
     )
     assert "working (detect-secrets)" in r.stdout
@@ -332,7 +327,6 @@ def test_selected_runtime_not_registered_degrades(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
     )
     assert r.returncode in (1, 2)
     assert "runsc but it is not registered with Docker" in r.stdout
@@ -347,7 +341,6 @@ def test_too_old_compose_version_unprotects(tmp_path: Path) -> None:
         tmp_path / "home",
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
     )
     assert r.returncode == 2
     assert "VERDICT: UNPROTECTED" in r.stdout
@@ -429,7 +422,7 @@ def test_monitor_key_from_envchain_is_accepted(tmp_path: Path) -> None:
         "fi\n"
         "exit 1\n",
     )
-    r = _run(stubs, home, CONTAINER_RUNTIME="runsc", DANGEROUSLY_SKIP_MONITOR="")
+    r = _run(stubs, home, CONTAINER_RUNTIME="runsc")
     # No env-var key, but envchain provides one => not a degrade reason.
     assert "no monitor API key" not in r.stdout
     assert "monitor API key available (env or envchain)" in r.stdout
@@ -444,7 +437,6 @@ def test_monitor_api_key_is_accepted(tmp_path: Path) -> None:
         home,
         CONTAINER_RUNTIME="runsc",
         MONITOR_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
     )
     assert "no monitor API key" not in r.stdout
     assert "monitor API key available (env or envchain)" in r.stdout
@@ -856,7 +848,6 @@ def test_fully_healthy_is_protected(tmp_path: Path) -> None:
         home,
         CONTAINER_RUNTIME="runsc",
         ANTHROPIC_API_KEY="sk-test",
-        DANGEROUSLY_SKIP_MONITOR="",
         CLAUDE_GUARD_MANAGED_SETTINGS=str(ms),
         CLAUDE_GUARD_MANAGED_SETTINGS_OWNER=str(os.getuid()),
         CLAUDE_GUARD_USER_CLAUDE_MD=str(cmd),

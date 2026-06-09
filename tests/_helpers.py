@@ -34,29 +34,6 @@ def run_capture(args: list[str], **kwargs: object) -> subprocess.CompletedProces
     return subprocess.run(args, capture_output=True, text=True, check=False, **kwargs)
 
 
-# The DANGEROUSLY_SKIP_* env vars are no longer wrapper INPUT — only the
-# --dangerously-skip-* flags weaken a launch; the wrapper exports those vars purely
-# as its internal signal to the sandbox. Tests still express "skip this layer" with
-# the env kwarg for convenience, so the host-mode runners translate a kwarg set to
-# "1" into the equivalent flag and drop it from the env. A value other than "1"
-# (e.g. "" meaning "do not skip") is just dropped.
-_SKIP_FLAG_FOR_ENV = {
-    "DANGEROUSLY_SKIP_FIREWALL": "--dangerously-skip-firewall",
-    "DANGEROUSLY_SKIP_CONTAINER": "--dangerously-skip-container",
-    "DANGEROUSLY_SKIP_MONITOR": "--dangerously-skip-monitor",
-}
-
-
-def pop_skip_flags(env_overrides: dict[str, str]) -> list[str]:
-    """Pop any DANGEROUSLY_SKIP_*=1 kwargs from `env_overrides` (in place) and
-    return the equivalent --dangerously-skip-* flags to pass to the wrapper."""
-    return [
-        flag
-        for var, flag in _SKIP_FLAG_FOR_ENV.items()
-        if env_overrides.pop(var, None) == "1"
-    ]
-
-
 def mirror_path_excluding(tmp_path: Path, *exclude: str) -> Path:
     """A dir that symlinks every executable on the current PATH *except* the
     named tools. Lets a test make a standard tool (docker, realpath, ...) appear
