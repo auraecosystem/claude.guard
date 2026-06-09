@@ -146,11 +146,14 @@ prepare_squid_log_dir() {
 # A definitive negative answer is distinguished from a dropped query: a domain
 # whose query came back status NXDOMAIN (parsed from the +comments header and
 # attributed via the +question line) emits a `domain<TAB>NXDOMAIN` marker
-# instead of silently nothing. The retry/fallback layers above treat the marker
-# as settled — a name that does not exist answers NXDOMAIN from every resolver,
-# so re-asking only burns retry passes and backoff sleeps — while a shed query
-# (no answer at all) still falls through to retries and fallback resolvers.
-# The marker never reaches resolve_with_fallback's callers (it is consumed there).
+# instead of silently nothing. resolve_a_with_retries consumes the marker: the
+# domain is settled FOR THAT RESOLVER ONLY — re-asking the same resolver just
+# burns retry passes and backoff sleeps — but emits no record, so
+# resolve_with_fallback still offers it to the next resolver. That scoping is
+# deliberate: a filtering primary (Pi-hole, NextDNS, corporate DNS) answers
+# NXDOMAIN for names a public resolver knows, and must not deny them for the
+# whole boot. A shed query (no answer at all) keeps the full retry-then-fallback
+# treatment. The marker never reaches resolve_a_with_retries' callers.
 #
 # Batches resolve SEQUENTIALLY by default (CLAUDE_GUARD_DNS_BATCH_CONCURRENCY=1). A larger
 # allowlist (150+ domains) is the firewall's slowest boot step because each batch's
@@ -246,8 +249,7 @@ batch_resolve_a() {
           hops=$((hops + 1))
         done
         if [[ -z "${addr[$cur]:-}" ]]; then
-          # Definitively nonexistent: emit the marker so the retry/fallback
-          # layers settle the domain instead of burning more passes on it.
+          # Definitively nonexistent: emit the marker (spec in the header above).
           if [[ -n "${nxdomain[${d%.}]:-}" ]]; then
             printf '%s\tNXDOMAIN\n' "$d"
           fi
@@ -294,9 +296,9 @@ batch_resolve_a() {
 # burst-shed threshold, so waiting buys nothing on the path that gates launch
 # readiness — while the refresh loop keeps the default 1s/2s.
 #
-# A `domain<TAB>NXDOMAIN` marker from batch_resolve_a settles its domain (it
-# drops out of pending — a nonexistent name answers NXDOMAIN on every attempt)
-# and is re-emitted so resolve_with_fallback can settle it too.
+# An NXDOMAIN marker (see batch_resolve_a) settles its domain for this resolver:
+# it drops out of pending without further attempts and is NOT emitted, so the
+# caller's fallback chain still gets to try it elsewhere.
 resolve_a_with_retries() {
   local resolver="$1" batch_size="$2"
   shift 2
@@ -304,12 +306,14 @@ resolve_a_with_retries() {
   local pending=("$@")
   local attempt name ip d next
   local delay="${CLAUDE_GUARD_DNS_RETRY_BACKOFF:-1}"
-  # Non-numeric garbage falls back to the default rather than feeding `sleep`.
-  [[ "$delay" =~ ^[0-9]+$ ]] || delay=1
+  # Non-numeric garbage falls back to the default rather than feeding `sleep`;
+  # leading zeros are refused too, or `(( ))` below would parse them as octal.
+  [[ "$delay" =~ ^(0|[1-9][0-9]*)$ ]] || delay=1
   for attempt in 1 2 3; do
     while IFS=$'\t' read -r name ip; do
       [[ -n "$name" ]] || continue
       seen["$name"]=1
+      [[ "$ip" == "NXDOMAIN" ]] && continue
       printf '%s\t%s\n' "$name" "$ip"
     done < <(batch_resolve_a "$resolver" "$batch_size" "${pending[@]+"${pending[@]}"}")
     next=()
@@ -362,9 +366,9 @@ fallback_resolvers() {
 # domain answered earlier is never re-queried. Emits `domain<TAB>ip` exactly like
 # resolve_a_with_retries — same CNAME-following, same is_public_ipv4 rebinding
 # rejection, same per-domain dedup — so every resolver is held to identical checks.
-# An NXDOMAIN marker is consumed here: the domain is settled (no later resolver
-# re-queries a name that does not exist) but emits no record, so callers only
-# ever see `domain<TAB>ip`.
+# A domain one resolver answered NXDOMAIN stays pending (resolve_a_with_retries
+# settles it per resolver without emitting it), so the remaining resolvers still
+# get a shot at it — see batch_resolve_a for why.
 # Callers MUST have :53 egress to the fallback resolvers open or the fallback passes
 # resolve nothing: the initial build runs in the pre-lockdown bootstrap window, and
 # the refresh loop / live expansion open the fallback resolvers in their DNS window.
@@ -385,7 +389,6 @@ resolve_with_fallback() {
     while IFS=$'\t' read -r name ip; do
       [[ -n "$name" ]] || continue
       seen["$name"]=1
-      [[ "$ip" == "NXDOMAIN" ]] && continue
       printf '%s\t%s\n' "$name" "$ip"
     done < <(resolve_a_with_retries "$resolver" "$batch_size" "${pending[@]+"${pending[@]}"}")
     next=()

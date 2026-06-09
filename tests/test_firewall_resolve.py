@@ -554,16 +554,20 @@ def retry_env(tmp_path: Path) -> dict:
     }
 
 
-def run_retries(env: dict, *args: str) -> subprocess.CompletedProcess[str]:
+def run_retries(
+    env: dict, *args: str, sleeplog: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     """Invoke resolve_a_with_retries under `set -euo pipefail` (the caller contract),
-    with `sleep` stubbed so backoff is instant."""
+    with `sleep` stubbed so backoff is instant. With `sleeplog`, the stub records
+    each requested delay so the backoff schedule itself can be asserted."""
     quoted = " ".join(f"'{a}'" for a in args)
+    sleep_body = f"echo \"$1\" >>'{sleeplog}'" if sleeplog else ":"
     return run_capture(
         [
             "bash",
             "-c",
             f"set -euo pipefail; source '{FIREWALL_LIB}'; "
-            f"sleep() {{ :; }}; resolve_a_with_retries {quoted}",
+            f"sleep() {{ {sleep_body}; }}; resolve_a_with_retries {quoted}",
         ],
         env=env,
     )
@@ -647,12 +651,17 @@ def test_empty_domain_list_resolves_nothing_without_calling_dig(
 
 
 # dig stub emitting the `+noall +answer +comments +question` format: every query
-# prints its header (with a status), its question line, and representative comment
-# noise (flags, EDNS pseudosection, blank separators) exactly as real dig does.
-# Domains space-listed in $NXDOMAIN answer status NXDOMAIN with no records; every
-# other domain answers NOERROR with an A record. Optional $CALLCOUNT and
-# $RESOLVERLOG hooks mirror the flaky/resolver stubs above so retry and fallback
-# behavior can be asserted.
+# prints its header (with a status), comment noise (flags, EDNS pseudosection,
+# blank separators), and its question line exactly as real dig does — on EVERY
+# branch, so the parser is proven to walk past the noise to reach an answer.
+# Domains space-listed in $NXDOMAIN answer status NXDOMAIN with no records;
+# domains in $NXDOMAIN_CNAME answer status NXDOMAIN with a dangling CNAME to
+# $CANON in the answer section (an alias whose target does not exist); every
+# other domain answers NOERROR with an A record. $NXDOMAIN_EXEMPT_VIA names one
+# resolver (@host) on which the NXDOMAIN'd domains resolve normally — modelling
+# a filtering primary (Pi-hole/corporate DNS) that a public fallback overrules.
+# Optional $CALLCOUNT and $RESOLVERLOG hooks mirror the flaky/resolver stubs
+# above so retry and fallback behavior can be asserted.
 _DIG_NXDOMAIN_STUB = (
     "#!/bin/sh\n"
     'if [ -n "${CALLCOUNT:-}" ]; then n=$(cat "$CALLCOUNT" 2>/dev/null || echo 0); echo $((n + 1)) >"$CALLCOUNT"; fi\n'
@@ -668,22 +677,28 @@ _DIG_NXDOMAIN_STUB = (
     '[ -n "$qfile" ] || exit 0\n'
     'if [ -n "${RESOLVERLOG:-}" ]; then printf \'%s\\n\' "$server" >>"$RESOLVERLOG"; fi\n'
     ': "${FAKE_IP:=203.0.113.7}"\n'
+    ': "${CANON:=canonical.cdn.example}"\n'
     "while IFS= read -r d; do\n"
     '  [ -n "$d" ] || continue\n'
+    "  nx=1\n"
+    "  cn=1\n"
+    '  case " ${NXDOMAIN:-} " in *" $d "*) nx=0 ;; esac\n'
+    '  case " ${NXDOMAIN_CNAME:-} " in *" $d "*) nx=0; cn=0 ;; esac\n'
+    '  if [ -n "${NXDOMAIN_EXEMPT_VIA:-}" ] && [ "$server" = "$NXDOMAIN_EXEMPT_VIA" ]; then nx=1; cn=1; fi\n'
     "  printf ';; Got answer:\\n'\n"
-    '  case " $NXDOMAIN " in\n'
-    '  *" $d "*)\n'
+    '  if [ "$nx" -eq 0 ]; then\n'
     "    printf ';; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 1\\n'\n"
-    "    printf ';; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1\\n\\n'\n"
-    "    printf ';; OPT PSEUDOSECTION:\\n; EDNS: version: 0, flags:; udp: 512\\n'\n"
-    "    printf ';; QUESTION SECTION:\\n;%s.\\t\\t\\tIN\\tA\\n\\n' \"$d\"\n"
-    "    ;;\n"
-    "  *)\n"
+    "  else\n"
     "    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 2\\n'\n"
-    "    printf ';; QUESTION SECTION:\\n;%s.\\t\\t\\tIN\\tA\\n\\n' \"$d\"\n"
+    "  fi\n"
+    "  printf ';; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 1, ADDITIONAL: 1\\n\\n'\n"
+    "  printf ';; OPT PSEUDOSECTION:\\n; EDNS: version: 0, flags:; udp: 512\\n'\n"
+    "  printf ';; QUESTION SECTION:\\n;%s.\\t\\t\\tIN\\tA\\n\\n' \"$d\"\n"
+    '  if [ "$cn" -eq 0 ]; then\n'
+    '    printf \'%s.\\t300\\tIN\\tCNAME\\t%s.\\n\' "$d" "$CANON"\n'
+    '  elif [ "$nx" -eq 1 ]; then\n'
     '    printf \'%s.\\t300\\tIN\\tA\\t%s\\n\' "$d" "$FAKE_IP"\n'
-    "    ;;\n"
-    "  esac\n"
+    "  fi\n"
     'done <"$qfile"\n'
     "exit 0\n"
 )
@@ -701,6 +716,8 @@ def nxdomain_env(tmp_path: Path) -> dict:
         "PATH": f"{stub_dir}:{os.environ['PATH']}",
         "CALLCOUNT": str(counter),
         "NXDOMAIN": "",
+        "NXDOMAIN_CNAME": "",
+        "NXDOMAIN_EXEMPT_VIA": "",
         "FAKE_IP": "203.0.113.7",
         "RESOLVERLOG": str(tmp_path / "resolvers"),
         "CLAUDE_GUARD_DNS_FALLBACK_RESOLVERS": "8.8.8.8 1.1.1.1",
@@ -719,12 +736,24 @@ def test_comment_lines_do_not_break_answer_parsing(nxdomain_env: dict) -> None:
     }
 
 
-def test_batch_resolve_emits_nxdomain_marker(nxdomain_env: dict) -> None:
+@pytest.mark.parametrize(
+    "domains",
+    [
+        ("a.example.com", "dead.example.com"),
+        # NXDOMAIN first: the next query's NOERROR header must RESET the held
+        # status, or the resolving batch-mate would be falsely marked nonexistent.
+        ("dead.example.com", "a.example.com"),
+    ],
+)
+def test_batch_resolve_emits_nxdomain_marker(
+    nxdomain_env: dict, domains: tuple[str, str]
+) -> None:
     # A query answered status NXDOMAIN is a definitive negative, not a dropped
     # query: batch_resolve_a must surface it as a `domain\tNXDOMAIN` marker so the
-    # retry/fallback layers can settle the domain instead of re-asking.
+    # retry layer can settle the domain instead of re-asking, regardless of where
+    # it sits in the batch.
     env = {**nxdomain_env, "NXDOMAIN": "dead.example.com"}
-    r = run_resolve(env, "", "30", "a.example.com", "dead.example.com")
+    r = run_resolve(env, "", "30", *domains)
     assert r.returncode == 0, r.stderr
     assert set(r.stdout.splitlines()) == {
         "a.example.com\t203.0.113.7",
@@ -732,55 +761,70 @@ def test_batch_resolve_emits_nxdomain_marker(nxdomain_env: dict) -> None:
     }
 
 
+def test_nxdomain_via_dangling_cname_emits_marker(nxdomain_env: dict) -> None:
+    # An alias whose canonical target does not exist answers NXDOMAIN with the
+    # CNAME record still in the answer section. The CNAME walk finds no terminal
+    # A record and the queried name carries the NXDOMAIN status, so the marker —
+    # not the canonical name, and not silence — must come out.
+    env = {**nxdomain_env, "NXDOMAIN_CNAME": "alias.example.com"}
+    r = run_resolve(env, "", "30", "alias.example.com", "a.example.com")
+    assert r.returncode == 0, r.stderr
+    assert set(r.stdout.splitlines()) == {
+        "a.example.com\t203.0.113.7",
+        "alias.example.com\tNXDOMAIN",
+    }
+
+
 def test_nxdomain_is_not_retried(nxdomain_env: dict) -> None:
     # The regression this fixes: a nonexistent domain used to look identical to a
     # shed query and burned all 3 retry passes (plus backoff sleeps) on every boot.
-    # An NXDOMAIN answer must settle it on the FIRST pass — exactly one dig call.
+    # An NXDOMAIN answer must settle it on the FIRST pass — exactly one dig call —
+    # and the marker is consumed here, never emitted to callers.
     env = {**nxdomain_env, "NXDOMAIN": "dead.example.com"}
     r = run_retries(env, "", "30", "live.example.com", "dead.example.com")
     assert r.returncode == 0, r.stderr
-    assert set(r.stdout.splitlines()) == {
-        "live.example.com\t203.0.113.7",
-        "dead.example.com\tNXDOMAIN",
-    }
+    assert r.stdout.splitlines() == ["live.example.com\t203.0.113.7"]
     assert _calls(env) == 1
 
 
-def test_nxdomain_skips_fallback_resolvers_and_marker_is_consumed(
+def test_nxdomain_on_filtering_primary_is_rescued_by_fallback(
     nxdomain_env: dict,
 ) -> None:
-    # A name that does not exist answers NXDOMAIN from every resolver, so the
-    # fallback resolvers must never be queried for it — and the internal marker
-    # must not leak into resolve_with_fallback's output, whose consumers
-    # (_populate_stream, the refresh loop's resolved_tsv count) expect only
-    # `domain<TAB>ip` records.
+    # NXDOMAIN settles a domain per-RESOLVER, not globally: a filtering primary
+    # (Pi-hole, corporate DNS) answering NXDOMAIN for a name a public resolver
+    # knows must not deny it for the whole boot — the fallback chain still gets
+    # to try, and rescues it.
+    env = {
+        **nxdomain_env,
+        "NXDOMAIN": "blocked.example.com",
+        "NXDOMAIN_EXEMPT_VIA": "8.8.8.8",
+    }
+    r = run_fallback(env, "", "30", "live.example.com", "blocked.example.com")
+    assert r.returncode == 0, r.stderr
+    assert set(r.stdout.splitlines()) == {
+        "live.example.com\t203.0.113.7",
+        "blocked.example.com\t203.0.113.7",
+    }
+
+
+def test_nxdomain_everywhere_costs_one_pass_per_resolver(nxdomain_env: dict) -> None:
+    # A genuinely nonexistent domain costs each resolver exactly ONE pass (3 dig
+    # calls total, down from 9 with full retries) and never reaches the output —
+    # resolve_with_fallback's consumers (_populate_stream, the refresh loop's
+    # resolved_tsv count) only ever see `domain<TAB>ip` records.
     env = {**nxdomain_env, "NXDOMAIN": "dead.example.com"}
     r = run_fallback(env, "", "30", "live.example.com", "dead.example.com")
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["live.example.com\t203.0.113.7"]
-    # Only the primary (empty resolver) pass ran; no fallback resolver was queried.
-    assert Path(env["RESOLVERLOG"]).read_text().splitlines() == [""]
+    assert Path(env["RESOLVERLOG"]).read_text().splitlines() == [
+        "",
+        "8.8.8.8",
+        "1.1.1.1",
+    ]
+    assert _calls(env) == 3
 
 
 # === resolve_a_with_retries backoff (CLAUDE_GUARD_DNS_RETRY_BACKOFF) ===
-
-
-def run_retries_logging_sleeps(
-    env: dict, sleeplog: Path, *args: str
-) -> subprocess.CompletedProcess[str]:
-    """Like run_retries, but `sleep` records its argument so the backoff schedule
-    itself can be asserted."""
-    quoted = " ".join(f"'{a}'" for a in args)
-    return run_capture(
-        [
-            "bash",
-            "-c",
-            f"set -euo pipefail; source '{FIREWALL_LIB}'; "
-            f"sleep() {{ echo \"$1\" >>'{sleeplog}'; }}; "
-            f"resolve_a_with_retries {quoted}",
-        ],
-        env=env,
-    )
 
 
 def _sleeps(sleeplog: Path) -> list[str]:
@@ -793,7 +837,7 @@ def test_retry_backoff_defaults_to_exponential(retry_env: dict, tmp_path: Path) 
     sleeplog = tmp_path / "sleeps"
     env = {**retry_env, "FLAKY": "dead.example.com", "FLAKY_FAIL_CALLS": "99"}
     env.pop("CLAUDE_GUARD_DNS_RETRY_BACKOFF", None)
-    r = run_retries_logging_sleeps(env, sleeplog, "", "30", "dead.example.com")
+    r = run_retries(env, "", "30", "dead.example.com", sleeplog=sleeplog)
     assert r.returncode == 0, r.stderr
     assert _sleeps(sleeplog) == ["1", "2"]
     assert _calls(env) == 3
@@ -812,8 +856,8 @@ def test_retry_backoff_zero_retries_immediately_without_sleeping(
         "FLAKY_FAIL_CALLS": "99",
         "CLAUDE_GUARD_DNS_RETRY_BACKOFF": "0",
     }
-    r = run_retries_logging_sleeps(
-        env, sleeplog, "", "30", "live.example.com", "dead.example.com"
+    r = run_retries(
+        env, "", "30", "live.example.com", "dead.example.com", sleeplog=sleeplog
     )
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["live.example.com\t203.0.113.7"]
@@ -821,21 +865,24 @@ def test_retry_backoff_zero_retries_immediately_without_sleeping(
     assert _calls(env) == 3
 
 
+@pytest.mark.parametrize("bad", ["soon", "08"])
 def test_retry_backoff_garbage_falls_back_to_default(
-    retry_env: dict, tmp_path: Path
+    retry_env: dict, tmp_path: Path, bad: str
 ) -> None:
     # A non-numeric value must not reach `sleep` (which would abort the resolve
-    # under set -e); it falls back to the default schedule.
+    # under set -e), and a leading-zero value must not reach the arithmetic guard
+    # (bash parses it as octal and errors); both fall back to the default schedule.
     sleeplog = tmp_path / "sleeps"
     env = {
         **retry_env,
         "FLAKY": "dead.example.com",
         "FLAKY_FAIL_CALLS": "99",
-        "CLAUDE_GUARD_DNS_RETRY_BACKOFF": "soon",
+        "CLAUDE_GUARD_DNS_RETRY_BACKOFF": bad,
     }
-    r = run_retries_logging_sleeps(env, sleeplog, "", "30", "dead.example.com")
+    r = run_retries(env, "", "30", "dead.example.com", sleeplog=sleeplog)
     assert r.returncode == 0, r.stderr
     assert _sleeps(sleeplog) == ["1", "2"]
+    assert _calls(env) == 3
 
 
 # === apply_privacy_inference_lockdown ===

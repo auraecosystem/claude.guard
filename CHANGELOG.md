@@ -30,6 +30,9 @@ adhere to [Semantic Versioning](https://semver.org/).
   instead. Each seeded IP is re-validated as public and the bogon-drop and
   squid-by-domain layers are unchanged, so the egress boundary is preserved. Only
   the base + per-project allowlist is cached, never runtime live-expansions.
+  `docker-compose.yml` now passes the matching `:-1` default (it previously
+  injected `:-0`, which would have silently kept the cache off for every compose
+  launch).
 - The monitor's deterministic action classifier now runs its six type-pattern
   passes (egress/obfuscation/persistence/infra/destructive/vcs) over a head+tail
   budget (`elide_middle`) instead of the entire tool input, cutting per-call cost
@@ -56,19 +59,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- The cross-session DNS cache actually defaults to ON now: `docker-compose.yml`
-  injected `CLAUDE_GUARD_DNS_CACHE` with a `:-0` default, silently overriding
-  `init-firewall.bash`'s documented on-by-default for every compose launch — so
-  no launch ever seeded from cache and every boot paid the full live resolve.
-  The compose default now matches the script (`:-1`); `CLAUDE_GUARD_DNS_CACHE=0`
-  still opts out.
 - The firewall no longer retries a domain whose DNS query answered NXDOMAIN: a
   definitive "does not exist" was previously indistinguishable from a dropped
   query, so a nonexistent allowlist domain walked the entire retry-and-fallback
   chain (3 resolvers × 3 attempts plus backoff sleeps, ~9s of pure sleep) on
-  every boot and refresh cycle. NXDOMAIN now settles the domain on the first
-  answer; genuinely shed queries (no answer) still get the full retry/fallback
-  treatment.
+  every boot and refresh cycle. An NXDOMAIN answer now settles the domain for
+  that resolver on the first pass; the fallback resolvers still get to try it
+  (so a filtering primary resolver, e.g. Pi-hole, cannot deny a name a public
+  resolver answers), and genuinely shed queries (no answer) keep the full
+  retry/fallback treatment.
 - The firewall's DNS-refresh fallback resolvers are no longer silently disabled.
   `init-firewall.bash` sets a global `IFS=$'\n\t'` (no space), under which the
   space-separated `8.8.8.8 1.1.1.1` default stayed a single token, failed the
