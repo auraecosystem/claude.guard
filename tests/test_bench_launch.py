@@ -58,6 +58,14 @@ def test_up_total_excludes_build_cold_total_includes_it(script: str) -> None:
     assert "cold_total_ms=$((t_mon - t_start))" in script
 
 
+def test_json_mode_isolates_stdout_for_the_summary(script: str) -> None:
+    """In --json mode the summary is the SOLE thing on stdout: docker chatter is
+    redirected to stderr (fd 1 -> 2) and the JSON is written on the saved fd 3,
+    so a consumer capturing stdout never sees a stray compose progress line."""
+    assert "exec 3>&1 1>&2" in script
+    assert ">&3" in script
+
+
 def test_json_contract_keys(script: str) -> None:
     for key in (
         "build_ms",

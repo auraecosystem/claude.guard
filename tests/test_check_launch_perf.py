@@ -100,6 +100,20 @@ def test_run_bench_surfaces_bench_failure(chk, monkeypatch, capsys):
     assert "firewall healthy never ready" in capsys.readouterr().err
 
 
+def test_run_bench_surfaces_non_json_stdout(chk, monkeypatch, capsys):
+    # A clean exit but unparsable stdout (docker chatter leaking onto the JSON
+    # channel) must surface the output, not raise a bare JSONDecodeError.
+    def fake_run(cmd, capture_output, text):
+        return types.SimpleNamespace(
+            stdout="Container foo Started\n", stderr="", returncode=0
+        )
+
+    monkeypatch.setattr(chk.subprocess, "run", fake_run)
+    with pytest.raises(SystemExit):
+        chk.run_bench(reps=1)
+    assert "Container foo Started" in capsys.readouterr().err
+
+
 # ── make_history_entry ───────────────────────────────────────────────────────
 
 

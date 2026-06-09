@@ -37,6 +37,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EMIT_JSON=0
 [[ "${1:-}" == "--json" ]] && EMIT_JSON=1
 
+# In --json mode stdout must carry ONLY the JSON line: `docker compose`
+# build/up/down write progress to stdout, and the consumer (check-launch-perf.py)
+# captures all of it, so a stray "Container … Started" line would corrupt the
+# parse. Save the real stdout on fd 3 and send everything else to stderr; the
+# summary is emitted on fd 3. (Human mode leaves stdout alone for the table.)
+((EMIT_JSON)) && exec 3>&1 1>&2
+
 PROJECT="launch-timing-$$"
 MONITOR_PORT="${MONITOR_PORT:-9199}"
 # The firewall's IP on the sandbox network; the monitor shares its netns and
@@ -169,8 +176,10 @@ cold_total_ms=$((t_mon - t_start))
 fmt() { printf '%d.%03ds' $(($1 / 1000)) $(($1 % 1000)); }
 
 if ((EMIT_JSON)); then
+  # fd 3 is the saved real stdout (see the --json redirect above); the docker
+  # chatter went to stderr, so this line is the sole thing a consumer parses.
   printf '{"build_ms":%d,"firewall_ms":%d,"hardener_ms":%d,"services_ms":%d,"monitor_ms":%d,"up_total_ms":%d,"cold_total_ms":%d}\n' \
-    "$build_ms" "$firewall_ms" "$hardener_ms" "$services_ms" "$monitor_ms" "$up_total_ms" "$cold_total_ms"
+    "$build_ms" "$firewall_ms" "$hardener_ms" "$services_ms" "$monitor_ms" "$up_total_ms" "$cold_total_ms" >&3
   exit 0
 fi
 

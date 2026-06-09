@@ -87,7 +87,16 @@ def run_bench(reps: int) -> dict:
             raise SystemExit(
                 f"bench-launch.bash failed (exit {proc.returncode}) — see output above"
             )
-        sample = json.loads(proc.stdout.strip())
+        try:
+            sample = json.loads(proc.stdout.strip())
+        except json.JSONDecodeError:
+            # A clean exit but unparsable stdout means docker chatter leaked onto
+            # the JSON channel — surface it instead of a bare decode traceback.
+            sys.stderr.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            raise SystemExit(
+                "bench-launch.bash did not emit valid JSON on stdout — see output above"
+            ) from None
         for leg in _LEGS:
             legs[leg].append(sample[f"{leg}_ms"] / 1000)
     up = legs["up_total"]
