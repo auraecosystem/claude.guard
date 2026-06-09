@@ -281,7 +281,7 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             200, json.dumps(result if result is not None else {}).encode()
         )
 
-    def do_POST(self):
+    def do_POST(self):  # pylint: disable=too-many-return-statements  # guard-clause handler
         # Rate-limit before any work so a flood is cheap and never reaches
         # _audit (otherwise the limiter feeds the flood it's bounding).
         if not _allow_request(self.client_address[0]):
