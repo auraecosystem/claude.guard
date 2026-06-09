@@ -27,17 +27,21 @@
 #                     else the git repo root, else $PWD — matching `claude`)
 #   -h, --help        show this help
 #
-# A domain that is not already in .devcontainer/domain-allowlist.json gets a
-# pre-apply challenge: what the grant means (`rw` is full HTTP — a write/exfil
-# channel out of the sandbox), a lookalike warning when it resembles an
-# allowlisted domain or carries punycode/non-ASCII labels, and — for an rw
-# grant on a terminal — a prompt to retype the domain. Retyping (not pasting)
-# is the point: it breaks copy-paste autopilot on an agent-suggested command,
-# and typing the ASCII you see defeats homoglyphs. Non-interactive callers
-# proceed with the printed warning; --yes skips the prompt explicitly.
-# Profiles skip the challenge: their domain sets are defined by this tool, not
-# by the agent. (Set CLAUDE_GUARD_DOMAIN_ALLOWLIST to vet against an allowlist
-# at a non-default path.)
+# A domain that is not in .devcontainer/domain-allowlist.json — or an rw grant
+# for a domain the allowlist holds as ro (an escalation: it opens a write
+# channel the curated list deliberately withholds) — gets a pre-apply
+# challenge: what the grant means (`rw` is full HTTP — a write/exfil channel
+# out of the sandbox), a lookalike warning when it resembles an allowlisted
+# domain or carries punycode/non-ASCII labels, and — for an rw grant on a
+# terminal — a prompt to retype the domain. Retyping (not pasting) is the
+# point: it breaks copy-paste autopilot on an agent-suggested command, and
+# typing the ASCII you see defeats homoglyphs. Non-interactive callers proceed
+# with the printed warning (so a `</dev/null` redirect skips the retype — the
+# warnings still print, and the residual is accepted: scripts must keep
+# working); --yes skips the prompt explicitly. Profiles skip the challenge:
+# their domain sets are defined by this tool, not by the agent. (Set
+# CLAUDE_GUARD_DOMAIN_ALLOWLIST to vet against an allowlist at a non-default
+# path.)
 #
 # Expansions are SESSION-SCOPED: they vanish when the sandbox is torn down. To
 # make a domain permanent, add it to .devcontainer/domain-allowlist.json and
@@ -88,10 +92,15 @@ require_allowlist() {
     echo "claude-loosen-firewall: jq is required to vet ad-hoc domains against the permanent allowlist." >&2
     exit 1
   fi
-  [[ -r "$allowlist_file" ]] && return 0
-  echo "claude-loosen-firewall: cannot read the permanent allowlist (needed to vet ad-hoc domains):" >&2
+  if [[ ! -r "$allowlist_file" ]]; then
+    echo "claude-loosen-firewall: cannot read the permanent allowlist (needed to vet ad-hoc domains):" >&2
+    echo "claude-loosen-firewall:   $allowlist_file" >&2
+    echo "claude-loosen-firewall: set CLAUDE_GUARD_DOMAIN_ALLOWLIST to its actual location." >&2
+    exit 1
+  fi
+  jq -e 'type == "object"' "$allowlist_file" >/dev/null 2>&1 && return 0
+  echo "claude-loosen-firewall: the permanent allowlist is not a JSON object (needed to vet ad-hoc domains):" >&2
   echo "claude-loosen-firewall:   $allowlist_file" >&2
-  echo "claude-loosen-firewall: set CLAUDE_GUARD_DOMAIN_ALLOWLIST to its actual location." >&2
   exit 1
 }
 
@@ -124,17 +133,20 @@ nearest_allowlisted() {
 # permanent allowlist: explain the grant, flag lookalikes, and require an rw
 # grant to be retyped on a TTY (the header explains why retyping).
 challenge_domain() {
-  local entry="$1" domain access typed lookalikes
+  local entry="$1" domain access listed typed lookalikes
   domain="${entry%%:*}"
   access="ro"
   [[ "$entry" == *:* ]] && access="${entry##*:}"
-  # No `allowlist_domains | grep -q`: -q exits on the first match, and under
-  # pipefail jq's resulting SIGPIPE (141) would mask grep's success.
-  grep -Fxq -- "$domain" <<<"$(allowlist_domains)" && return 0
-
-  # An access that is neither ro nor rw gets no explanation here:
-  # expand-allowlist.bash rejects it loudly before anything is applied.
-  if [[ "$access" == "rw" ]]; then
+  # The allowlisted ACCESS matters, not mere membership: an rw request for a
+  # domain listed as ro is an escalation (it opens a write channel the curated
+  # list deliberately withholds) and gets the full challenge.
+  listed="$(jq -r --arg d "$domain" '.[$d] // empty' "$allowlist_file")"
+  if [[ -n "$listed" ]]; then
+    [[ "$access" == "rw" && "$listed" != "rw" ]] || return 0
+    echo "claude-loosen-firewall: WARNING: '$domain' is allowlisted READ-ONLY; granting rw escalates it to full HTTP — a WRITE/EXFIL channel out of the sandbox." >&2
+  elif [[ "$access" == "rw" ]]; then
+    # An access that is neither ro nor rw gets no explanation here:
+    # expand-allowlist.bash rejects it loudly before anything is applied.
     echo "claude-loosen-firewall: WARNING: '$domain' is not in the permanent allowlist and the grant is rw — full HTTP, a WRITE/EXFIL channel out of the sandbox." >&2
   elif [[ "$access" == "ro" ]]; then
     echo "claude-loosen-firewall: '$domain' is not in the permanent allowlist; the grant is ro — GET/HEAD only (read, never write)." >&2
@@ -149,8 +161,10 @@ challenge_domain() {
   fi
 
   [[ "$access" == "rw" && -z "$assume_yes" ]] || return 0
-  [[ -t 0 && -t 1 ]] || return 0
-  # kcov-ignore-start  kcov pipes the child's stdout, so [[ -t 1 ]] reads false
+  # -t 2, not -t 1: the prompt and warnings go to stderr, so a piped stdout
+  # (`... | cat`) on an otherwise interactive terminal must not skip the retype.
+  [[ -t 0 && -t 2 ]] || return 0
+  # kcov-ignore-start  kcov pipes the child's stderr, so [[ -t 2 ]] reads false
   # under the coverage harness and this interactive path can't be traced; its
   # confirm/abort behavior is asserted by the pty tests
   # (test_rw_retype_* in tests/test_loosen_firewall_coverage.py).
@@ -163,12 +177,12 @@ challenge_domain() {
   # kcov-ignore-end
 }
 
-# print_permanent_path — the per-project settings snippet that makes the applied
-# profile permanent (docs/configuration.md, "Expanding network access").
-print_permanent_path() {
+# print_permanence_snippet — the per-project settings snippet that makes the
+# applied profile permanent (docs/configuration.md, "Expanding network access").
+print_permanence_snippet() {
   local json="" entry
   for entry in "${domains[@]}"; do
-    json+="${json:+, }\"${entry%:rw}\""
+    json+="${json:+, }\"${entry%%:*}\""
   done
   printf '\nThis expansion is session-scoped. To make it permanent for this project,\nadd to .claude/settings.json:\n\n  { "sandbox": { "network": { "allowedDomainsReadWrite": [%s] } } }\n' "$json"
 }
@@ -225,8 +239,7 @@ if [[ -n "$profile" && ${#domains[@]} -gt 0 ]]; then
   exit 2
 fi
 if [[ -n "$profile" ]]; then
-  profile_entries="$(profile_domains "$profile")"
-  while IFS= read -r entry; do domains+=("$entry"); done <<<"$profile_entries"
+  while IFS= read -r entry; do domains+=("$entry"); done < <(profile_domains "$profile")
 fi
 
 if [[ ${#domains[@]} -eq 0 ]]; then
@@ -277,18 +290,16 @@ if [[ -z "$firewall" ]]; then
   exit 1
 fi
 
-# Challenge ad-hoc domains last, once a live firewall is confirmed, so the user
-# never retypes a domain only to learn there is no sandbox to apply it to.
-if [[ -z "$profile" ]]; then
-  require_allowlist
-  for entry in "${domains[@]}"; do
-    challenge_domain "$entry"
-  done
-fi
-
+# Profiles skip the challenge (tool-defined sets); ad-hoc domains are challenged
+# last, once a live firewall is confirmed, so the user never retypes a domain
+# only to learn there is no sandbox to apply it to.
 if [[ -n "$profile" ]]; then
   docker exec "$firewall" /usr/local/bin/expand-allowlist.bash "${domains[@]}"
-  print_permanent_path
+  print_permanence_snippet
   exit 0
 fi
+require_allowlist
+for entry in "${domains[@]}"; do
+  challenge_domain "$entry"
+done
 exec docker exec "$firewall" /usr/local/bin/expand-allowlist.bash "${domains[@]}"
