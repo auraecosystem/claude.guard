@@ -554,6 +554,61 @@ def test_owner_parsing(tmp_path: Path, origin: str, expected: str) -> None:
     assert res["MAIN"] == f"ghcr.io/{expected}/secure-claude-sandbox:git-{FAKE_SHA}"
 
 
+def _run_repo_name(bindir: Path, origin: str) -> subprocess.CompletedProcess[str]:
+    _fake_git(bindir, origin=origin)
+    script = f'source {LIB}\n_sccd_ghcr_repo_name "/some/repo"\n'
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env
+    )
+
+
+@pytest.mark.parametrize(
+    "origin,expected",
+    [
+        ("git@github.com:Owner/My-Repo.git", "My-Repo"),
+        ("https://github.com/Owner/My-Repo.git", "My-Repo"),
+        ("https://github.com/Owner/My-Repo", "My-Repo"),
+    ],
+    ids=["ssh", "https-dotgit", "https-plain"],
+)
+def test_repo_name_parsing(tmp_path: Path, origin: str, expected: str) -> None:
+    """Repo name is extracted verbatim (casing preserved) for the cosign identity pin."""
+    res = _run_repo_name(tmp_path, origin)
+    assert res.returncode == 0
+    assert res.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://gitlab.com/Owner/repo.git",
+        "https://example.com/Owner/repo",
+        "https://github.com/Owner/repo/extra",  # nested path — guard in function
+    ],
+    ids=["gitlab", "non-github", "nested-path"],
+)
+def test_repo_name_non_github_returns_error(tmp_path: Path, origin: str) -> None:
+    res = _run_repo_name(tmp_path, origin)
+    assert res.returncode != 0
+
+
+def test_cosign_verify_pins_repo_name(tmp_path: Path) -> None:
+    """cosign identity regex uses the concrete repo name, not org-wide [^/]+."""
+    _fake_git(tmp_path)
+    _fake_docker(tmp_path, manifest_ok=True)
+    _fake_cosign(tmp_path, verify_ok=True)
+    _run(tmp_path)
+    args = (tmp_path / "cosign-args").read_text().splitlines()
+    # Assert on the value passed to --certificate-identity-regexp specifically,
+    # not any arg (the repo name also appears in the digest ref).
+    # ORIGIN = .../Alexander-Turner/secure-claude-code-defaults.git
+    flag_idx = args.index("--certificate-identity-regexp")
+    identity_re = args[flag_idx + 1]
+    assert "secure-claude-code-defaults" in identity_re
+    assert "[^/]+" not in identity_re
+
+
 # ── verified-image cache (skip the pull on the steady-state launch) ──────────
 # After a successful pull+verify, the resolver records the verified registry
 # digest per image under XDG_CACHE_HOME. The next launch on the same commit

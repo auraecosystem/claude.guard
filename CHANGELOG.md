@@ -54,8 +54,8 @@ adhere to [Semantic Versioning](https://semver.org/).
 - The launch banner now names the effective isolation backend (Kata/Firecracker
   microVM, gVisor/runsc, or runc) instead of a generic "sandboxed" line, so you can
   tell what isolation you got without running `claude-guard-doctor`. When the
-  runtime auto-selected gVisor/runc despite `/dev/kvm` being available — a silent
-  drop from the stronger Kata microVM — the launch is flagged DEGRADED with the fix.
+  runtime auto-selected gVisor/runc despite `/dev/kvm` being available \u2014 a silent
+  drop from the stronger Kata microVM \u2014 the launch is flagged DEGRADED with the fix.
   An explicit `CONTAINER_RUNTIME` override is treated as a deliberate choice and not
   flagged.
 - Clearer native-Windows / WSL2 onboarding: native Windows (Git Bash / MSYS2 /
@@ -65,7 +65,7 @@ adhere to [Semantic Versioning](https://semver.org/).
   wired into the distro, pointing each at its specific fix.
 - The launcher warns once per host when secret-named env vars in your shell will be
   withheld from the agent inside the sandbox, naming them and pointing at
-  `SCRUB_SECRETS_ALLOW` — so a token a tool needs going missing reads as "withheld by
+  `SCRUB_SECRETS_ALLOW` \u2014 so a token a tool needs going missing reads as "withheld by
   design, forward it" rather than a mystery.
 - `setup.bash` prints the shadowed-`claude` banner before the doctor summary (not
   after), and `claude-guard doctor`'s shadowed-alias fix now spells out the reload
@@ -112,6 +112,25 @@ adhere to [Semantic Versioning](https://semver.org/).
   
 ### Security
 
+- `HMAC` comment on `monitor-secret` mount now accurately states that the agent
+  (uid 1000) can read the key — the HMAC only prevents unsigned forgeries from
+  other network peers, not from the agent itself; audit integrity against the
+  agent rests on the egress firewall.
+- `session_transcript` is sanitized before injection into the monitor envelope:
+  ANSI/terminal escape sequences, Unicode `Cf`-category characters (zero-width
+  spaces, soft hyphens, etc.), BMP variation selectors (U+FE00–FE0F), and
+  supplementary variation selectors (U+E0100–E01EF) are stripped, closing a
+  prompt-injection vector into the monitor sidecar.
+- cosign OIDC identity regex now pins the concrete repository name (derived from
+  the git remote URL) instead of the org-wide `[^/]+` wildcard, so only images
+  signed by this repo's publish workflow are accepted. Falls back to the
+  wildcard only when the repo name cannot be determined.
+- Firewall container (`NET_ADMIN`+`NET_RAW`, runc) now runs under an explicit
+  seccomp profile (`.devcontainer/seccomp-firewall.json`) that blocks
+  `ptrace`, `process_vm_readv/writev`, `kcmp`, `name_to_handle_at`, and
+  `open_by_handle_at` — syscalls not needed by iptables/squid/dnsmasq but
+  useful for container-escape or cross-process inspection.
+
 - The `ccr` sidecar image now verifies the claude-code-router tarball against the
   SRI hash pinned in `pnpm-lock.yaml` before installing, so a registry republish or
   swap of the pinned version fails the build instead of being silently absorbed
@@ -135,7 +154,7 @@ adhere to [Semantic Versioning](https://semver.org/).
   tool call unmonitored.
 - Ephemeral teardown now fails loud if it cannot enumerate the session's volume
   roles (unreadable config or missing `jq`) instead of silently removing nothing
-  and reporting success — closing a path where the throwaway-volume guarantee
+  and reporting success \u2014 closing a path where the throwaway-volume guarantee
   could quietly not hold.
 
 ## [0.2.0] - 2026-06-09
