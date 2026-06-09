@@ -6,11 +6,6 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Added
-
-- `CLAUDE_GUARD_DNS_WARM_START` and `DNS_CACHE_TTL` tune the firewall's
-  warm-start DNS snapshot (see Changed).
-
 ### Changed
 
 - The PromptArmor injection filter (Layer 5, on WebFetch/WebSearch output) now
@@ -21,14 +16,21 @@ adhere to [Semantic Versioning](https://semver.org/).
   is not in the agent container's env. On the host (no sidecar) it still shells
   out to `prompt-armor.py`. A process-level verdict cache short-circuits the LLM
   call for a repeated identical fetch.
-- The firewall now warm-starts its domain allowlist from the previous session's
-  resolved-IP snapshot (kept on the shared, agent-unreachable gh-meta volume)
-  instead of blocking the launch on a full live DNS resolve of every domain —
-  the slowest leg of boot. The background refresh loop re-resolves immediately
-  and atomically swaps in live IPs, so drift in the cached set is corrected
-  within seconds. Each cached IP is re-validated as public before seeding, and
-  the bogon-drop and squid-by-domain layers are unchanged, so the egress
-  boundary is preserved. Disable with `CLAUDE_GUARD_DNS_WARM_START=0`.
+- The firewall's cross-session DNS cache (`CLAUDE_GUARD_DNS_CACHE`) is now **on by
+  default**: the allowlist's resolved IPs are persisted (on the shared,
+  firewall-only gh-meta volume) and seeded at the next launch, moving the slowest
+  boot leg — resolving 150+ domains — off the critical path and re-resolving live
+  in the background. `CLAUDE_GUARD_DNS_CACHE=0` opts out, and `DNS_CACHE_TTL`
+  (default 3600s) bounds how stale a seed may be before a launch resolves live
+  instead. Each seeded IP is re-validated as public and the bogon-drop and
+  squid-by-domain layers are unchanged, so the egress boundary is preserved. Only
+  the base + per-project allowlist is cached, never runtime live-expansions.
+- The monitor's deterministic action classifier now runs its six type-pattern
+  passes (egress/obfuscation/persistence/infra/destructive/vcs) over a head+tail
+  budget (`elide_middle`) instead of the entire tool input, cutting per-call cost
+  on a large `Write`/`Edit` (a 30 KB+ file body) by roughly half. The
+  credential-path scan still covers the full body, so a secret written anywhere —
+  including a large file's middle — is never missed.
 - The launcher now warns at startup when the agent cannot write `/workspace`
   (a root-owned host directory leaves the unprivileged `node` user unable to
   create files there), naming the host directory and the `chown` fix — instead
