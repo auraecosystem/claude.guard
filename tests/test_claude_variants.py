@@ -22,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from tests._helpers import git_env, init_test_repo, stub_envchain, write_exe
+from tests._helpers import (
+    git_env,
+    init_test_repo,
+    pop_skip_flags,
+    stub_envchain,
+    write_exe,
+)
 
 REPO_ROOT = Path(
     subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
@@ -54,6 +60,7 @@ def _run(
     cache_dir: Path,
     **env_overrides: str,
 ) -> subprocess.CompletedProcess[str]:
+    skip_flags = pop_skip_flags(env_overrides)
     env = {
         **os.environ,
         "CLAUDE_PRIVATE_DRY_RUN": "1",
@@ -67,7 +74,7 @@ def _run(
         **env_overrides,
     }
     return subprocess.run(
-        [str(wrapper), *args],
+        [str(wrapper), *skip_flags, *args],
         env=env,
         capture_output=True,
         text=True,
@@ -96,6 +103,11 @@ def _run_real(
         env=git_env(),
         check=True,
     )
+    # _run_real is always host-routed (see docstring); pass the flag, plus any
+    # the caller expressed via the DANGEROUSLY_SKIP_* kwargs.
+    skip_flags = pop_skip_flags(env_overrides)
+    if "--dangerously-skip-container" not in skip_flags:
+        skip_flags.insert(0, "--dangerously-skip-container")
     stripped = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -109,11 +121,10 @@ def _run_real(
         "VENICE_CACHE_DIR": str(tmp_path / "cache"),
         "VENICE_MODELS_URL": "http://127.0.0.1:1/models",
         "VENICE_INFERENCE_KEY": "test-venice-key",
-        "DANGEROUSLY_SKIP_CONTAINER": "1",
         **env_overrides,
     }
     return subprocess.run(
-        [str(CLAUDE_GUARD), *args],
+        [str(CLAUDE_GUARD), *skip_flags, *args],
         env=env,
         cwd=repo,
         capture_output=True,
@@ -333,13 +344,12 @@ def test_paranoid_nosandbox_unreachable_ccr_fails_closed(tmp_path: Path) -> None
         **os.environ,
         "VENICE_CACHE_DIR": str(tmp_path / "cache"),
         "VENICE_INFERENCE_KEY": "test-venice-key",
-        "DANGEROUSLY_SKIP_CONTAINER": "1",
         # Closed port: both /health and bare-URL probes fail -> fail closed.
         # No CLAUDE_PRIVATE_DRY_RUN, so the guard actually runs.
         "CCR_URL": "http://127.0.0.1:1",
     }
     r = subprocess.run(
-        [str(CLAUDE_GUARD), "--privacy", "e2ee"],
+        [str(CLAUDE_GUARD), "--dangerously-skip-container", "--privacy", "e2ee"],
         env=env,
         capture_output=True,
         text=True,

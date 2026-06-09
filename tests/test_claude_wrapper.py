@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._helpers import pop_skip_flags
+
 REPO_ROOT = Path(
     subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
 )
@@ -76,6 +78,11 @@ esac
     # never invoked on the warm-container path — `devcontainer up` only fires on
     # cold start, which the running-container fake skips.
     _make_exec(stub_dir / "devcontainer", "#!/bin/bash\nexit 0\n")
+    # This runner always exercises the container path, so translate only the
+    # firewall/monitor skip kwargs into flags; never the container one.
+    skip_flags = [
+        f for f in pop_skip_flags(env_overrides) if f != "--dangerously-skip-container"
+    ]
     env = {
         **os.environ,
         "PATH": f"{stub_dir}:{os.environ.get('PATH', '')}",
@@ -88,11 +95,15 @@ esac
         "CLAUDE_NO_AUDIT_ARCHIVE": "1",
         **env_overrides,
     }
-    env.pop("DANGEROUSLY_SKIP_CONTAINER", None)
     env.pop("DEVCONTAINER", None)
     env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     r = subprocess.run(
-        [str(WRAPPER)], env=env, cwd=cwd, capture_output=True, text=True, check=False
+        [str(WRAPPER), *skip_flags],
+        env=env,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     return r, (log.read_text() if log.exists() else "")
 
@@ -134,6 +145,7 @@ def _run(cwd: Path, real_claude_dir: Path, **env_overrides: str):
     PATH-strips devcontainer/docker so the wrapper hits its 'no devcontainer
     CLI' branch and falls through to host claude — keeps tests hermetic.
     """
+    skip_flags = pop_skip_flags(env_overrides)
     stripped_path = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -145,7 +157,7 @@ def _run(cwd: Path, real_claude_dir: Path, **env_overrides: str):
         **env_overrides,
     }
     return subprocess.run(
-        [str(WRAPPER)],
+        [str(WRAPPER), *skip_flags],
         env=env,
         cwd=cwd,
         capture_output=True,
@@ -683,7 +695,7 @@ def test_wrapper_monitor_help_shown_once_then_suppressed(tmp_path: Path) -> None
     """The verbose monitor-setup help prints on the first keyless launch, then a
     one-time marker (like the firewall tip) drops it to a one-liner so a user
     running keyless on purpose isn't re-walled every launch. The pointer to
-    DANGEROUSLY_SKIP_MONITOR=1 stays on the quiet path."""
+    --dangerously-skip-monitor stays on the quiet path."""
     _init_repo(tmp_path)
     real_dir = tmp_path / "stubs"
     real_dir.mkdir()
@@ -705,7 +717,7 @@ def test_wrapper_monitor_help_shown_once_then_suppressed(tmp_path: Path) -> None
     r2 = _run(tmp_path, real_dir, **common)
     assert r2.returncode == 0, f"stderr: {r2.stderr}"
     assert _HELP_MARKER not in r2.stderr, "marker should suppress the verbose help"
-    assert "DANGEROUSLY_SKIP_MONITOR=1" in r2.stderr, "concise pointer stays"
+    assert "--dangerously-skip-monitor" in r2.stderr, "concise pointer stays"
 
 
 def test_ccr_sidecar_exists() -> None:
@@ -862,6 +874,7 @@ def _run_with_args(
     cwd: Path, real_claude_dir: Path, args: list[str], **env_overrides: str
 ):
     """Like _run but accepts positional args for the wrapper."""
+    skip_flags = pop_skip_flags(env_overrides)
     stripped_path = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -873,7 +886,7 @@ def _run_with_args(
         **env_overrides,
     }
     return subprocess.run(
-        [str(WRAPPER), *args],
+        [str(WRAPPER), *skip_flags, *args],
         env=env,
         cwd=cwd,
         capture_output=True,
@@ -917,36 +930,21 @@ def test_help_prints_wrapper_usage_without_launching(tmp_path: Path, flag: str) 
     assert "fake-claude-here:" not in r.stdout
 
 
-@pytest.mark.parametrize(
-    "trigger,desc",
-    [
-        ("flag", "CLI flag"),
-        ("env", "env var"),
-    ],
-)
-def test_skip_firewall_warning(tmp_path: Path, trigger: str, desc: str) -> None:
-    """Both the flag and the env var emit a firewall-disabled warning."""
+def test_skip_firewall_warning(tmp_path: Path) -> None:
+    """The --dangerously-skip-firewall flag emits a firewall-disabled warning."""
     _init_repo(tmp_path)
     real_dir = tmp_path / "stubs"
     real_dir.mkdir()
     _make_fake_claude(real_dir)
 
-    if trigger == "flag":
-        r = _run_with_args(
-            tmp_path,
-            real_dir,
-            ["--dangerously-skip-firewall"],
-            DANGEROUSLY_SKIP_CONTAINER="1",
-        )
-    else:
-        r = _run(
-            tmp_path,
-            real_dir,
-            DANGEROUSLY_SKIP_CONTAINER="1",
-            DANGEROUSLY_SKIP_FIREWALL="1",
-        )
-    assert r.returncode == 0, f"{desc}\nstderr: {r.stderr}"
-    assert "firewall disabled" in r.stderr.lower(), desc
+    r = _run_with_args(
+        tmp_path,
+        real_dir,
+        ["--dangerously-skip-firewall"],
+        DANGEROUSLY_SKIP_CONTAINER="1",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "firewall disabled" in r.stderr.lower()
 
 
 @pytest.mark.parametrize(
@@ -985,8 +983,7 @@ def test_skip_firewall_env_propagation(
 # ── --dangerously-skip-container ─────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("trigger", ["flag", "env"], ids=["cli-flag", "env-var"])
-def test_skip_container_injects_sandbox_allowlist(tmp_path: Path, trigger: str) -> None:
+def test_skip_container_injects_sandbox_allowlist(tmp_path: Path) -> None:
     """--dangerously-skip-container runs on the host but injects the built-in
     sandbox network allowlist (--settings) so exfil defense survives."""
     _init_repo(tmp_path)
@@ -994,14 +991,11 @@ def test_skip_container_injects_sandbox_allowlist(tmp_path: Path, trigger: str) 
     real_dir.mkdir()
     _make_fake_claude(real_dir)
 
-    if trigger == "flag":
-        r = _run_with_args(tmp_path, real_dir, ["--dangerously-skip-container"])
-    else:
-        r = _run(tmp_path, real_dir, DANGEROUSLY_SKIP_CONTAINER="1")
+    r = _run_with_args(tmp_path, real_dir, ["--dangerously-skip-container"])
 
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert "fake-claude-here:" in r.stdout
-    # The flag/env trigger is consumed by the wrapper, not forwarded to claude.
+    # The flag is consumed by the wrapper, not forwarded to claude.
     assert "--dangerously-skip-container" not in r.stdout
     # The built-in sandbox network allowlist is injected via --settings.
     assert "--settings" in r.stdout
@@ -1333,11 +1327,11 @@ def test_cold_start_local_build_announces_roomy_timeout(tmp_path: Path) -> None:
 
 
 # ── Help/parser drift guards ──────────────────────────────────────────────────
-# The set of --dangerously-* flags lives in three places that can silently drift
-# apart: the arg-parsing `case` block (the source of truth), the rendered --help
-# text, and the env-var aliases that let the same toggle be set without argv. Tie
-# them together so adding/renaming a flag without updating its help (or wiring its
-# documented env alias) turns CI red instead of shipping a lie.
+# The set of --dangerously-* flags lives in two places that can silently drift
+# apart: the arg-parsing `case` block (the source of truth) and the rendered
+# --help text. Tie them together so adding/renaming a flag without updating its
+# help turns CI red instead of shipping a lie. (The DANGEROUSLY_SKIP_* env vars
+# are no longer user input — only the flags weaken a launch.)
 
 WRAPPER_SRC = WRAPPER.read_text()
 
@@ -1371,16 +1365,16 @@ def test_help_documents_exactly_the_parsed_dangerous_flags() -> None:
     assert documented == _parser_dangerous_flags()
 
 
-def test_help_env_aliases_are_actually_read_by_the_wrapper() -> None:
-    """Each `(env alias: NAME=1)` in the help is read by the wrapper via the
-    standard `${NAME:-}` form — so a documented alias can't be a dead promise."""
-    aliases = set(
-        re.findall(r"env alias:\s*(?P<alias>[A-Z_]+)=1", _help_weakening_section())
+def test_no_dangerously_skip_env_aliases() -> None:
+    """The DANGEROUSLY_SKIP_* env aliases were removed — only the
+    --dangerously-skip-* flags weaken a launch (the env vars survive solely as the
+    internal wrapper->sandbox signal). The help must not re-advertise them, and the
+    wrapper must clear any inherited one so a stray env var can't weaken a launch."""
+    assert "env alias:" not in _help_weakening_section()
+    assert (
+        "unset DANGEROUSLY_SKIP_FIREWALL DANGEROUSLY_SKIP_CONTAINER "
+        "DANGEROUSLY_SKIP_MONITOR" in WRAPPER_SRC
     )
-    # One alias per weakening flag — the help must not under-document them.
-    assert len(aliases) == len(_parser_dangerous_flags())
-    for var in aliases:
-        assert f'"${{{var}:-}}"' in WRAPPER_SRC, f"{var} documented but never read"
 
 
 class TestAppMemoryKnob:

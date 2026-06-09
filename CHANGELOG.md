@@ -23,6 +23,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** the `DANGEROUSLY_SKIP_FIREWALL` / `DANGEROUSLY_SKIP_CONTAINER` /
+  `DANGEROUSLY_SKIP_MONITOR` environment-variable aliases are removed — only the
+  matching `--dangerously-skip-*` flags weaken a launch now. The flags are kept
+  (and named loudly on purpose); the env vars survive solely as the internal
+  wrapper→sandbox signal and are cleared at startup so a stray inherited one can't
+  silently weaken a session. Replace `DANGEROUSLY_SKIP_CONTAINER=1` with
+  `--dangerously-skip-container`, etc.
 - **Breaking:** every `SCCD_*` environment variable is renamed to `CLAUDE_GUARD_*`
   (e.g. `SCCD_NO_PREBUILT` → `CLAUDE_GUARD_NO_PREBUILT`, `SCCD_ASSUME_YES` →
   `CLAUDE_GUARD_ASSUME_YES`, `SCCD_SBOM_DIFF` → `CLAUDE_GUARD_SBOM_DIFF`,

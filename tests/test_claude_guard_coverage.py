@@ -17,7 +17,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from tests._helpers import REPO_ROOT, mirror_path_excluding, run_capture, write_exe
+from tests._helpers import (
+    REPO_ROOT,
+    mirror_path_excluding,
+    pop_skip_flags,
+    run_capture,
+    write_exe,
+)
 from tests.test_claude_wrapper import (
     WRAPPER,
     _init_repo,
@@ -163,7 +169,9 @@ def _container_env(tmp_path: Path, **overrides: str) -> tuple[Path, Path, dict]:
 
 def _run_container(repo: Path, env: dict, *args: str):
     """Run the wrapper down the container path from inside git repo `repo`."""
-    return run_capture([str(WRAPPER), *args], env=env, cwd=repo)
+    # Container path: translate only firewall/monitor skip kwargs into flags.
+    skip_flags = [f for f in pop_skip_flags(env) if f != "--dangerously-skip-container"]
+    return run_capture([str(WRAPPER), *skip_flags, *args], env=env, cwd=repo)
 
 
 def _run_guard(cwd: Path, args: list[str], path_dir: Path, **env: str):
@@ -171,6 +179,7 @@ def _run_guard(cwd: Path, args: list[str], path_dir: Path, **env: str):
     any PATH entry that ships `devcontainer` or a real `claude` so the host path
     is deterministic: a test gets a real claude only if its `path_dir` provides
     a fake one (otherwise the not-found branches are reachable)."""
+    skip_flags = pop_skip_flags(env)
     stripped = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
@@ -179,7 +188,7 @@ def _run_guard(cwd: Path, args: list[str], path_dir: Path, **env: str):
         and not Path(p).joinpath("claude").exists()
     )
     full_env = {**os.environ, "PATH": f"{path_dir}:{stripped}", **env}
-    return run_capture([str(WRAPPER), *args], env=full_env, cwd=cwd)
+    return run_capture([str(WRAPPER), *skip_flags, *args], env=full_env, cwd=cwd)
 
 
 # ---------------------------------------------------------------------------
