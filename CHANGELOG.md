@@ -6,6 +6,29 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- The launch banner now names the effective isolation backend (Kata/Firecracker
+  microVM, gVisor/runsc, or runc) instead of a generic "sandboxed" line, so you can
+  tell what isolation you got without running `claude-guard-doctor`. When the
+  runtime auto-selected gVisor/runc despite `/dev/kvm` being available — a silent
+  drop from the stronger Kata microVM — the launch is flagged DEGRADED with the fix.
+  An explicit `CONTAINER_RUNTIME` override is treated as a deliberate choice and not
+  flagged.
+- Clearer native-Windows / WSL2 onboarding: native Windows (Git Bash / MSYS2 /
+  Cygwin) now exits with step-by-step `wsl --install` guidance and the
+  clone-inside-WSL next steps instead of a bare pointer, and the WSL2 path detects
+  no-nested-virtualization (with a copy-pasteable `.wslconfig`) and Docker not being
+  wired into the distro, pointing each at its specific fix.
+
+### Fixed
+
+- A fresh Docker install on Linux no longer requires a manual `newgrp docker` /
+  logout and a second `setup.bash` run: setup now re-execs the remaining steps under
+  the new `docker` group automatically (installing `sg` first if a minimal image
+  lacks it), so the install completes in one pass. The misleading "log out/in to
+  take effect" message is gone.
+
 ## [0.2.0] - 2026-06-09
 
 ### Added
