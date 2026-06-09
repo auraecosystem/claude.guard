@@ -6,6 +6,30 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `claude-guard audit --egress` (and `--blocked`) surfaces the firewall's egress
+  access log host-side, so "did the firewall block this, or is my code wrong?" is
+  answerable without `docker exec`. `--blocked` shows only the requests squid denied
+  (read-only method blocks and non-allowlisted domains). Supports `-n`/`--follow`.
+- The launcher prints the previous session's monitor spend at startup (and the
+  one-knob way to cut it: `MONITOR_WEAK_MODEL=MONITOR_STRONG_MODEL=claude-haiku-4-5`),
+  so the monitor's cost is visible up front, not only at session end.
+- On a launch with no persisted host Claude auth, the first interactive session now
+  offers the `claude setup-token` capture-and-persist flow on the spot (the same one
+  `setup.bash` runs) instead of only printing a nudge; the nudge is now shown once.
+
+### Changed
+
+- The launcher warns once per host when secret-named env vars in your shell will be
+  withheld from the agent inside the sandbox, naming them and pointing at
+  `SCRUB_SECRETS_ALLOW` — so a token a tool needs going missing reads as "withheld by
+  design, forward it" rather than a mystery.
+- `setup.bash` prints the shadowed-`claude` banner before the doctor summary (not
+  after), and `claude-guard doctor`'s shadowed-alias fix now spells out the reload
+  command (`exec $SHELL` or a new terminal), so a silently-bypassed `claude` is
+  harder to miss and faster to fix.
+
 ## [0.2.0] - 2026-06-09
 
 ### Added
