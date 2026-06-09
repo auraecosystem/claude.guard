@@ -464,7 +464,7 @@ def test_protection_ok_line_on_full_protection(tmp_path: Path) -> None:
     _, _, env = _container_env(tmp_path, MONITOR_API_KEY="x")
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert "egress firewall + monitor" in r.stderr
+    assert "outgoing traffic firewall + monitor" in r.stderr
     assert "namespaces only (weakest)" in r.stderr  # runc backend named in the line
 
 

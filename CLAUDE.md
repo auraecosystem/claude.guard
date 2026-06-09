@@ -60,6 +60,10 @@ The README is the project's front door, not a changelog. **Only add to it when d
 
 `SECURITY.md` documents the threat model, defense layers, and trust boundaries. **Update it only when a change actually alters a security boundary, defense mechanism, or trust assumption**—and then with the **most minimal edit that makes it accurate**. Out-of-date claims are dangerous: they describe protections that no longer exist, so a reader trusts a boundary that isn't there. Verbose padding is its own hazard—it buries the boundaries that matter. Most changes need **no** SECURITY.md edit. When one does, fix the specific stale sentence in place; do not append, restate, or narrate the change.
 
+## Terminology
+
+In **user-facing text** (startup banners, help strings, warning messages, error output), use **"access"** or **"outgoing traffic"** instead of "egress". "Egress" is network-engineering jargon; "access" and "outgoing traffic" are immediately clear to end users. Internal code, variable names, and developer-facing comments may use "egress" where it is the precise term.
+
 ## Code Style
 
 - Fail loudly: throw errors over logging warnings for critical issues

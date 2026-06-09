@@ -157,7 +157,7 @@ fi
 # it, so a prompt like `claude "help me debug"` passes straight through.
 claude_wrapper_usage() {
   cat <<'USAGE'
-claude-guard — security wrapper for Claude Code (sandbox + egress firewall + LLM monitor)
+claude-guard — security wrapper for Claude Code (sandbox + outgoing traffic firewall + LLM monitor)
 
 USAGE:
   claude-guard [claude-code args...]     launch a sandboxed, firewalled session (default)
@@ -168,10 +168,10 @@ VARIANTS:
   claude-guard --privacy e2ee      Venice end-to-end-encrypted model; strongest privacy, no escalation
   claude-guard setup         install or repair the stack (the privileged step a fresh/brew install still needs)
   claude-guard doctor        report the live protection state (PROTECTED / DEGRADED / UNPROTECTED)
-  claude-guard audit         read the tamper-evident audit log (-f to stream; --verify to reconcile vs egress)
-  claude-guard panic         incident response: snapshot audit/egress/logs, then stop the session's containers
+  claude-guard audit         read the tamper-evident audit log (-f to stream; --verify to reconcile vs outgoing traffic)
+  claude-guard panic         incident response: snapshot audit/traffic logs, then stop the session's containers
   claude-guard gh-app        manage the GitHub App integration
-  claude-loosen-firewall     host-side, deliberate: grant a running session egress to one more domain (reduces isolation; the firewall blocks by default)
+  claude-loosen-firewall     host-side, deliberate: grant a running session access to one more domain (reduces isolation; the firewall blocks by default)
 
 FLAGS:
   --debug                         show full sandbox build/startup output (default: quiet)
@@ -187,7 +187,7 @@ EXPERIMENTAL FLAGS:
     (env alias: MONITOR_REDACT_DENY_REASON=1)
 
 WEAKENING FLAGS (deliberate; each is named loudly so it shows up in launch logs):
-  --dangerously-skip-firewall     UNRESTRICTED network egress inside the container
+  --dangerously-skip-firewall     UNRESTRICTED network access inside the container
   --dangerously-skip-container    run on the host (OS sandbox only, Bash tool); no monitor sidecar
   --dangerously-skip-monitor      skip the LLM monitor entirely (no halt/ask on suspicious calls)
 
@@ -514,11 +514,16 @@ source "$(dirname "$SELF_CANONICAL")/lib/protection-state.bash"
 compute_protection_state "$_skip_firewall" "$_skip_container" "${CONTAINER_RUNTIME:-}" "$_runtime_auto"
 export CLAUDE_PROTECTION_TIER="$PROTECTION_SEVERITY:$PROTECTION_LABEL"
 if [[ "$PROTECTION_SEVERITY" == "ok" ]]; then
-  cg_ok "claude-guard: protection: $PROTECTION_LABEL — ${ISOLATION_LABEL} + egress firewall + monitor."
+  cg_ok "claude-guard: protection: $PROTECTION_LABEL — ${ISOLATION_LABEL} + outgoing traffic firewall + monitor."
 else
   cg_warn "claude-guard: protection: $PROTECTION_LABEL — DEGRADED:"
-  for _prot_line in "${PROTECTION_LINES[@]+"${PROTECTION_LINES[@]}"}"; do
-    printf '%s    - %s%s\n' "$_CG_YEL" "$_prot_line" "$_CG_RST" >&2
+  for _i in "${!PROTECTION_LINES[@]}"; do
+    case "${PROTECTION_LINE_COLORS[$_i]:-yellow}" in
+    red) _line_col="$_CG_RED" ;;
+    green) _line_col="$_CG_GRN" ;;
+    *) _line_col="$_CG_YEL" ;;
+    esac
+    printf '%s    - %s%s\n' "$_line_col" "${PROTECTION_LINES[$_i]}" "$_CG_RST" >&2
   done
 fi
 
@@ -529,7 +534,7 @@ fi
 maybe_show_firewall_tip() {
   local marker="${XDG_STATE_HOME:-$HOME/.local/state}/claude-monitor/firewall-tip-seen"
   [[ -f "$marker" ]] && return 0
-  cg_info "claude-guard: network egress is restricted to a small allowlist by design — most domains are blocked, so an unexpected connection failure (a HuggingFace push, wandb, an unlisted host) is usually the firewall working, not a bug. What's allowed: .devcontainer/domain-allowlist.json"
+  cg_info "claude-guard: outgoing network access is restricted to a small allowlist by design — most domains are blocked, so an unexpected connection failure (a HuggingFace push, wandb, an unlisted host) is usually the firewall working, not a bug. What's allowed: .devcontainer/domain-allowlist.json"
   # A failed write just re-shows the tip next launch; never abort the launch.
   if mkdir -p "$(dirname "$marker")" 2>/dev/null; then
     : >"$marker" 2>/dev/null || true
@@ -569,7 +574,7 @@ if "$_skip_container" && [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" != "1" ]]; then
   if ! _host_fw=$(build_host_firewall_settings); then
     cg_error "claude-guard: ERROR — could not build the host-mode firewall allowlist (needs jq + repo config)."
     cg_error "claude-guard: install jq and run from the repo checkout, then retry."
-    cg_error "claude-guard: (intentional bypass: --dangerously-skip-firewall proceeds with UNRESTRICTED network.)"
+    cg_error "claude-guard: (intentional bypass: --dangerously-skip-firewall proceeds with UNRESTRICTED network access.)"
     exit 1
   fi
   _host_extra_args=(--settings "$_host_fw")
@@ -724,10 +729,10 @@ configure_project_allowlist() {
     }
   done <<<"$PROJECT_ALLOWED_DOMAINS_RO"$'\n'"$PROJECT_ALLOWED_DOMAINS_RW"
   if [[ -n "$PROJECT_ALLOWED_DOMAINS_RO" ]]; then
-    cg_ok "claude-guard: per-project allowlist — read-only egress to: $(tr '\n' ' ' <<<"$PROJECT_ALLOWED_DOMAINS_RO")"
+    cg_ok "claude-guard: per-project allowlist — read-only access to: $(tr '\n' ' ' <<<"$PROJECT_ALLOWED_DOMAINS_RO")"
   fi
   if [[ -n "$PROJECT_ALLOWED_DOMAINS_RW" ]]; then
-    cg_warn "claude-guard: per-project allowlist grants READ-WRITE (POST/PUT — write/exfil-capable) egress to: $(tr '\n' ' ' <<<"$PROJECT_ALLOWED_DOMAINS_RW")"
+    cg_warn "claude-guard: per-project allowlist grants READ-WRITE (POST/PUT — write/exfil-capable) outgoing access to: $(tr '\n' ' ' <<<"$PROJECT_ALLOWED_DOMAINS_RW")"
     cg_warn "claude-guard: review .claude/settings(.local).json sandbox.network.allowedDomainsReadWrite if unintended."
     # Flag the riskier subset loudly: a domain that is read-only in the SHARED global
     # allowlist promoted to read-write turns a normally GET/HEAD-only host into a POST/exfil channel.
