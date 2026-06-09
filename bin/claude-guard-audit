@@ -260,13 +260,15 @@ if "$egress"; then
   egress_vol="claude-egress-$(claude_volume_id "$workspace_folder")"
   egress_mount="$(forensic_stream_field egress mountpath)"
   egress_file="$egress_mount/$(forensic_stream_field egress filename)"
-  # --blocked: combined-format squid logs the HTTP status, so a denied request
-  # (read-only method block or non-allowlisted domain) shows status 403 (407 for a
-  # proxy-auth refusal). grep exits 1 on no match, which is "nothing blocked", not
-  # an error — swallow it so an all-allowed log doesn't abort under pipefail.
+  # --blocked: combined-format squid logs the status right after the quoted request
+  # (`"METHOD URL HTTP/x" <status> <bytes> ...`), so a denied request (read-only
+  # method block or non-allowlisted domain) shows `" 403 ` (`" 407 ` for a proxy-auth
+  # refusal). Anchor to that `"<space><status><space>` shape so a 403 appearing as a
+  # byte count or in a URL path isn't mistaken for a denial. grep exits 1 on no match
+  # — "nothing blocked", not an error — so swallow it lest pipefail abort.
   egress_filter() {
     if "$blocked_only"; then
-      grep -Ew '403|407' || true
+      grep -E '" (403|407) ' || true
     else
       cat
     fi

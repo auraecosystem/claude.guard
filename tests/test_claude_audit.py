@@ -425,6 +425,18 @@ def test_blocked_filters_to_denied_requests(docker_stub, tmp_path: Path) -> None
     assert "ok.example.com" not in r.stdout
 
 
+def test_blocked_ignores_403_outside_status_field(docker_stub, tmp_path: Path) -> None:
+    """The filter anchors to the squid status field: an allowed (200) request whose
+    byte count or URL happens to contain 403 must NOT be reported as blocked."""
+    log = (
+        "1.2.3.4 - - [28/May/2026:10:00:00 +0000] "
+        '"GET http://ok.example.com/403/page HTTP/1.1" 200 403 "-" "-"\n'
+    )
+    r = docker_stub.run(["--blocked", "--workspace", str(tmp_path)], run_output=log)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ""
+
+
 def test_blocked_with_no_denials_prints_nothing(docker_stub, tmp_path: Path) -> None:
     """An all-allowed log under --blocked yields empty stdout (grep's no-match
     exit is swallowed, not treated as an error)."""
