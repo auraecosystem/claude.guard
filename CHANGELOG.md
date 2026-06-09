@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- The sanitization stage timing chart now renders an IQR shaded band (p25–p75)
+  around each stage's median line, making run-to-run spread visible at a glance.
+
 ### Changed
 
 - The PromptArmor injection filter (Layer 5, on WebFetch/WebSearch output) now
