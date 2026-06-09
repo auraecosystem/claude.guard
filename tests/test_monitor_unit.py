@@ -641,22 +641,21 @@ def test_load_prices_strips_comment_keys(mon, monkeypatch, tmp_path):
     assert prices == {"m1": {"input": 1, "output": 2}}
 
 
-def test_load_prices_missing_file_returns_empty(mon, monkeypatch, tmp_path):
-    monkeypatch.setenv("MONITOR_PRICES", str(tmp_path / "nope.json"))
-    assert mon.load_prices() == {}
-
-
-def test_load_prices_malformed_returns_empty(mon, monkeypatch, tmp_path):
-    p = tmp_path / "prices.json"
-    p.write_text("not json")
-    monkeypatch.setenv("MONITOR_PRICES", str(p))
-    assert mon.load_prices() == {}
-
-
-def test_load_prices_non_dict_top_level_returns_empty(mon, monkeypatch, tmp_path):
-    p = tmp_path / "prices.json"
-    p.write_text("[1, 2, 3]")
-    monkeypatch.setenv("MONITOR_PRICES", str(p))
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(None, id="missing-file"),
+        pytest.param("not json", id="malformed"),
+        pytest.param("[1, 2, 3]", id="non-dict-top-level"),
+    ],
+)
+def test_load_prices_bad_input_returns_empty(mon, monkeypatch, tmp_path, content):
+    if content is None:
+        monkeypatch.setenv("MONITOR_PRICES", str(tmp_path / "nope.json"))
+    else:
+        p = tmp_path / "prices.json"
+        p.write_text(content)
+        monkeypatch.setenv("MONITOR_PRICES", str(p))
     assert mon.load_prices() == {}
 
 
@@ -917,9 +916,10 @@ def test_clear_cb_removes_files(mon):
 def test_read_probe(mon, contents, expected):
     if contents is not None:
         mon.CB_DIR.mkdir(parents=True, exist_ok=True)
-        mon.write_probe(int(contents)) if contents.isdigit() else (
-            mon.CB_DIR / "probe-at"
-        ).write_text(contents)
+        if contents.isdigit():
+            mon.write_probe(int(contents))
+        else:
+            (mon.CB_DIR / "probe-at").write_text(contents)
     assert mon.read_probe() == expected
 
 
@@ -3025,13 +3025,24 @@ def test_main_cb_cooldown_expired_proceeds(mon, monkeypatch, capsys):
     assert _capture(capsys)["permissionDecision"] == "allow"
 
 
-def test_main_invalid_fail_mode_coerced_to_ask(mon, monkeypatch, capsys):
-    # A misconfigured MONITOR_FAIL_MODE must NOT leak an invalid decision to
-    # Claude Code: empty response -> decision = fail_mode ("weird") -> the
-    # final safety net coerces it to "ask" (fail-closed).
+@pytest.mark.parametrize(
+    "fail_mode, expected",
+    [
+        pytest.param("allow", "allow", id="allow"),
+        pytest.param("deny", "deny", id="deny"),
+        pytest.param(None, "ask", id="default-asks"),
+        # A misconfigured value ("weird") must NOT leak to Claude Code: empty
+        # response → decision = fail_mode → safety net coerces invalid to "ask".
+        pytest.param("weird", "ask", id="invalid-coerced-to-ask"),
+    ],
+)
+def test_main_fail_mode_on_empty_response(
+    mon, monkeypatch, capsys, fail_mode, expected
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    monkeypatch.setenv("MONITOR_FAIL_MODE", "weird")
+    if fail_mode is not None:
+        monkeypatch.setenv("MONITOR_FAIL_MODE", fail_mode)
     monkeypatch.setattr(
         mon.urllib.request,
         "urlopen",
@@ -3039,51 +3050,7 @@ def test_main_invalid_fail_mode_coerced_to_ask(mon, monkeypatch, capsys):
     )
     _stdin(monkeypatch, mon, ENVELOPE)
     mon.main()
-    assert _capture(capsys)["permissionDecision"] == "ask"
-
-
-def test_main_fail_mode_allow_on_empty_response(mon, monkeypatch, capsys):
-    # MONITOR_FAIL_MODE=allow turns a monitor outage into "allow" instead of "ask".
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    monkeypatch.setenv("MONITOR_FAIL_MODE", "allow")
-    monkeypatch.setattr(
-        mon.urllib.request,
-        "urlopen",
-        lambda *a, **k: _FakeResp({"content": [{"text": ""}]}),
-    )
-    _stdin(monkeypatch, mon, ENVELOPE)
-    mon.main()
-    assert _capture(capsys)["permissionDecision"] == "allow"
-
-
-def test_main_fail_mode_default_asks_on_empty_response(mon, monkeypatch, capsys):
-    # With nothing set, a monitor outage fails closed to "ask" — the default.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    monkeypatch.setattr(
-        mon.urllib.request,
-        "urlopen",
-        lambda *a, **k: _FakeResp({"content": [{"text": ""}]}),
-    )
-    _stdin(monkeypatch, mon, ENVELOPE)
-    mon.main()
-    assert _capture(capsys)["permissionDecision"] == "ask"
-
-
-def test_main_fail_mode_deny_on_empty_response(mon, monkeypatch, capsys):
-    # MONITOR_FAIL_MODE=deny blocks the call outright on a monitor outage.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
-    monkeypatch.setenv("MONITOR_FAIL_MODE", "deny")
-    monkeypatch.setattr(
-        mon.urllib.request,
-        "urlopen",
-        lambda *a, **k: _FakeResp({"content": [{"text": ""}]}),
-    )
-    _stdin(monkeypatch, mon, ENVELOPE)
-    mon.main()
-    assert _capture(capsys)["permissionDecision"] == "deny"
+    assert _capture(capsys)["permissionDecision"] == expected
 
 
 def test_main_cb_open_fail_mode_allow_allows(mon, monkeypatch, tmp_path, capsys):
