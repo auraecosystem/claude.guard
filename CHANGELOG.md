@@ -22,6 +22,12 @@ adhere to [Semantic Versioning](https://semver.org/).
   `api.anthropic.com`) was evicted from the allowlist on a later refresh cycle
   and started resolving to `0.0.0.0` — surfacing 30–60 minutes into a session as
   `ECONNREFUSED` on all egress, including the Anthropic API.
+- The firewall's DNS-refresh loop now carries a domain's last-known-good IPs
+  forward when a refresh cycle fails to re-resolve it, instead of dropping it to
+  dnsmasq's `0.0.0.0` default and evicting it from the allowlist. A transient,
+  single-cycle DNS failure for a still-allowlisted domain no longer breaks a live
+  connection; a later successful cycle replaces the carried record, and a hijack
+  to a private/reserved IP is still rejected (the known-good public IP is kept).
 
 ## [0.3.0] - 2026-06-09
 

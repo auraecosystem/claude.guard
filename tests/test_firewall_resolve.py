@@ -941,3 +941,112 @@ def test_dns_window_skips_empty_server(iptables_env: dict) -> None:
     log = Path(iptables_env["IPTABLES_LOG"]).read_text()
     assert "-d 8.8.8.8 " in log
     assert "-d  -j" not in log
+
+
+# === parse_dnsmasq_addresses / build_refreshed_addresses (carry-forward) ===
+
+
+def _run_lib(snippet: str) -> subprocess.CompletedProcess[str]:
+    # Source the lib under init-firewall.bash's global IFS=$'\n\t' so any
+    # whitespace-splitting assumption in these helpers is exercised as in production.
+    return run_capture(
+        ["bash", "-c", f"IFS=$'\\n\\t'; source '{FIREWALL_LIB}'; {snippet}"],
+        env=dict(os.environ),
+    )
+
+
+def test_parse_dnsmasq_addresses_extracts_records_and_skips_default(
+    tmp_path: Path,
+) -> None:
+    conf = tmp_path / "allowlist.conf"
+    conf.write_text(
+        "address=/#/\n"
+        "address=/api.anthropic.com/1.2.3.4\n"
+        "address=/api.anthropic.com/5.6.7.8\n"
+        "address=/github.com/140.82.112.3\n"
+    )
+    r = _run_lib(f"parse_dnsmasq_addresses '{conf}'")
+    assert r.returncode == 0, r.stderr
+    # The `address=/#/` NXDOMAIN default is skipped; every real record (including a
+    # domain's second A record) becomes a domain<TAB>ip line.
+    assert sorted(r.stdout.splitlines()) == sorted(
+        [
+            "api.anthropic.com\t1.2.3.4",
+            "api.anthropic.com\t5.6.7.8",
+            "github.com\t140.82.112.3",
+        ]
+    )
+
+
+def _build(
+    tmp_path: Path, old_conf: str, resolved_tsv: str, *domains: str
+) -> subprocess.CompletedProcess[str]:
+    old = tmp_path / "old.conf"
+    old.write_text(old_conf)
+    res = tmp_path / "resolved.tsv"
+    res.write_text(resolved_tsv)
+    args = " ".join(f"'{d}'" for d in domains)
+    return _run_lib(f"build_refreshed_addresses '{old}' '{res}' {args}")
+
+
+def test_build_refreshed_uses_fresh_resolution(tmp_path: Path) -> None:
+    # A domain that resolved this cycle emits its fresh IP, not any stale prior one.
+    r = _build(
+        tmp_path,
+        "address=/#/\naddress=/api.anthropic.com/1.1.1.1\n",
+        "api.anthropic.com\t9.9.9.9\n",
+        "api.anthropic.com",
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["address=/api.anthropic.com/9.9.9.9"]
+
+
+def test_build_refreshed_carries_forward_unresolved(tmp_path: Path) -> None:
+    # api.anthropic.com fails to resolve this cycle but is still allowlisted and has
+    # a last-known-good record — it must be carried forward, NOT dropped (the bug).
+    r = _build(
+        tmp_path,
+        "address=/#/\naddress=/api.anthropic.com/1.2.3.4\naddress=/github.com/8.8.8.8\n",
+        "github.com\t140.82.112.3\n",
+        "api.anthropic.com",
+        "github.com",
+    )
+    assert r.returncode == 0, r.stderr
+    assert sorted(r.stdout.splitlines()) == sorted(
+        ["address=/api.anthropic.com/1.2.3.4", "address=/github.com/140.82.112.3"]
+    )
+
+
+def test_build_refreshed_carries_forward_multiple_ips(tmp_path: Path) -> None:
+    # All of an unresolved domain's prior A records are carried, not just the first.
+    r = _build(
+        tmp_path,
+        "address=/#/\naddress=/cdn.example/1.1.1.1\naddress=/cdn.example/2.2.2.2\n",
+        "",
+        "cdn.example",
+    )
+    assert r.returncode == 0, r.stderr
+    assert sorted(r.stdout.splitlines()) == sorted(
+        ["address=/cdn.example/1.1.1.1", "address=/cdn.example/2.2.2.2"]
+    )
+
+
+def test_build_refreshed_drops_dealistlisted_domain(tmp_path: Path) -> None:
+    # A domain no longer in the allowlist is NOT carried forward even though the old
+    # conf still holds its record — carry-forward must never resurrect a removed host.
+    r = _build(
+        tmp_path,
+        "address=/#/\naddress=/removed.example/1.2.3.4\n",
+        "",
+        "github.com",
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == ""
+
+
+def test_build_refreshed_emits_nothing_for_never_resolved(tmp_path: Path) -> None:
+    # An allowlisted domain with neither a fresh nor a prior IP emits nothing (it
+    # falls to dnsmasq's NXDOMAIN default), rather than a malformed empty record.
+    r = _build(tmp_path, "address=/#/\n", "", "never.example")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == ""
