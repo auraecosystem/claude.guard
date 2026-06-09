@@ -383,7 +383,7 @@ def _collect_test_files() -> list[str]:
         for s in _kcov_shard_job()["steps"]
         if s.get("name") == "Trace this shard's slice"
     )
-    return re.findall(r"tests/\S+?\.py", step["run"])
+    return re.findall(r"tests/\S+\.py", step["run"])
 
 
 def test_shard_matrix_length_matches_count() -> None:
