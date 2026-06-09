@@ -3223,6 +3223,13 @@ def test_resolve_promptarmor_llm_raises_without_api_key(mon, monkeypatch):
         mon.resolve_promptarmor_llm()
 
 
+def test_resolve_promptarmor_llm_raises_on_unknown_provider(mon, monkeypatch):
+    monkeypatch.setenv("MONITOR_API_KEY", "k")
+    monkeypatch.setenv("MONITOR_PROVIDER", "no-such-provider")
+    with pytest.raises(RuntimeError, match="Unknown monitor provider"):
+        mon.resolve_promptarmor_llm()
+
+
 # --------------------------------------------------------------------------
 # select_model — tiered weak/strong band resolution
 # --------------------------------------------------------------------------
