@@ -95,35 +95,7 @@ def drive(pa, text, monkeypatch, *, returns=None, raises=None, cfg=True):
     return pa.filter_text(text)
 
 
-# ─── max_chars / cache tunables ──────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "value,expected",
-    [(None, 12000), ("50", 50), ("notint", 12000), ("0", 12000), ("-5", 12000)],
-)
-def test_max_chars(pa, monkeypatch, value, expected):
-    monkeypatch.delenv("PROMPTARMOR_MAX_CHARS", raising=False)
-    if value is not None:
-        monkeypatch.setenv("PROMPTARMOR_MAX_CHARS", value)
-    assert pa.max_chars() == expected
-
-
-@pytest.mark.parametrize(
-    "value,expected",
-    [(None, 256), ("1", 1), ("0", 0), ("notint", 256), ("-3", 256)],
-)
-def test_cache_max(pa, monkeypatch, value, expected):
-    monkeypatch.delenv("PROMPTARMOR_CACHE_MAX", raising=False)
-    if value is not None:
-        monkeypatch.setenv("PROMPTARMOR_CACHE_MAX", value)
-    assert pa._cache_max() == expected
-
-
-def test_cache_key_depends_on_model_and_content(pa):
-    assert pa._cache_key("m", "x") == pa._cache_key("m", "x")
-    assert pa._cache_key("m", "x") != pa._cache_key("n", "x")
-    assert pa._cache_key("m", "x") != pa._cache_key("m", "y")
+# ─── verdict cache ───────────────────────────────────────────────────────────
 
 
 def test_cache_get_miss_then_hit_moves_to_mru(pa):
@@ -135,14 +107,8 @@ def test_cache_get_miss_then_hit_moves_to_mru(pa):
     assert list(pa._cache) == ["b", "a"]
 
 
-def test_cache_put_disabled_when_limit_zero(pa, monkeypatch):
-    monkeypatch.setenv("PROMPTARMOR_CACHE_MAX", "0")
-    pa._cache_put("a", {"v": 1})
-    assert "a" not in pa._cache
-
-
 def test_cache_put_evicts_oldest_over_limit(pa, monkeypatch):
-    monkeypatch.setenv("PROMPTARMOR_CACHE_MAX", "1")
+    monkeypatch.setattr(pa, "_CACHE_MAX", 1)
     pa._cache_put("a", {"v": 1})
     pa._cache_put("b", {"v": 2})
     assert list(pa._cache) == ["b"]

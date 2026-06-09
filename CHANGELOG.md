@@ -27,10 +27,6 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `PROMPTARMOR_MAX_CHARS` (default 12000) caps the web content sent to the
-  injection filter LLM — a smaller cap trims input tokens, the dominant lever on
-  the filter call's latency. `PROMPTARMOR_CACHE_MAX` (default 256, 0 disables)
-  bounds the sidecar's in-process verdict cache.
 - `CLAUDE_GUARD_DNS_WARM_START` and `DNS_CACHE_TTL` tune the firewall's
   warm-start DNS snapshot (see Changed).
 

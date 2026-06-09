@@ -50,71 +50,32 @@ SYSTEM_PROMPT = (
 )
 
 
-def max_chars() -> int:
-    """Cap on content sent to the filter LLM (token/cost/latency bound).
+MAX_CHARS = 12000  # content sent to the filter LLM (token/cost/latency bound)
 
-    Env-tunable (PROMPTARMOR_MAX_CHARS); a smaller cap trims input tokens, which
-    is the dominant lever on the filter call's latency. Non-positive or
-    non-integer values fall back to the 12000-char default rather than eliding to
-    nothing (which would blind the filter)."""
-    raw = os.environ.get("PROMPTARMOR_MAX_CHARS")
-    if raw is None:
-        return 12000
-    try:
-        value = int(raw)
-    except ValueError:
-        return 12000
-    return value if value > 0 else 12000
-
-
-# Process-level bounded LRU of verdicts, keyed by (model, elided content). Bounds
-# memory in the long-lived sidecar; 0 disables. Stores the emitted dict-or-None
-# for an outcome we actually obtained from the model (never a transient failure),
-# so a cache hit reproduces a real verdict, not a swallowed error. The sidecar is
-# a ThreadingHTTPServer, so a lock guards the check-then-act sequences (the LLM
-# call itself runs OUTSIDE the lock — only the dict mutations are serialized).
+# Process-level bounded LRU of verdicts, keyed by (model, elided content): a
+# repeated identical fetch in the long-lived sidecar skips the LLM call. Only an
+# outcome actually obtained from the model is cached (never a transient failure),
+# so a hit reproduces a real verdict. The sidecar is threaded, so a lock guards
+# the dict mutations (the LLM call itself runs outside it).
 _CACHE_MAX = 256
 _cache: "OrderedDict[str, dict | None]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
-def _cache_max() -> int:
-    raw = os.environ.get("PROMPTARMOR_CACHE_MAX")
-    if raw is None:
-        return _CACHE_MAX
-    try:
-        value = int(raw)
-    except ValueError:
-        return _CACHE_MAX
-    return value if value >= 0 else _CACHE_MAX
-
-
-def _cache_key(model: str, content: str) -> str:
-    digest = hashlib.sha256()
-    digest.update(model.encode("utf-8"))
-    digest.update(b"\x00")
-    digest.update(content.encode("utf-8"))
-    return digest.hexdigest()
-
-
 def _cache_get(key: str) -> "tuple[bool, dict | None]":
-    """Return (hit, value). Move the key to the MRU end on a hit."""
+    """Return (hit, value); a hit moves the key to the MRU end."""
     with _cache_lock:
         if key not in _cache:
             return False, None
-        value = _cache.pop(key)
-        _cache[key] = value
-        return True, value
+        _cache.move_to_end(key)
+        return True, _cache[key]
 
 
 def _cache_put(key: str, value: "dict | None") -> None:
-    limit = _cache_max()
-    if limit <= 0:
-        return
     with _cache_lock:
         _cache[key] = value
         _cache.move_to_end(key)
-        while len(_cache) > limit:
+        if len(_cache) > _CACHE_MAX:
             _cache.popitem(last=False)
 
 
@@ -179,8 +140,8 @@ def filter_text(text: str) -> "dict | None":
     except RuntimeError:
         return None
 
-    content = elide_middle(text, max_chars())
-    key = _cache_key(cfg.model, content)
+    content = elide_middle(text, MAX_CHARS)
+    key = hashlib.sha256(f"{cfg.model}\x00{content}".encode()).hexdigest()
     hit, cached = _cache_get(key)
     if hit:
         return cached
