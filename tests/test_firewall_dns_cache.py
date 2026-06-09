@@ -1,4 +1,4 @@
-"""Behavioral tests for the opt-in cross-session DNS-resolution cache.
+"""Behavioral tests for the cross-session DNS-resolution cache.
 
 `dns_cache_fresh` (firewall-lib.bash) gates whether a launch may seed its
 allowlist from a previous session's resolved IPs; `_populate_stream`
@@ -122,7 +122,7 @@ def _run_populate_stream(
 
 def test_populate_stream_builds_dnsmasq_records(tmp_path: Path) -> None:
     # No cache arg: builds dnsmasq address= records and resolves both domains,
-    # writing no cache file (the default, caching-off path).
+    # writing no cache file (the no-write-through path).
     conf, written, resolved = _run_populate_stream(tmp_path, "", _VALID_CACHE)
     assert "address=/api.anthropic.com/203.0.113.7" in conf
     assert "address=/github.com/203.0.113.8" in conf

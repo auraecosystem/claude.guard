@@ -122,8 +122,8 @@ DNS answer for an allowlisted domain cannot open a route to cloud metadata or th
 internal sandbox network. The same bogon ranges are also dropped on the firewall's
 OUTPUT chain at the packet layer (loopback and the sandbox subnet carved out
 first), backstopping any IP that enters the set through a path the resolve-time
-filter doesn't see — notably the carried-forward GitHub-meta CIDRs and any
-opt-in cross-session DNS-cache seed (`CLAUDE_GUARD_DNS_CACHE`, firewall-only
+filter doesn't see — notably the carried-forward GitHub-meta CIDRs and the
+default-on cross-session DNS-cache seed (`CLAUDE_GUARD_DNS_CACHE`, firewall-only
 volume so the agent cannot poison it).
 squid `ssl_bump`s read-only domains and method-restricts them to GET/HEAD/OPTIONS,
 splices read-write domains (inference APIs), and caps request URIs (on read-only
