@@ -25,7 +25,7 @@ cd ~/.local/share/claude-guard
 bash setup.bash
 ```
 
-`setup.bash` installs and configures everything (Docker, the sandbox runtime, and supporting tools), prompting before each install and for `sudo` on system-level changes (or run non-interactively with `SCCD_ASSUME_YES=1`). It finishes by running `claude-guard doctor` to confirm your setup is fully protected.[^add] Claude Code itself is pinned to a verified, known-good version (`@anthropic-ai/claude-code` in `package.json`) that the guardrails are tested against; update it whenever you like by bumping that pin or setting `CLAUDE_CODE_VERSION`.
+`setup.bash` installs and configures everything (Docker, the sandbox runtime, and supporting tools), prompting before each install and for `sudo` on system-level changes (or run non-interactively with `CLAUDE_GUARD_ASSUME_YES=1`). It finishes by running `claude-guard doctor` to confirm your setup is fully protected.[^add] Claude Code itself is pinned to a verified, known-good version (`@anthropic-ai/claude-code` in `package.json`) that the guardrails are tested against; update it whenever you like by bumping that pin or setting `CLAUDE_CODE_VERSION`.
 
 **Windows:** run everything inside [WSL2](https://learn.microsoft.com/windows/wsl/install). Native Windows (Git Bash / MSYS2 / Cygwin) can't host the Linux containers and sandbox runtime this stack depends on, so `setup.bash` detects those shells and exits with guidance instead of attempting a doomed install.
 
@@ -35,13 +35,15 @@ bash setup.bash
 
 ```bash
 brew install alexander-turner/tap/claude-guard
-$(brew --prefix)/opt/claude-guard/libexec/setup.bash
+claude-guard setup
 ```
+
+`brew install` puts the wrapper on your `PATH` but can't run the privileged setup step itself (Homebrew's post-install has no `sudo`/TTY), so finish with `claude-guard setup`. The first time you launch `claude-guard` it will offer to run this for you if you skip it.
 
 ### What `setup.bash` does
 
 1. Merges security policy into `/etc/claude-code/managed-settings.json` (root-owned, highest precedence — the agent can't override it)
-2. Installs the runtime prerequisites it can package safely — the Docker engine (Linux via your package manager; macOS via [Colima](https://github.com/abiosoft/colima)), the `devcontainer` CLI, `uv`, `jq`, `curl`, `dig`, and Node/pnpm — prompting before each install (or non-interactively with `SCCD_ASSUME_YES=1`)
+2. Installs the runtime prerequisites it can package safely — the Docker engine (Linux via your package manager; macOS via [Colima](https://github.com/abiosoft/colima)), the `devcontainer` CLI, `uv`, `jq`, `curl`, `dig`, and Node/pnpm — prompting before each install (or non-interactively with `CLAUDE_GUARD_ASSUME_YES=1`)
 3. Installs the sandbox runtime: Linux uses a [Kata/Firecracker](https://katacontainers.io/) microVM when KVM is available, else [gVisor/runsc](https://gvisor.dev/); macOS uses gVisor/runsc (inside the Docker/Colima VM)
 4. Links `claude-guard` into `~/.local/bin/` (subcommands — `doctor`, `audit`, `panic`, `remote` — via `claude-guard <subcommand>`; privacy routing via `claude-guard --privacy {default,private,e2ee}`)
 5. Configures the AI monitor (API key, push notifications)
@@ -65,7 +67,7 @@ Claude Code's built-in `sandbox` confines only Bash subprocesses with OS-level p
 
 ### Commands
 
-**`claude-guard doctor`** — run it any time to verify your protection state. It's a strictly read-only health check (no container launch, no writes) that reports the real enforcement state: the effective container runtime and whether `/dev/kvm` is present, whether the required tools (`docker`, `devcontainer`, `uv`) and the Docker daemon are reachable, the ownership/mode of `/etc/claude-code/managed-settings.json`, and the monitor configuration. It also checks **PATH precedence** — that typing `claude` resolves to this wrapper and not some other `claude` earlier on your `PATH` that would silently bypass the stack. It exits `0` PROTECTED, `1` DEGRADED, or `2` UNPROTECTED.
+**`claude-guard doctor`** — run it any time to verify your protection state. It's a strictly read-only health check (no container launch, no writes) that reports the real enforcement state: the effective container runtime and whether `/dev/kvm` is present, whether the required tools (`docker`, `devcontainer`, `uv`) and the Docker daemon are reachable, the ownership/mode of `/etc/claude-code/managed-settings.json`, and the monitor configuration. It also checks **PATH precedence** — that typing `claude` resolves to this wrapper and not some other `claude` earlier on your `PATH` that would silently bypass the stack. It exits `0` PROTECTED, `1` DEGRADED, or `2` UNPROTECTED. Pass `--fix` to repair a missing or wrong `~/.local/bin/claude` alias in place (preserving any existing `claude` as `claude-original`) — the one write the command makes; the report itself stays read-only.
 
 **`claude-guard audit`** — read this workspace's tool-call audit log without memorizing Docker volume names or typing `docker exec`. The monitor sidecar logs every tool call to a named volume the agent can't read, truncate, or delete; `claude-guard audit` mounts that volume **read-only** into a throwaway container (with `--network none`) and prints it, so it works whether or not a `claude-guard` session is running and can never alter the log. `-f`/`--follow` streams new entries live, `-n N` shows the last N, `--raw` emits the underlying JSONL (pipe to your own `jq`), and `--workspace DIR` targets another project. The default view prints `<timestamp>  <tool>  <summary>` per line.
 
@@ -97,7 +99,7 @@ The monitor is the trusted second opinion — in auto mode (`claude-guard`), it 
 - On a **claude.ai subscription** → `MONITOR_API_KEY`. Monitor-only: the CLI never sees it, so it stays on the subscription instead of billing the API.
 - **OK billing the API** → `ANTHROPIC_API_KEY`, `VENICE_INFERENCE_KEY`, or `OPENROUTER_API_KEY`.
 - Using **`claude-guard --privacy e2ee`** → must be `VENICE_INFERENCE_KEY` (its only allowed provider — E2EE, no closed lab).
-- **Don't want a monitor** → `--dangerously-skip-monitor` (or `DANGEROUSLY_SKIP_MONITOR=1`).
+- **Don't want a monitor** → `--dangerously-skip-monitor`.
 
 Set it in the env or `envchain` — the launcher scans both at startup and writes nothing to disk; e.g. `envchain --set claude-monitor MONITOR_API_KEY` (pin the namespace with `CLAUDE_MONITOR_ENVCHAIN_NS`, else all are scanned). In the devcontainer the key lives only in the isolated sidecar, so the API-billing trade-off never applies.
 

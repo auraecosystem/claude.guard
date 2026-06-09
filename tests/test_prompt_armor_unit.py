@@ -1,9 +1,9 @@
 """Unit tests for .claude/hooks/prompt-armor.py.
 
 Imports the module via importlib (hyphenated filename) and drives main() over
-monkeypatched stdin/stdout with monitor.resolve_llm / monitor.generate_text stubbed,
-so coverage measures real lines with no network call. End-to-end wiring through
-sanitize-output.mjs is covered by its JS integration test.
+monkeypatched stdin/stdout with monitor.resolve_promptarmor_llm / monitor.generate_text
+stubbed, so coverage measures real lines with no network call. End-to-end wiring
+through sanitize-output.mjs is covered by its JS integration test.
 """
 
 # covers: .claude/hooks/prompt-armor.py
@@ -16,10 +16,22 @@ from pathlib import Path
 
 import pytest
 
-HOOKS = Path(__file__).resolve().parent.parent / ".claude" / "hooks"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOOKS = REPO_ROOT / ".claude" / "hooks"
 SRC = HOOKS / "prompt-armor.py"
 SANITIZE_OUTPUT = HOOKS / "sanitize-output.mjs"
 MARKER = "[removed: prompt injection]"
+
+# Bash gates that keyless-skip the monitor by inlining the provider key env vars.
+# Each must reference exactly the canonical key set (no named array to extract,
+# so we scan the file text). Paths are relative to REPO_ROOT.
+BASH_KEY_GATES = (
+    ".claude/hooks/monitor-dispatch.bash",
+    ".claude/hooks/session-setup.sh",
+    "bin/lib/protection-state.bash",
+)
+# A provider/monitor key env var name: e.g. ANTHROPIC_API_KEY, VENICE_INFERENCE_KEY.
+_KEY_TOKEN = re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API|INFERENCE)_KEY\b")
 
 
 @pytest.fixture
@@ -34,12 +46,12 @@ def drive(mod, text, monkeypatch, *, returns=None, raises=None, cfg=True):
     """Run main() with `text` on stdin; return parsed stdout JSON (or None).
 
     cfg=True wires a fake LLM whose call_api returns `(returns, usage)` or
-    raises `raises`; cfg=False simulates no API key (resolve_llm raises
-    RuntimeError, as the real one now does).
+    raises `raises`; cfg=False simulates no API key (resolve_promptarmor_llm
+    raises RuntimeError, as the real one does when no key is configured).
     """
     if cfg:
         conf = mod.monitor.LLMConfig("anthropic", "k", "url", "m", 10)
-        monkeypatch.setattr(mod.monitor, "resolve_llm", lambda: conf)
+        monkeypatch.setattr(mod.monitor, "resolve_promptarmor_llm", lambda: conf)
 
         def fake_call(*_a, **_k):
             if raises is not None:
@@ -53,7 +65,7 @@ def drive(mod, text, monkeypatch, *, returns=None, raises=None, cfg=True):
         def _no_key():
             raise RuntimeError("No API key configured")
 
-        monkeypatch.setattr(mod.monitor, "resolve_llm", _no_key)
+        monkeypatch.setattr(mod.monitor, "resolve_promptarmor_llm", _no_key)
 
     out = io.StringIO()
     monkeypatch.setattr(mod.sys, "stdin", io.StringIO(text))
@@ -233,3 +245,25 @@ def test_env_bound_secret_vars_match_monitor(mod):
     redact = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(redact)
     assert set(redact.ENV_BOUND_SECRET_VARS) == canonical
+
+
+@pytest.mark.parametrize("rel_path", BASH_KEY_GATES)
+def test_bash_key_gates_match_monitor(mod, rel_path):
+    """The bash gates that skip the monitor when no key is set inline the same
+    provider key env vars (no array to import). Drift here re-enables — or
+    silently disables — the monitor for a provider the Python source already
+    knows about, so pin each gate's referenced key set to monitor.PROVIDERS."""
+    canonical = {"MONITOR_API_KEY"} | {
+        p["env_key"] for p in mod.monitor.PROVIDERS.values()
+    }
+    text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+    referenced = set(_KEY_TOKEN.findall(text))
+    # Every canonical key must appear verbatim (catches a new key not propagated
+    # here, even one whose name the token regex wouldn't otherwise match).
+    missing = {k for k in canonical if not re.search(rf"\b{re.escape(k)}\b", text)}
+    assert not missing, f"{rel_path} missing provider keys: {sorted(missing)}"
+    # No stray provider-shaped key beyond the canonical set (catches a stale key
+    # left behind after the Python source dropped a provider).
+    assert referenced <= canonical, (
+        f"{rel_path} references unknown provider keys: {sorted(referenced - canonical)}"
+    )

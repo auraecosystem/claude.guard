@@ -40,7 +40,7 @@ def _drive_reexec(tmp_path: Path, *, group_member: bool, **env: str):
     write_exe(
         bin_dir / "sg",
         '#!/usr/bin/env bash\nprintf "SG_EXEC: %s\\n" "$*"\n'
-        'printf "REEXEC=%s\\n" "${SCCD_DOCKER_REEXEC:-}"\n',
+        'printf "REEXEC=%s\\n" "${CLAUDE_GUARD_DOCKER_REEXEC:-}"\n',
     )
     member_line = "docker:x:999:$(id -un)" if group_member else "docker:x:999:"
     write_exe(bin_dir / "getent", f'#!/usr/bin/env bash\nprintf "{member_line}\\n"\n')
@@ -68,7 +68,7 @@ def test_reexec_fires_under_sg_when_group_is_now_active(tmp_path: Path) -> None:
 def test_reexec_sentinel_prevents_a_second_loop(tmp_path: Path) -> None:
     """Already re-exec'd (sentinel set) ⇒ return 1 immediately, never exec again."""
     r = _drive_reexec(
-        tmp_path, group_member=True, SG_PRESENT="1", SCCD_DOCKER_REEXEC="1"
+        tmp_path, group_member=True, SG_PRESENT="1", CLAUDE_GUARD_DOCKER_REEXEC="1"
     )
     assert "SG_EXEC:" not in r.stdout
     assert "RETURNED 1" in r.stdout

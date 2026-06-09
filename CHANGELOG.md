@@ -6,13 +6,28 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Added
-
 - The launcher now warns at startup when the agent cannot write `/workspace`
   (a root-owned host directory leaves the unprivileged `node` user unable to
   create files there), naming the host directory and the `chown` fix — instead
   of letting it surface later as a cryptic mid-session "Permission denied". The
   launch still proceeds, since an unwritable workspace is degraded, not unsafe.
+
+## [0.3.0] - 2026-06-09
+
+### Added
+
+- `claude-guard setup` subcommand runs the bundled installer, so finishing a
+  fresh install is one memorable command instead of hunting for
+  `$(brew --prefix)/opt/claude-guard/libexec/setup.bash`.
+- First-run provisioning: launching `claude-guard` on a not-yet-configured system
+  (no managed-settings, e.g. straight after `brew install`) offers to run setup
+  then and there — in your TTY, where the `sudo` it needs works — instead of
+  failing deeper in the launch. Skipped on non-interactive callers.
+- `claude-guard doctor --fix` repairs a missing or wrong `~/.local/bin/claude`
+  alias in place — the quick fix when `doctor` reports that typing `claude`
+  bypasses the sandbox, without re-running the whole installer. It preserves any
+  pre-existing `claude` as `claude-original` and is the only write `doctor` makes;
+  the report itself stays read-only.
 - `claude-guard audit --egress` (and `--blocked`) surfaces the firewall's egress
   access log host-side, so "did the firewall block this, or is my code wrong?" is
   answerable without `docker exec`. `--blocked` shows only the requests squid denied
@@ -29,11 +44,24 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** the `DANGEROUSLY_SKIP_FIREWALL` / `DANGEROUSLY_SKIP_CONTAINER` /
+  `DANGEROUSLY_SKIP_MONITOR` environment-variable aliases are removed — only the
+  matching `--dangerously-skip-*` flags weaken a launch now. The flags are kept
+  (and named loudly on purpose); the env vars survive solely as the internal
+  wrapper→sandbox signal and are cleared at startup so a stray inherited one can't
+  silently weaken a session. Replace `DANGEROUSLY_SKIP_CONTAINER=1` with
+  `--dangerously-skip-container`, etc.
+- **Breaking:** every `SCCD_*` environment variable is renamed to `CLAUDE_GUARD_*`
+  (e.g. `SCCD_NO_PREBUILT` → `CLAUDE_GUARD_NO_PREBUILT`, `SCCD_ASSUME_YES` →
+  `CLAUDE_GUARD_ASSUME_YES`, `SCCD_SBOM_DIFF` → `CLAUDE_GUARD_SBOM_DIFF`,
+  `SCCD_COSIGN_*` → `CLAUDE_GUARD_COSIGN_*`), retiring the old project codename so
+  the wrapper's knobs share one consistent prefix. Update any scripts or CI that
+  set the old names — they are no longer read.
 - The launch banner now names the effective isolation backend (Kata/Firecracker
   microVM, gVisor/runsc, or runc) instead of a generic "sandboxed" line, so you can
   tell what isolation you got without running `claude-guard-doctor`. When the
-  runtime auto-selected gVisor/runc despite `/dev/kvm` being available — a silent
-  drop from the stronger Kata microVM — the launch is flagged DEGRADED with the fix.
+  runtime auto-selected gVisor/runc despite `/dev/kvm` being available \u2014 a silent
+  drop from the stronger Kata microVM \u2014 the launch is flagged DEGRADED with the fix.
   An explicit `CONTAINER_RUNTIME` override is treated as a deliberate choice and not
   flagged.
 - Clearer native-Windows / WSL2 onboarding: native Windows (Git Bash / MSYS2 /
@@ -43,14 +71,71 @@ adhere to [Semantic Versioning](https://semver.org/).
   wired into the distro, pointing each at its specific fix.
 - The launcher warns once per host when secret-named env vars in your shell will be
   withheld from the agent inside the sandbox, naming them and pointing at
-  `SCRUB_SECRETS_ALLOW` — so a token a tool needs going missing reads as "withheld by
+  `SCRUB_SECRETS_ALLOW` \u2014 so a token a tool needs going missing reads as "withheld by
   design, forward it" rather than a mystery.
 - `setup.bash` prints the shadowed-`claude` banner before the doctor summary (not
   after), and `claude-guard doctor`'s shadowed-alias fix now spells out the reload
   command (`exec $SHELL` or a new terminal), so a silently-bypassed `claude` is
   harder to miss and faster to fix.
 
+### Fixed
+
+- `claude-guard` no longer leaks the `devcontainer up` stderr temp file when
+  interrupted (Ctrl-C) mid-build.
+- Documentation referred to non-existent `claude-audit` and `claude-remote`
+  commands; the working forms are `claude-guard audit` and `claude-guard remote`.
+  Also documented the `--experimental-redact-monitor-reason` flag in
+  `docs/configuration.md`.
+- Kata setup on Apple Silicon no longer hard-fails clearing `cpu_features` in the
+  Kata config: the in-place `sed` now passes a backup suffix so it works under
+  BSD/macOS `sed` as well as GNU.
+- `docs/audit-verify.md` referenced a non-existent `claude-audit` binary (the
+  command is `claude-guard audit`), and `docs/configuration.md` pointed at a
+  "defense layer 7" that does not exist (now links the `SECURITY.md` Trust
+  boundaries section).
+- `claude-guard` no longer leaks the `devcontainer up` stderr temp file when
+  interrupted (Ctrl-C) mid-build.
+- A fresh Docker install on Linux no longer requires a manual `newgrp docker` /
+  logout and a second `setup.bash` run: setup now re-execs the remaining steps under
+  the new `docker` group automatically (installing `sg` first if a minimal image
+  lacks it), so the install completes in one pass. The misleading "log out/in to
+  take effect" message is gone.
+- `claude-guard` no longer leaks the `devcontainer up` stderr temp file when
+  interrupted (Ctrl-C) mid-build.
+- Documentation referred to non-existent `claude-audit` and `claude-remote`
+  commands; the working forms are `claude-guard audit` and `claude-guard remote`.
+  Also documented the `--experimental-redact-monitor-reason` flag in
+  `docs/configuration.md`.
+
 ### Security
+
+- The devcontainer image now installs a pinned `corepack@0.35.0` instead of
+  `corepack@latest`, so the build that the cosign-verified prebuilt images are
+  derived from no longer pulls an uncontrolled `latest` tag.
+- The `shellharden` cargo fallback now honors the pinned `SHELLHARDEN_VERSION`
+  (`cargo install --version … --locked`) instead of compiling whatever the
+  registry currently serves.
+
+### Security
+
+- `HMAC` comment on `monitor-secret` mount now accurately states that the agent
+  (uid 1000) can read the key — the HMAC only prevents unsigned forgeries from
+  other network peers, not from the agent itself; audit integrity against the
+  agent rests on the egress firewall.
+- `session_transcript` is sanitized before injection into the monitor envelope:
+  ANSI/terminal escape sequences, Unicode `Cf`-category characters (zero-width
+  spaces, soft hyphens, etc.), BMP variation selectors (U+FE00–FE0F), and
+  supplementary variation selectors (U+E0100–E01EF) are stripped, closing a
+  prompt-injection vector into the monitor sidecar.
+- cosign OIDC identity regex now pins the concrete repository name (derived from
+  the git remote URL) instead of the org-wide `[^/]+` wildcard, so only images
+  signed by this repo's publish workflow are accepted. Falls back to the
+  wildcard only when the repo name cannot be determined.
+- Firewall container (`NET_ADMIN`+`NET_RAW`, runc) now runs under an explicit
+  seccomp profile (`.devcontainer/seccomp-firewall.json`) that blocks
+  `ptrace`, `process_vm_readv/writev`, `kcmp`, `name_to_handle_at`, and
+  `open_by_handle_at` — syscalls not needed by iptables/squid/dnsmasq but
+  useful for container-escape or cross-process inspection.
 
 - The `ccr` sidecar image now verifies the claude-code-router tarball against the
   SRI hash pinned in `pnpm-lock.yaml` before installing, so a registry republish or
@@ -75,22 +160,8 @@ adhere to [Semantic Versioning](https://semver.org/).
   tool call unmonitored.
 - Ephemeral teardown now fails loud if it cannot enumerate the session's volume
   roles (unreadable config or missing `jq`) instead of silently removing nothing
-  and reporting success — closing a path where the throwaway-volume guarantee
+  and reporting success \u2014 closing a path where the throwaway-volume guarantee
   could quietly not hold.
-
-### Fixed
-
-- A fresh Docker install on Linux no longer requires a manual `newgrp docker` /
-  logout and a second `setup.bash` run: setup now re-execs the remaining steps under
-  the new `docker` group automatically (installing `sg` first if a minimal image
-  lacks it), so the install completes in one pass. The misleading "log out/in to
-  take effect" message is gone.
-- `claude-guard` no longer leaks the `devcontainer up` stderr temp file when
-  interrupted (Ctrl-C) mid-build.
-- Documentation referred to non-existent `claude-audit` and `claude-remote`
-  commands; the working forms are `claude-guard audit` and `claude-guard remote`.
-  Also documented the `--experimental-redact-monitor-reason` flag in
-  `docs/configuration.md`.
 
 ## [0.2.0] - 2026-06-09
 
@@ -192,8 +263,6 @@ exists but was created for project …` warning on every session. The shared
   resolved key values (plus an Anthropic-prefix / key-field pattern fallback)
   before reaching the terminal, scrollback, or shared logs. Monitoring is
   unaffected — the container still receives the real key.
-
-### Security
 
 - The code-side action classifier (`risk.classify_type`) no longer crashes when a
   Bash tool call's `command` field is a non-string (a malformed/adversarial
