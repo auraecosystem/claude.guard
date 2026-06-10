@@ -142,7 +142,7 @@ echo ":: Downloading runsc for ${ARCH}..."
 # gVisor publishes a .sha512 next to each binary; verify before installing —
 # the downloaded binary is the sandbox enforcement floor.
 cd /tmp
-wget -q "${URL}/runsc" "${URL}/runsc.sha512" || { echo ":: couldn't reach storage.googleapis.com — check OrbStack networking" >&2; exit 1; }
+wget -q "${URL}/runsc" "${URL}/runsc.sha512" || { echo ":: couldn't reach storage.googleapis.com from the OrbStack VM — check connectivity with: docker run --rm alpine:3.21 wget -qO- https://storage.googleapis.com >/dev/null && echo reachable" >&2; exit 1; }
 sha512sum -c runsc.sha512
 install -m 0755 runsc /host-bin/runsc
 echo ":: runsc installed into the VM's /usr/local/bin"

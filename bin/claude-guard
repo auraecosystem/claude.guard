@@ -1193,10 +1193,14 @@ if [[ -z "$container_id" ]]; then
   # Best-effort: a plain `docker logs` read, every step guarded so it can't abort
   # the launch (set -e/pipefail), and invoked ONLY on the success path below.
   _surface_credential_warning() {
-    local svc cid line
+    local cid line
+    # kcov-ignore-start  kcov credits this multi-line command substitution to its
+    # closing line, not this opening; the hardener-scoped read is exercised by
+    # test_cold_start_surfaces_hardener_credential_warning
     cid=$(docker ps -a --filter "label=com.docker.compose.service" \
       --format '{{.Label "com.docker.compose.service"}}'$'\t''{{.ID}}'$'\t''{{.Label "com.docker.compose.project.working_dir"}}' \
       2>/dev/null | awk -F'\t' -v wf="$workspace_folder" 'index($3, wf) && $1 == "hardener" {print $2; exit}')
+    # kcov-ignore-end
     [[ -n "$cid" ]] || return 0
     # Keep the warning header and the file lines it introduces (everything up to
     # the "Consider removing" trailer), dropping the === rule lines.
@@ -1204,7 +1208,7 @@ if [[ -z "$container_id" ]]; then
       awk '/Credential files found in workspace/{p=1} p && !/^=+$/{print} /Consider removing/{p=0}' |
       while IFS= read -r line; do
         cg_warn "claude-guard: $line"
-      done || true
+      done || true # kcov-ignore-line  kcov credits the piped while loop to its opening line, not this closing done; the loop body is exercised by test_cold_start_surfaces_hardener_credential_warning
   }
   if [[ $dc_exit -eq 124 ]]; then
     cg_error "claude-guard: sandbox startup timed out after ${devcontainer_timeout}s."
