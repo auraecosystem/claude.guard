@@ -21,6 +21,7 @@ on:
     inputs:
       duration:
         description: "Per-target fuzz budget, seconds"
+        type: string
         default: "120"
 
 permissions:

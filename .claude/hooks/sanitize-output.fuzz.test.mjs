@@ -88,8 +88,8 @@ async function minTime(fn, repeats) {
 }
 
 // Repeat `unit` until it reaches `length` chars. Scaling by repetition holds the
-// regex-relevant token density constant across sizes, so a rising per-doubling
-// ratio is super-linearity in the engine, not a change in input shape.
+// regex-relevant token density constant across sizes, so rising work as size
+// grows is super-linearity in the engine, not a change in input shape.
 function scaleTo(unit, length) {
   let out = unit;
   while (out.length < length) out += unit;
@@ -99,7 +99,7 @@ function scaleTo(unit, length) {
 // ─── Target 1: dynamic / timing ReDoS guard ─────────────────────────────────
 // Assert the pipeline's wall-clock grows sub-quadratically as the adversarial
 // input scales. We fit the empirical growth EXPONENT over the full size range
-// (log-log slope of the smallest-to-largest work) rather than a per-doubling
+// (least-squares log-log slope of work vs. size) rather than a per-doubling
 // ratio: the remark/rehype graph is legitimately ~n^1.5-1.7 on dense markup, so
 // a local ratio jitters above any quadratic-catching cap, while the wide-range
 // exponent is dampened by the long log span and stays a stable, well-separated
@@ -122,12 +122,25 @@ const PY_REPEATS = 2;
 const PY_FLOOR_MS = 25;
 const PY_SAMPLE_UNITS = 3;
 
-// log-log slope from the smallest to the largest size, using min-damped
-// endpoints; the wide size range makes it robust to the per-point jitter a
-// per-step ratio would amplify.
+const mean = (values) =>
+  values.reduce((acc, val) => acc + val, 0) / values.length;
+
+// Least-squares slope of log(work) against log(size) across every sampled size.
+// A regression slope over all points is more robust to a single noisy endpoint
+// than a two-point slope, and uses every measurement (no sampled size is wasted)
+// — both of which widen the margin under the EXPONENT_CAP on a jittery CI runner.
 function growthExponent(sizes, work) {
-  const last = sizes.length - 1;
-  return Math.log(work[last] / work[0]) / Math.log(sizes[last] / sizes[0]);
+  const xs = sizes.map((size) => Math.log(size));
+  const ys = work.map((ms) => Math.log(ms));
+  const meanX = mean(xs);
+  const meanY = mean(ys);
+  let covariance = 0;
+  let varianceX = 0;
+  for (let i = 0; i < xs.length; i++) {
+    covariance += (xs[i] - meanX) * (ys[i] - meanY);
+    varianceX += (xs[i] - meanX) ** 2;
+  }
+  return covariance / varianceX;
 }
 
 async function assertSubQuadratic(measure, sizes, { base, floor, repeats }) {
@@ -195,7 +208,9 @@ describe("fuzz target 1: pipeline timing grows sub-quadratically", () => {
 // The unit tests pin each detector against a fixed sample; this fuzzes WHERE the
 // secret sits -- random line offset, hugged by delimiter noise and surrounded by
 // arbitrary other lines -- and asserts the scrubbed output never contains the
-// secret verbatim.
+// secret verbatim. Run counts here are deliberately modest: this is the fast
+// per-PR gate (each run spawns the redactor subprocess); the deep, long-budget
+// exploration of the boundary space lives in the scheduled fuzz.yaml campaign.
 const SECRET_FUZZ_RUNS = 20;
 const ENV_KEY_FUZZ_RUNS = 10;
 
