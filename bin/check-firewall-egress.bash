@@ -4,8 +4,8 @@
 #
 #   1. The firewall actually BLOCKS. The real squid + dnsmasq, built from the
 #      project's own config generators, deny a non-allowlisted domain, method-block
-#      writes to a read-only domain (GET still passes), and pass a read-write domain
-#      through. Assertions are on observed responses (status codes / origin reached),
+#      writes to a read-only domain with a 403 (GET still passes), and pass a
+#      read-write domain through. Assertions are on observed responses (status codes / origin reached),
 #      not config text. See tests/smoke/firewall-egress-probe.sh for the in-container
 #      half; squid-config.yaml only `squid -k parse`s the config — nothing else
 #      proves it enforces.
