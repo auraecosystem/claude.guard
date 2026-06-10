@@ -722,6 +722,24 @@ def report_ai_monitor() -> None:
     degraded.append("no monitor API key — tool calls run unmonitored")
 
 
+def _token_file_fault(perms: str) -> tuple[str, str] | None:
+    """Return (display, reason) if the token file's octal mode is a fault, else None.
+    Checks mode bits directly so the result is correct regardless of effective uid
+    (root can read a mode-000 file, so file_has alone is not a reliable gate)."""
+    try:
+        p = int(perms, 8)
+    except ValueError:
+        return None
+    if not (p & 0o400):
+        return "unreadable by owner", "the launcher cannot read it"
+    if p & 0o066:
+        return (
+            "group/other-readable",
+            "the launcher refuses it and a leakable token is a secret-exposure risk",
+        )
+    return None
+
+
 def report_claude_auth() -> None:
     # Host Claude auth lets an ephemeral session skip the login screen: the launcher
     # resolves a token from the HOST (env var, 0600 file, or envchain) and seeds it
@@ -759,45 +777,16 @@ def report_claude_auth() -> None:
     envchain_has = len(lines) > 3 and lines[3] == "1"
     perms = lines[4] if len(lines) > 4 else "-"
 
-    # Check file perms independent of file_has: root can read a mode-000 file
-    # (file_has=True) but a real user's launcher can't, so gate only on the
-    # file's mode bits, not on whether this probe managed to read the content.
     if perms not in ("-", "?"):
-        try:
-            pint = int(perms, 8)
-            owner_readable = bool(pint & 0o400)
-            group_or_other_readable = bool(pint & 0o066)
-        except ValueError:
-            owner_readable, group_or_other_readable = True, False
-        if not owner_readable:
-            # e.g. mode 000: owner can't read it — launcher fails closed.
+        fault = _token_file_fault(perms)
+        if fault:
+            display, reason = fault
             kv(
                 "token file",
-                mark(
-                    BAD_SYMBOL,
-                    f"{token_file} is mode {perms} (unreadable by owner)",
-                    "red",
-                ),
+                mark(BAD_SYMBOL, f"{token_file} is mode {perms} ({display})", "red"),
             )
             degraded.append(
-                f"{token_file} is mode {perms} (unreadable by owner) — the launcher "
-                f"cannot read it; run: chmod 600 {token_file}"
-            )
-            return
-        if group_or_other_readable:
-            # A leakable token; claude_auth_resolve_token refuses it, so the launch
-            # fails closed.
-            kv(
-                "token file",
-                mark(
-                    BAD_SYMBOL,
-                    f"{token_file} is mode {perms} (group/other-readable)",
-                    "red",
-                ),
-            )
-            degraded.append(
-                f"{token_file} is mode {perms} (group/other-readable) — the launcher refuses it "
-                f"and a leakable token is a secret-exposure risk; run: chmod 600 {token_file}"
+                f"{token_file} is mode {perms} ({display}) — {reason}; run: chmod 600 {token_file}"
             )
             return
 
