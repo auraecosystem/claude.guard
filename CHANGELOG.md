@@ -17,6 +17,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Dropped `NET_RAW` from the firewall container's capability set (least
+  privilege). The firewall installs iptables/ip6tables/ipset rules — all of which
+  need only `NET_ADMIN` — and uses no raw sockets (dnsmasq is DNS-only, squid is
+  an explicit TCP proxy, the REJECT target's ICMP is kernel-generated). The
+  `check-firewall-caps.bash` gate flagged it as an unprobed over-grant.
 - Four "fail loud" guards that were actually fail-open or fail-confusing are now
   fail-closed:
   - **Ephemeral teardown** — the launcher now exits non-zero when a session's
