@@ -120,6 +120,14 @@ adhere to [Semantic Versioning](https://semver.org/).
   tiered — but now scans its input linearly. A new test gate
   (`tests/test_regex_redos.py`) runs the project's runtime regexes through the
   `recheck` analyzer so a vulnerable pattern can't be reintroduced.
+- Extended the same treatment to the JavaScript output sanitizers, which run on
+  agent-authored and fetched content an attacker can shape. Rewrote the
+  HTML/markdown exfil-detection and `src`/`href` extraction regexes, the
+  `SECRET_HINT` redaction pre-gate, and the CSS `!important` strip so each scans
+  its input linearly (verified match-equivalent); a crafted tool output or page
+  could previously drive these synchronous hook filters into quadratic/cubic
+  backtracking and stall the hook. The `recheck`-backed `redos/no-vulnerable`
+  ESLint rule now gates every hook regex, so a vulnerable pattern fails lint.
 - The monitor sidecar now refuses to start when its HMAC secret is missing,
   instead of coming up and silently rejecting every signed request (a monitor
   that looks alive but authenticates nothing). The secret is bootstrapped before
