@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The firewall now probes that the Docker host's kernel can filter traffic by
+  ipset right after creating the allowlist set, failing fast with host-side
+  fixes (update OrbStack, restart Docker Desktop, `modprobe ip_set xt_set` on
+  Linux) instead of dying hundreds of lines later with the opaque iptables
+  error `Can't open socket to ipset` (seen on OrbStack, whose VM kernel has
+  shipped without iptables ipset-match support).
+
 - Launch now prints a one-line monitor-coverage notice so the auto default's scope
   isn't invisible at runtime: `Monitor: AUTO — this monitor reviews only
 classifier-denied calls; use --privacy e2ee for per-call review` (or `Monitor:
