@@ -182,6 +182,49 @@ def test_gated_is_enrolled_plus_vehicle_libs() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_kcov_excluded_files_all_exist() -> None:
+    """Every KCOV_EXCLUDED path must exist; a stale entry is noise (and hides the
+    fact that a new script may have taken the same path, now implicitly excluded)."""
+    missing = [f for f in _kcov.KCOV_EXCLUDED if not (REPO_ROOT / f).is_file()]
+    assert not missing, f"KCOV_EXCLUDED names nonexistent files: {missing}"
+
+
+def test_kcov_excluded_files_are_discovered() -> None:
+    """Every KCOV_EXCLUDED entry must be a bash file that _discover_bash_files()
+    would pick up — otherwise it is defending against a file that was never going
+    to be enrolled, which is just noise."""
+    discovered = set(_kcov._discover_bash_files())
+    not_discovered = [f for f in _kcov.KCOV_EXCLUDED if f not in discovered]
+    assert not not_discovered, (
+        "KCOV_EXCLUDED entries are not discovered as bash files (remove them): "
+        f"{not_discovered}"
+    )
+
+
+def test_kcov_excluded_and_enrolled_are_disjoint() -> None:
+    """A file cannot be both enrolled and excluded — one always wins, making the
+    other entry a silent lie."""
+    overlap = set(_kcov.KCOV_EXCLUDED) & set(_kcov.KCOV_ENROLLED)
+    assert not overlap, f"files in both KCOV_EXCLUDED and KCOV_ENROLLED: {overlap}"
+
+
+def test_all_bash_scripts_are_accounted_for() -> None:
+    """Opt-out enforcement: every bash script discovered under bin/ must be in
+    KCOV_ENROLLED, KCOV_EXCLUDED, or handled via KCOV_GATED_VIA_VEHICLE. A script
+    that slips through is automatically enrolled but has no tests — add it to
+    KCOV_EXCLUDED with a reason, or write tests to keep it enrolled."""
+    accounted = (
+        set(_kcov.KCOV_ENROLLED)
+        | set(_kcov.KCOV_EXCLUDED)
+        | set(_kcov.KCOV_GATED_VIA_VEHICLE.values())
+    )
+    unaccounted = set(_kcov._discover_bash_files()) - accounted
+    assert not unaccounted, (
+        "these bash scripts in bin/ are neither enrolled, excluded, nor gated via "
+        f"vehicle — add them to KCOV_EXCLUDED with a reason: {sorted(unaccounted)}"
+    )
+
+
 def test_kcov_test_files_all_exist() -> None:
     """Every listed slice file exists; a typo or a renamed/deleted test would
     otherwise silently drop coverage (run-kcov.sh traces nothing for it)."""
@@ -413,13 +456,10 @@ def _kcov_shard_job() -> dict:
 
 
 def _collect_test_files() -> list[str]:
-    """The tests/*.py files passed to `run-kcov.sh collect` in the kcov-shard step."""
-    step = next(
-        s
-        for s in _kcov_shard_job()["steps"]
-        if s.get("name") == "Trace this shard's slice"
-    )
-    return re.findall(r"tests/\S+\.py", step["run"])
+    """The tests/*.py files the CI kcov-shard step traces.
+    The shard step imports KCOV_TEST_FILES from Python rather than hardcoding
+    them in YAML, so this returns the same authoritative list directly."""
+    return list(_kcov.KCOV_TEST_FILES)
 
 
 def test_shard_matrix_length_matches_count() -> None:
