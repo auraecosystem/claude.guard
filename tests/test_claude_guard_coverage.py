@@ -538,7 +538,7 @@ def test_container_project_domains_announced(tmp_path: Path) -> None:
     _, _, env = _container_env(tmp_path)
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert "read-only egress to: ro-host.test" in r.stderr
+    assert "read-only access to: ro-host.test" in r.stderr
     assert "READ-WRITE" in r.stderr and "rw-host.test" in r.stderr
     # rw-host.test is not in the global allowlist, so the ro→rw promotion warning
     # (covered separately below) must NOT fire here.
@@ -741,7 +741,7 @@ def test_cold_start_up_timeout_dumps_sidecar_logs(tmp_path: Path) -> None:
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
     assert "timed out after" in r.stderr
-    assert "log lines from the 'firewall' sidecar" in r.stderr
+    assert "log lines from the 'firewall' container" in r.stderr
 
 
 def test_cold_start_up_failure_aborts(tmp_path: Path) -> None:
@@ -752,8 +752,8 @@ def test_cold_start_up_failure_aborts(tmp_path: Path) -> None:
     _, _, env = _container_env(tmp_path, FAKE_COLD="1", FAKE_DC_EXIT="3")
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
-    assert "'devcontainer up' failed (exit 3)" in r.stderr
-    assert "last 40 lines of 'devcontainer up' stderr" in r.stderr
+    assert "sandbox startup failed (exit 3)" in r.stderr
+    assert "last 40 lines of sandbox startup output" in r.stderr
     assert "ERROR: failed to solve" in r.stderr
 
 
@@ -808,7 +808,7 @@ def test_worktree_sync_waits_then_launches(tmp_path: Path) -> None:
     _, _, env = _container_env(tmp_path, CLAUDE_WORKTREE="1", FAKE_TESTDIR_FAILS="2")
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert "waiting for worktree bind-mount to sync" in r.stderr
+    assert "waiting for worktree files to sync" in r.stderr
     assert "LAUNCHED-CLAUDE" in r.stdout
 
 
@@ -1308,7 +1308,7 @@ def test_dump_dc_stderr_on_up_failure(tmp_path: Path) -> None:
     )
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
-    assert "'devcontainer up' failed" in r.stderr
+    assert "sandbox startup failed" in r.stderr
     assert "kernel: denied syscall 42" in r.stderr
 
 
@@ -1419,7 +1419,7 @@ def test_private_strict_sidecar_unreachable(tmp_path: Path) -> None:
         CCR_URL="http://127.0.0.1:1",
     )
     assert r.returncode == 1
-    assert "ccr sidecar unreachable" in r.stderr
+    assert "ccr process unreachable" in r.stderr
 
 
 def test_private_exec_launches_wrapper(tmp_path: Path) -> None:
