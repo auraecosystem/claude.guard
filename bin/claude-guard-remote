@@ -175,13 +175,17 @@ fi
 # (reproducible), fall back to the mutable :latest when dirty (and say so).
 if [[ -z "$image" ]]; then
   # kcov-ignore-start  the image-derivation path is exercised by test_ghcr_owner_failure_dies_without_image,
-  # test_no_commits_dies_without_image, test_dirty_tree_emits_warning_and_uses_latest and
-  # test_clean_tree_pins_to_git_sha — each against a fake-install copy with a controlled origin + git state.
+  # test_no_commits_dies_without_image, test_dirty_tree_emits_warning_and_uses_latest,
+  # test_clean_tree_pins_to_git_sha and test_clean_tree_pins_to_input_commit_not_head —
+  # each against a fake-install copy with a controlled origin + git state.
   # The enrolled script always derives from the real checkout, whose clean/dirty state can't be fixed per-test
   # (and forcing it dirty would race other tests under xdist), so the copy is the only way to drive these lines.
   owner="$(_sccd_ghcr_owner "$repo_root")" ||
     die "could not derive a GHCR owner from this repo's origin remote — pass --image explicitly."
-  sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" ||
+  # The input commit (not HEAD): CI only publishes a git-<sha> image for commits
+  # that change the image inputs, so pinning HEAD would 404 after a docs commit.
+  sha="$(_sccd_image_input_sha "$repo_root")"
+  [[ -n "$sha" ]] ||
     die "could not read this repo's HEAD — pass --image explicitly."
   if [[ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null)" ]]; then
     echo "claude-remote: working tree is dirty; defaulting to the mutable :latest image. Pass --image to pin a digest." >&2

@@ -2,16 +2,27 @@ name: publish image
 
 # Builds the three runtime images (sandbox, monitor, ccr) straight from the
 # compose Dockerfiles and publishes them to GHCR tagged `git-<full-sha>`. A
-# checkout knows its own commit SHA, so bin/lib/resolve-image.bash derives the
-# exact tag and pulls instead of building — no lockfile, no writeback. Defaults
-# stay build-locally, so a failed or missing publish never breaks a launch.
+# checkout derives the same tag from its own history, so
+# bin/lib/resolve-image.bash pulls instead of building — no lockfile, no
+# writeback. Defaults stay build-locally, so a failed or missing publish never
+# breaks a launch.
 #
 # Multi-arch is done with native runners (amd64 + arm64) and a manifest merge,
 # so no QEMU/buildx actions are needed — only the SHA-pinned actions this repo
 # already uses.
 #
-# No `paths:` filter on purpose: resolve-image.bash pins to the exact HEAD sha,
-# so every main commit needs its own image or consumers silently build locally.
+# Publishes only for commits that change the image inputs: consumers key the
+# tag on the newest first-parent commit that touched those inputs
+# (_sccd_image_input_sha in bin/lib/ghcr-metadata.bash), so a commit that can't
+# enter any image (docs, tests) needs no image of its own — the decide job
+# skips it and consumers keep resolving the previous input commit's set. The
+# gate must stay job-level, never a `paths:` filter: cosign pins each image to
+# the commit the workflow ran at, so the publish has to run exactly when
+# HEAD == input commit, a condition `paths:` can't express. Caveat: a
+# multi-commit direct push whose input change is NOT in the pushed head leaves
+# that input commit without an image (the workflow can only sign at the pushed
+# head) — consumers then build locally, the same fail-safe as a failed publish.
+# PR merges are immune: the merge commit is the pushed head.
 
 on:
   push:
@@ -33,8 +44,41 @@ env:
   COSIGN_TSA_URL: https://timestamp.sigstore.dev/api/v1/timestamp
 
 jobs:
+  decide:
+    name: Skip publish when the image inputs are unchanged
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      # Full history: _sccd_image_input_sha walks first-parent back to the last
+      # commit that touched an image-input path, which can be arbitrarily old.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Same helper + pathspec list the consumer keys its tag on, so the
+          # publish gate can't drift from what resolve-image.bash looks up.
+          source bin/lib/ghcr-metadata.bash
+          input_sha="$(_sccd_image_input_sha .)"
+          run=true
+          # workflow_dispatch always publishes: it is the manual escape hatch
+          # for re-publishing the current head regardless of the gate.
+          if [[ "$EVENT" != "workflow_dispatch" && "$input_sha" != "$GITHUB_SHA" ]]; then
+            run=false
+            echo "image inputs last changed at ${input_sha} (already published) — skipping."
+          fi
+          echo "run=$run" >>"$GITHUB_OUTPUT"
+
   build:
     name: Build + push per-arch (${{ matrix.arch }})
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     # id-token: cosign keyless signing uses GHA's OIDC token to prove the
@@ -54,14 +98,14 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      # fetch-depth: 2 so HEAD~1 resolves — the per-arch build seeds its layer
-      # cache from the PARENT commit's published image (--cache-from below), which
-      # needs the parent SHA. depth 1 (the default) has no parent and would make
-      # every build cold.
+      # Full history: the per-arch build seeds its layer cache from the PREVIOUS
+      # input commit's published image (--cache-from below), found by walking
+      # first-parent history from HEAD^ — the direct parent usually has no image
+      # of its own now that input-unchanged commits skip publishing.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Log in to GHCR
         uses: ./.github/actions/ghcr-login
@@ -92,19 +136,22 @@ jobs:
           mon="${reg}/secure-claude-monitor:git-${SHA}-${ARCH}"
           ccr="${reg}/secure-claude-ccr:git-${SHA}-${ARCH}"
 
-          # Seed BuildKit's layer cache from the PARENT commit's same-arch image so
-          # an unchanged layer (the big apt/node/pnpm install steps) is reused from
-          # the registry instead of rebuilt. BUILDKIT_INLINE_CACHE=1 embeds the cache
-          # metadata in the images we push here, so the NEXT commit can --cache-from
-          # them in turn. Inline cache works with the default docker builder — no
-          # buildx container driver — so it fits this workflow's no-buildx design.
-          # The parent's git-<sha> tag is immutable (content-pinned to that commit),
-          # so this never reintroduces trust in a mutable tag like `latest`. A
-          # missing parent image (first run, or a skipped/failed parent build) just
-          # makes BuildKit warn and build cold — never an error. cache_from() emits
-          # the flag only when a parent SHA exists.
+          # Seed BuildKit's layer cache from the PREVIOUS input commit's same-arch
+          # image (the newest first-parent commit before HEAD that touched the image
+          # inputs — the last commit that actually published) so an unchanged layer
+          # (the big apt/node/pnpm install steps) is reused from the registry instead
+          # of rebuilt. BUILDKIT_INLINE_CACHE=1 embeds the cache metadata in the
+          # images we push here, so the NEXT publish can --cache-from them in turn.
+          # Inline cache works with the default docker builder — no buildx container
+          # driver — so it fits this workflow's no-buildx design. The parent's
+          # git-<sha> tag is immutable (content-pinned to that commit), so this never
+          # reintroduces trust in a mutable tag like `latest`. A missing parent image
+          # (first run, or a skipped/failed parent publish) just makes BuildKit warn
+          # and build cold — never an error. cache_from() emits the flag only when a
+          # parent SHA exists.
           export DOCKER_BUILDKIT=1
-          parent="$(git rev-parse --verify --quiet HEAD~1 || true)"
+          source bin/lib/ghcr-metadata.bash
+          parent="$(_sccd_image_input_sha . 'HEAD^')"
           cache_from() { # <image-base>; echoes `--cache-from <ref>` or nothing
             [[ -n "$parent" ]] && printf -- '--cache-from\n%s:git-%s-%s\n' "$1" "$parent" "$ARCH"
           }

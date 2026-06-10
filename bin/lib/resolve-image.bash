@@ -30,12 +30,16 @@ resolve_prebuilt_image() {
   # the Dockerfile's LABEL): both the launch and prewarm build in this same shell
   # right after calling us, so exporting here reaches their `docker compose build`.
   # "<full-sha> <date> <subject>" so doctor can name the commit, not just its hash.
+  # The engraved commit is the INPUT commit (_sccd_image_input_sha) — the same
+  # commit the image is tagged and cached under — not HEAD, so commits that can't
+  # enter the image don't make a freshly-built image look stale to provenance.
   # Strip " and \ from the subject: those are the only chars that would break the
   # Dockerfile's `LABEL k="$ARG"` line, so removing them here (and identically in
   # publish-image.yaml) keeps any commit subject safe to engrave. Empty outside a
   # checkout (Homebrew install) — the label is then simply unset.
-  local _build_commit
-  _build_commit="$(git -C "$repo" log -1 --format='%H %cs %s' 2>/dev/null)" || _build_commit=""
+  local _build_commit _input_sha
+  _input_sha="$(_sccd_image_input_sha "$repo")"
+  _build_commit="$(git -C "$repo" log -1 --format='%H %cs %s' "${_input_sha:-HEAD}" 2>/dev/null)" || _build_commit=""
   _build_commit="${_build_commit//\"/}"
   _build_commit="${_build_commit//\\/}"
   [[ -n "$_build_commit" ]] && export CLAUDE_GUARD_GIT_COMMIT="$_build_commit"
@@ -132,22 +136,25 @@ resolve_prebuilt_image() {
 }
 
 # _sccd_local_image_provenance <repo> — diagnostic note (for claude-guard-doctor)
-# naming which commit the on-disk :local image was built for, but ONLY when that is
-# a commit OTHER than HEAD — a stale local image a launch would reconcile via
-# `docker compose build` rather than the bytes for HEAD. Reads the commit engraved
-# into the image's LABEL ("<sha> <date> <subject>") and shows the short sha plus,
-# when present, the date and subject so the commit is recognizable. Echoes a
-# trailing clause with a leading separator; silent when the image matches HEAD, is
-# absent, or carries no engraved commit (built before this label existed).
+# naming which commit the on-disk :local image was built for, but ONLY when that
+# differs from the checkout's input commit (_sccd_image_input_sha) — a stale local
+# image a launch would reconcile via `docker compose build` rather than the bytes
+# the current image inputs call for. Reads the commit engraved into the image's
+# LABEL ("<sha> <date> <subject>") and shows the short sha plus, when present, the
+# date and subject so the commit is recognizable. Echoes a trailing clause with a
+# leading separator; silent when the image matches the input commit, is absent, or
+# carries no engraved commit (built before this label existed).
 _sccd_local_image_provenance() {
-  local repo="$1" head commit sha date subject detail=""
-  head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
+  local repo="$1" want commit sha date subject detail=""
+  want="$(_sccd_image_input_sha "$repo")"
+  [[ -n "$want" ]] || return 0
   commit="$(_sccd_local_image_commit "${_CLAUDE_GUARD_IMAGE_BASES[0]}:local")"
   read -r sha date subject <<<"$commit"
-  [[ -n "$sha" && "$sha" != "$head" ]] || return 0
+  [[ -n "$sha" && "$sha" != "$want" ]] || return 0
   [[ -n "$date" ]] && detail=" ($date)"
   [[ -n "$subject" ]] && detail+=" \"$subject\""
-  printf ' — built for commit %s%s, not this commit\n' "${sha:0:12}" "$detail"
+  printf ' — built for commit %s%s, but this checkout'\''s image inputs last changed at %s\n' \
+    "${sha:0:12}" "$detail" "${want:0:12}"
 }
 
 # record_local_build <repo> — after a successful local-build launch, record the

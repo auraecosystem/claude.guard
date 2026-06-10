@@ -33,12 +33,15 @@ brew install alexander-turner/tap/claude-guard
      | shasum -a 256
    ```
 
-3. Update `url` (the tag), `sha256`, and `RELEASE_SHA` (the tag's commit, so a
+3. Update `url` (the tag), `sha256`, and `RELEASE_SHA` (the tag's _image input
+   commit_ — the newest commit at or before the tag that changed the image
+   inputs, which is the commit CI published and signed an image for — so a
    non-checkout install pulls the cosign-verified prebuilt image instead of
    building locally) in `claude-guard.rb`:
 
    ```bash
-   git rev-list -n1 v0.1.0   # → RELEASE_SHA
+   source bin/lib/ghcr-metadata.bash
+   _sccd_image_input_sha . v0.1.0   # → RELEASE_SHA
    ```
 
    then copy it into the tap repo:

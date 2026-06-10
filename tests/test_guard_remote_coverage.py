@@ -287,6 +287,31 @@ def test_clean_tree_pins_to_git_sha(tmp_path: Path) -> None:
     assert _plan(r.stdout)["image"] == f"ghcr.io/acme/secure-claude-sandbox:git-{sha}"
 
 
+def test_clean_tree_pins_to_input_commit_not_head(tmp_path: Path) -> None:
+    """The pinned git-<sha> is the image-INPUT commit (the last commit that
+    changed an image-input path), not HEAD: CI publishes no image for commits
+    that leave the inputs unchanged, so pinning HEAD would point at a tag that
+    does not exist after e.g. a docs commit."""
+    root = _fake_install(tmp_path)
+    (root / ".devcontainer").mkdir()
+    (root / ".devcontainer" / "Dockerfile").write_text("FROM scratch\n")
+    input_sha = commit_all(root, "init with image inputs")
+    (root / "README.md").write_text("docs only\n")
+    head = commit_all(root, "docs: no image input touched")
+    assert head != input_sha
+    r = run_remote(
+        ["modal", "--workdir", str(_fake_workdir(tmp_path))],
+        cwd=root,
+        launcher=root / "bin" / "claude-guard-remote",
+        CLAUDE_REMOTE_DRY_RUN="1",
+    )
+    assert r.returncode == 0, r.stderr
+    assert (
+        _plan(r.stdout)["image"]
+        == f"ghcr.io/acme/secure-claude-sandbox:git-{input_sha}"
+    )
+
+
 # ── self-resolution loop (invoked via a symlink) + the real Modal launch ──────
 
 

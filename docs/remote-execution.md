@@ -50,19 +50,20 @@ claude-guard remote modal --gpu a10g --print-app
 CLAUDE_REMOTE_DRY_RUN=1 claude-guard remote modal --gpu a10g   # prints the launch plan
 ```
 
-By default the image is this repo's published GHCR image, pinned to the current
-commit (`git-<sha>`) when your checkout is clean, or `:latest` when it's dirty.
+By default the image is this repo's published GHCR image, pinned to your
+checkout's image commit (`git-<sha>`, the last commit that changed the sandbox
+image's build inputs) when the checkout is clean, or `:latest` when it's dirty.
 Override with `--image`.
 
-| Flag                                          | Default               | Meaning                                                             |
-| --------------------------------------------- | --------------------- | ------------------------------------------------------------------- |
-| `--gpu TYPE`                                  | CPU only              | Provider GPU spec (`a10g`, `t4`, `h100`, …).                        |
-| `--repo URL`                                  | none                  | Clone this repo in the setup phase instead of mounting `--workdir`. |
-| `--workdir DIR`                               | `$PWD`                | Local tree copied into the pod as `/workspace`.                     |
-| `--secret NAME`                               | `claude-remote-setup` | Provider secret holding setup-phase credentials.                    |
-| `--image REF`                                 | GHCR image for HEAD   | Sandbox image to run.                                               |
-| `--name`, `--timeout`, `--out`, `--print-app` |                       | App name, agent timeout (s), output path, dump-and-exit.            |
-| `-- <args>`                                   |                       | Everything after `--` is passed to `claude` on the pod.             |
+| Flag                                          | Default                | Meaning                                                             |
+| --------------------------------------------- | ---------------------- | ------------------------------------------------------------------- |
+| `--gpu TYPE`                                  | CPU only               | Provider GPU spec (`a10g`, `t4`, `h100`, …).                        |
+| `--repo URL`                                  | none                   | Clone this repo in the setup phase instead of mounting `--workdir`. |
+| `--workdir DIR`                               | `$PWD`                 | Local tree copied into the pod as `/workspace`.                     |
+| `--secret NAME`                               | `claude-remote-setup`  | Provider secret holding setup-phase credentials.                    |
+| `--image REF`                                 | GHCR image (see above) | Sandbox image to run.                                               |
+| `--name`, `--timeout`, `--out`, `--print-app` |                        | App name, agent timeout (s), output path, dump-and-exit.            |
+| `-- <args>`                                   |                        | Everything after `--` is passed to `claude` on the pod.             |
 
 ## Prerequisites (Modal)
 

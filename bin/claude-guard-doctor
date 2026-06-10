@@ -987,9 +987,10 @@ def report_prebuilt_image() -> None:
     # That is a real launch-readiness gap, so flag it DEGRADED rather than a silent OK.
     if on_disk:
         # When that cached image is the :local set (not a prebuilt tag), note which
-        # commit it was built for if it is NOT this one — a stale image the launch
-        # reconciles via `docker compose build` rather than the bytes for HEAD.
-        # Silent when the set matches HEAD or has no recorded origin.
+        # commit it was built for if that differs from the checkout's input commit —
+        # a stale image the launch reconciles via `docker compose build` rather than
+        # the bytes the current image inputs call for. Silent when the set matches
+        # the input commit or has no recorded origin.
         provenance = ""
         if local_tag.endswith(":local"):
             provenance = run_bash(

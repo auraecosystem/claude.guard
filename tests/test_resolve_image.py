@@ -35,13 +35,19 @@ def _fake_git(
     dirty: bool = False,
     origin: str = ORIGIN,
     commit: str = FAKE_COMMIT,
+    input_sha: str | None = FAKE_SHA,
 ) -> None:
+    # input_sha answers `git log --first-parent -1 --format=%H -- <inputs>` — the
+    # image-input commit the resolver keys tags and caches on. None models a
+    # history walk that finds nothing (shallow clone), exercising the HEAD fallback.
     porcelain = " M somefile\\n" if dirty else ""
+    input_line = f'echo "{input_sha}"' if input_sha else ":"
     write_exe(
         bindir / "git",
         "#!/usr/bin/env bash\n"
         'case "$*" in\n'
         f'  *"rev-parse HEAD"*) echo "{FAKE_SHA}" ;;\n'
+        f'  *"log --first-parent -1 --format=%H"*) {input_line} ;;\n'
         f'  *"log -1"*) printf "%s\\n" {shlex.quote(commit)} ;;\n'
         f'  *"status --porcelain"*) printf "{porcelain}" ;;\n'
         f'  *"remote get-url origin"*) echo "{origin}" ;;\n'
@@ -156,7 +162,9 @@ def _fake_cosign(
     )
 
 
-def _run(bindir: Path, env_extra: dict[str, str] | None = None) -> dict[str, str]:
+def _run(
+    bindir: Path, env_extra: dict[str, str] | None = None, repo: str = "/some/repo"
+) -> dict[str, str]:
     script = (
         # bin/claude sources this lib and calls resolve_prebuilt_image under
         # `set -euo pipefail`, so the harness must too — otherwise a command
@@ -164,7 +172,7 @@ def _run(bindir: Path, env_extra: dict[str, str] | None = None) -> dict[str, str
         # i=0) passes here but aborts the real launch.
         "set -euo pipefail\n"
         f"source {LIB}\n"
-        f'resolve_prebuilt_image "/some/repo"\n'
+        f'resolve_prebuilt_image "{repo}"\n'
         'echo "MAIN=${CLAUDE_GUARD_IMAGE_MAIN:-}"\n'
         'echo "MONITOR=${CLAUDE_GUARD_IMAGE_MONITOR:-}"\n'
         'echo "CCR=${CLAUDE_GUARD_IMAGE_CCR:-}"\n'
@@ -227,6 +235,31 @@ def test_probe_no_remote(tmp_path: Path) -> None:
     _fake_git(tmp_path, origin="https://gitlab.com/foo/bar.git")
     _fake_docker(tmp_path, manifest_ok=True)
     assert _probe(tmp_path) == "no-remote"
+
+
+def test_refs_keyed_to_input_commit_not_head(tmp_path: Path) -> None:
+    """The git-<sha> tag is the image-INPUT commit (last first-parent commit that
+    changed a build-input path), not HEAD: with HEAD at FAKE_SHA but the inputs
+    last changed at OTHER_SHA, the refs carry OTHER_SHA."""
+    _fake_git(tmp_path, input_sha=OTHER_SHA)
+    _fake_docker(tmp_path, manifest_ok=True)
+    state, _, rest = _probe(tmp_path).partition("\t")
+    assert state == "available"
+    assert rest.startswith(
+        f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{OTHER_SHA}"
+    )
+
+
+def test_input_sha_falls_back_to_head(tmp_path: Path) -> None:
+    """When the input-commit walk finds nothing (e.g. a shallow clone cut the
+    history off), the resolver keys on HEAD rather than emitting an empty tag."""
+    _fake_git(tmp_path, input_sha=None)
+    _fake_docker(tmp_path, manifest_ok=True)
+    state, _, rest = _probe(tmp_path).partition("\t")
+    assert state == "available"
+    assert rest.startswith(
+        f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{FAKE_SHA}"
+    )
 
 
 # ── non-checkout (Homebrew) install resolves via baked release metadata ───────
@@ -394,6 +427,119 @@ def test_dirty_check_catches_context_mutations(tmp_path: Path) -> None:
     assert fresh_probe(staged_out_of_context) == "available"
 
 
+# ── refs are keyed on the image-INPUT commit, not HEAD ───────────────────────
+# The tag/cache key is the newest first-parent commit that changed an image-input
+# path. Commits that cannot enter the image (docs, tests) must not move it — that
+# is what keeps the per-commit image caches hitting across such commits — while a
+# commit that does touch an input must.
+
+
+def _git_out(repo: Path, env: dict[str, str], *args: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repo), *args], text=True, env=env
+    ).strip()
+
+
+def _commit_all(repo: Path, env: dict[str, str], msg: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "-A"],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "--no-verify", "-m", msg],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+def _sandbox_ref(probe_line: str) -> str:
+    state, _, rest = probe_line.partition("\t")
+    assert state == "available", probe_line
+    return rest.split("\t")[0]
+
+
+def test_refs_pinned_across_non_input_commits(tmp_path: Path) -> None:
+    """A commit touching only non-input files must NOT move the git-<sha> tag:
+    the refs keep pointing at the commit that last changed the image inputs,
+    so the image set built/published for it keeps resolving."""
+    repo, bindir = tmp_path / "repo", tmp_path / "bin"
+    bindir.mkdir()
+    env = _init_real_repo(repo)
+    _fake_docker(bindir, manifest_ok=True)
+    input_commit = _git_out(repo, env, "rev-parse", "HEAD")
+    (repo / "bin" / "tool").write_text("changed\n")
+    _commit_all(repo, env, "docs: nothing image-related")
+    assert _git_out(repo, env, "rev-parse", "HEAD") != input_commit
+    assert _sandbox_ref(_probe_real(bindir, repo, env)) == (
+        f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{input_commit}"
+    )
+
+
+def test_refs_move_when_an_input_commit_lands(tmp_path: Path) -> None:
+    """A commit that changes an image-input path moves the tag to that commit."""
+    repo, bindir = tmp_path / "repo", tmp_path / "bin"
+    bindir.mkdir()
+    env = _init_real_repo(repo)
+    _fake_docker(bindir, manifest_ok=True)
+    (repo / ".devcontainer" / "Dockerfile").write_text("changed\n")
+    _commit_all(repo, env, "feat: image input changed")
+    head = _git_out(repo, env, "rev-parse", "HEAD")
+    assert _sandbox_ref(_probe_real(bindir, repo, env)) == (
+        f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{head}"
+    )
+
+
+def test_merge_commit_is_the_input_commit(tmp_path: Path) -> None:
+    """On mainline, the input commit of a PR merge is the MERGE commit — the sha
+    CI runs at and publishes for — never a commit internal to the merged branch.
+    This is the --first-parent contract the consumer and publish-image.yaml's
+    decide job both rely on; without it the checkout would derive a tag CI never
+    pushed and silently build locally forever."""
+    repo, bindir = tmp_path / "repo", tmp_path / "bin"
+    bindir.mkdir()
+    env = _init_real_repo(repo)
+    _fake_docker(bindir, manifest_ok=True)
+    main = _git_out(repo, env, "branch", "--show-current")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, env=env
+        )
+
+    git("checkout", "-q", "-b", "feature")
+    (repo / ".devcontainer" / "Dockerfile").write_text("changed on branch\n")
+    _commit_all(repo, env, "feat: change an image input on a branch")
+    branch_commit = _git_out(repo, env, "rev-parse", "HEAD")
+    git("checkout", "-q", main)
+    git("merge", "--no-ff", "--no-verify", "-q", "-m", "merge feature", "feature")
+    merge_commit = _git_out(repo, env, "rev-parse", "HEAD")
+    assert merge_commit != branch_commit
+    assert _sandbox_ref(_probe_real(bindir, repo, env)) == (
+        f"ghcr.io/alexander-turner/secure-claude-sandbox:git-{merge_commit}"
+    )
+
+
+def test_build_commit_label_is_input_commit(tmp_path: Path) -> None:
+    """CLAUDE_GUARD_GIT_COMMIT (the engraved label) names the INPUT commit — the
+    same commit the image is tagged and cached under — so a local build made
+    after a non-input commit doesn't look stale to provenance on the next run."""
+    repo, bindir = tmp_path / "repo", tmp_path / "bin"
+    bindir.mkdir()
+    env = _init_real_repo(repo)
+    input_commit = _git_out(repo, env, "rev-parse", "HEAD")
+    (repo / "bin" / "tool").write_text("changed\n")
+    _commit_all(repo, env, "docs: nothing image-related")
+    # No prebuilt, local set present: resolve exits via the local-reuse branch,
+    # having exported the build-commit label on the way in. Real git, fake docker.
+    _fake_docker(bindir, manifest_ok=False, local_present=True)
+    res = _run(bindir, dict(_GIT_ENV), repo=str(repo))
+    assert res["GIT_COMMIT"].startswith(f"{input_commit} ")
+    assert "docs: nothing image-related" not in res["GIT_COMMIT"]
+
+
 def test_success_path_exports_verified_tags(tmp_path: Path) -> None:
     _fake_git(tmp_path)
     _fake_docker(tmp_path, manifest_ok=True)
@@ -489,6 +635,21 @@ def test_sign_verify_contract_holds_across_files() -> None:
     assert "--tlog-upload=false" in wf
     assert "--use-signed-timestamps" in lib
     assert "--insecure-ignore-tlog" in lib
+
+
+def test_publish_gate_shares_consumer_input_sha() -> None:
+    """publish-image.yaml's decide job and layer-cache seed must derive the
+    image-input commit through the SAME helper the consumer keys its tag on
+    (_sccd_image_input_sha, sourced from ghcr-metadata.bash). If CI re-typed the
+    path list or the walk, the gate could skip a commit consumers expect an image
+    for — every checkout would then silently build locally, which no other test
+    observes."""
+    wf = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert "source bin/lib/ghcr-metadata.bash" in wf
+    assert wf.count("_sccd_image_input_sha") >= 2  # decide gate + cache-from seed
+    # The gate publishes exactly when the pushed head IS the input commit — the
+    # condition that keeps cosign's commit pin equal to the consumer's derived tag.
+    assert '"$input_sha" != "$GITHUB_SHA"' in wf
 
 
 def test_cosign_missing_builds_locally(tmp_path: Path) -> None:
@@ -1045,29 +1206,36 @@ def test_image_commit_empty_when_label_absent(tmp_path: Path) -> None:
 
 
 def test_provenance_names_a_different_commit(tmp_path: Path) -> None:
-    """When the :local image was engraved with a commit other than HEAD, provenance
-    names it — short sha, date, and subject — so doctor can flag the stale image."""
-    _fake_git(tmp_path)  # HEAD = FAKE_SHA
+    """When the :local image was engraved with a commit other than the checkout's
+    input commit, provenance names it — short sha, date, and subject — so doctor
+    can flag the stale image."""
+    _fake_git(tmp_path)  # input commit = FAKE_SHA
     _fake_docker(tmp_path, manifest_ok=False, local_image_label=OTHER_COMMIT)
     out = _eval(tmp_path, '_sccd_local_image_provenance "/some/repo"')
     assert (
         f'built for commit {OTHER_SHA[:12]} (2025-12-25) "fix: an older commit", '
-        "not this commit" in out
+        f"but this checkout's image inputs last changed at {FAKE_SHA[:12]}" in out
     )
 
 
 def test_provenance_bare_sha_label_omits_detail(tmp_path: Path) -> None:
     """A label carrying only a sha (no date/subject) still names the commit, without
     an empty parenthetical or quotes."""
-    _fake_git(tmp_path)  # HEAD = FAKE_SHA
+    _fake_git(tmp_path)  # input commit = FAKE_SHA
     _fake_docker(tmp_path, manifest_ok=False, local_image_label=OTHER_SHA)
     out = _eval(tmp_path, '_sccd_local_image_provenance "/some/repo"').strip()
-    assert out == f"— built for commit {OTHER_SHA[:12]}, not this commit"
+    assert out == (
+        f"— built for commit {OTHER_SHA[:12]}, "
+        f"but this checkout's image inputs last changed at {FAKE_SHA[:12]}"
+    )
 
 
-def test_provenance_silent_when_local_matches_head(tmp_path: Path) -> None:
-    """A :local image engraved with HEAD is not stale — provenance says nothing."""
-    _fake_git(tmp_path)  # HEAD = FAKE_SHA
+def test_provenance_silent_when_local_matches_input_commit(tmp_path: Path) -> None:
+    """A :local image engraved with the checkout's input commit is not stale —
+    provenance says nothing. A non-input commit on top (HEAD moving while the
+    input commit stays) must not trip this either; the unit fakes model that
+    via input_sha, the real-repo tests via actual commits."""
+    _fake_git(tmp_path)  # input commit = FAKE_SHA
     _fake_docker(
         tmp_path, manifest_ok=False, local_image_label=f"{FAKE_SHA} 2026-01-02 subj"
     )

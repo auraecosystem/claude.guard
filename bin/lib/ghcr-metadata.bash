@@ -4,8 +4,10 @@
 # parsing, prebuilt ref derivation, and the read-only registry probe.
 # Sourced by resolve-image.bash; do not execute directly.
 #
-# CI publishes the three compose images to GHCR tagged `git-<full-sha>`; the
-# checkout derives the tag from its own SHA with no lockfile or writeback. If
+# CI publishes the three compose images to GHCR tagged `git-<full-sha>`, where
+# the sha is the newest commit that changed the image inputs (see
+# _sccd_image_input_sha); the checkout derives the same tag from its own history
+# with no lockfile or writeback. If
 # every image for the commit is present we pull, verify each pulled image's
 # cosign signature against THIS commit BY digest, then point compose at the
 # git-<sha> tag those verified bytes were pulled under (CLAUDE_GUARD_PULL_POLICY=never);
@@ -34,6 +36,39 @@
 # every ref/base list below uses (main, monitor, ccr). Single source so the verify
 # loop and the local-build probe can't drift from each other or from the count.
 _CLAUDE_GUARD_IMAGE_BASES=(secure-claude-sandbox secure-claude-monitor secure-claude-ccr)
+
+# The image inputs: every path whose content can enter a built image, as
+# root-anchored pathspecs (`:/` so they resolve from any cwd inside the
+# worktree). They are the Docker build contexts: .devcontainer/ (every service's
+# `context: .`), .claude/hooks/ (the monitor's `additional_contexts`), and the
+# files the main image bakes into /opt/claude-guard via the `guard-src` context —
+# user-config/settings.json, bin/merge-user-settings.sh, package.json and
+# pnpm-lock.yaml (see .devcontainer/Dockerfile). Single source for the dirty
+# check, the input-sha derivation below, and publish-image.yaml's publish gate
+# (which sources this file) — so what invalidates an image can't drift between
+# the consumer and CI.
+_CLAUDE_GUARD_IMAGE_INPUT_PATHS=(
+  :/.devcontainer :/.claude/hooks :/user-config/settings.json
+  :/bin/merge-user-settings.sh :/package.json :/pnpm-lock.yaml
+)
+
+# _sccd_image_input_sha <repo> [rev] — the newest first-parent commit at or
+# before <rev> (default HEAD) that changed any image-input path. This is the
+# commit images are tagged, cached, and cosign-pinned under: commits that can't
+# enter any image (docs, tests) keep resolving the image set already built or
+# published for it instead of invalidating it. --first-parent makes a PR merge
+# commit (what CI publishes for) the answer on mainline, never a commit internal
+# to the merged branch. Falls back to <rev> itself when the walk finds nothing
+# (shallow clone cut the history off); echoes empty outside a checkout.
+_sccd_image_input_sha() {
+  local repo="$1" rev="${2:-HEAD}" sha
+  sha="$(git -C "$repo" log --first-parent -1 --format=%H "$rev" -- \
+    "${_CLAUDE_GUARD_IMAGE_INPUT_PATHS[@]}" 2>/dev/null)" || sha=""
+  if [[ -z "$sha" ]]; then
+    sha="$(git -C "$repo" rev-parse "$rev" 2>/dev/null)" || sha=""
+  fi
+  printf '%s\n' "$sha"
+}
 
 # Parse the GitHub owner from origin, lowercased (GHCR paths must be lowercase).
 # Non-zero if it isn't a github.com remote.
@@ -117,18 +152,13 @@ _sccd_prebuilt_refs() {
     read -r owner sha <<<"$rel"
   else
     # A prebuilt image is valid only if its build inputs match the tagged commit, so
-    # uncommitted changes to those inputs must build locally rather than run a stale
-    # image. The inputs are the Docker build contexts: .devcontainer/ (every service's
-    # `context: .`), .claude/hooks/ (the monitor's `additional_contexts`), and the
-    # files the main image bakes into /opt/claude-guard via the `guard-src` context —
-    # user-config/settings.json, bin/merge-user-settings.sh, package.json and
-    # pnpm-lock.yaml (see .devcontainer/Dockerfile). The dirty check is scoped to them
-    # — `:/` anchors each pathspec to the worktree root — so an edit to other bin/,
-    # tests/ or docs files, which cannot enter any image, doesn't force a rebuild.
-    # Untracked files under these paths count: a new file there enters the build context.
+    # uncommitted changes to those inputs (see _CLAUDE_GUARD_IMAGE_INPUT_PATHS)
+    # must build locally rather than run a stale image. The dirty check is scoped
+    # to them, so an edit to other bin/, tests/ or docs files, which cannot enter
+    # any image, doesn't force a rebuild. Untracked files under these paths count:
+    # a new file there enters the build context.
     if [[ -n "$(git -C "$repo" status --porcelain -- \
-      :/.devcontainer :/.claude/hooks :/user-config/settings.json \
-      :/bin/merge-user-settings.sh :/package.json :/pnpm-lock.yaml 2>/dev/null)" ]]; then
+      "${_CLAUDE_GUARD_IMAGE_INPUT_PATHS[@]}" 2>/dev/null)" ]]; then
       printf 'dirty\n'
       return 0
     fi
@@ -136,6 +166,10 @@ _sccd_prebuilt_refs() {
       printf 'no-remote\n'
       return 0
     }
+    # Tag/cache key: the newest commit that CHANGED the image inputs, not HEAD —
+    # a commit on top that can't enter any image keeps hitting the image set
+    # already built or published for that input commit.
+    sha="$(_sccd_image_input_sha "$repo")"
   fi
   local reg="ghcr.io/${owner}"
   local ref_main="${reg}/secure-claude-sandbox:git-${sha}"

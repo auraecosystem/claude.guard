@@ -674,9 +674,9 @@ def test_reports_prebuilt_image_plan(tmp_path: Path) -> None:
 
 
 def test_prebuilt_section_notes_stale_local_image(tmp_path: Path) -> None:
-    """When the on-disk :local image is engraved with a DIFFERENT commit than HEAD,
-    the prebuilt section names that commit — short sha, date, and subject — so the
-    user sees the cached local image is stale, not HEAD's."""
+    """When the on-disk :local image is engraved with a commit OTHER than the
+    checkout's image-input commit, the prebuilt section names that commit — short
+    sha, date, and subject — so the user sees the cached local image is stale."""
     other_sha = "fedcba9876543210fedcba9876543210fedcba98"
     stubs = _make_stubs(
         tmp_path,
@@ -691,7 +691,7 @@ def test_prebuilt_section_notes_stale_local_image(tmp_path: Path) -> None:
     )
     assert (
         f'built for commit {other_sha[:12]} (2025-12-25) "fix: an older commit", '
-        "not this commit" in " ".join(r.stdout.split())
+        "but this checkout's image inputs last changed at" in " ".join(r.stdout.split())
     )
 
 
