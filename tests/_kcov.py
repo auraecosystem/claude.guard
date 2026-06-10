@@ -63,7 +63,10 @@ def _is_bash(path: Path) -> bool:
     if path.suffix == ".bash":
         return True
     try:
-        return bool(_BASH_SHEBANG.match(path.open().readline()))
+        first_line = (
+            path.read_bytes().split(b"\n", 1)[0].decode("ascii", errors="replace")
+        )
+        return bool(_BASH_SHEBANG.match(first_line))
     except OSError:
         return False
 
