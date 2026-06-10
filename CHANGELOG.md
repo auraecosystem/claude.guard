@@ -17,6 +17,24 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Four "fail loud" guards that were actually fail-open or fail-confusing are now
+  fail-closed:
+  - **Ephemeral teardown** — the launcher now exits non-zero when a session's
+    throwaway volume can't be removed (the per-volume warning already named the
+    survivors, but the launcher still exited 0). A leaked volume means the
+    session was not ephemeral, and the exit code now says so. A non-zero session
+    exit is preserved as-is — teardown failure never masks the real cause.
+  - **Monitor-secret bootstrap** — if the HMAC secret directory can't be
+    created, firewall init now aborts (exit non-zero) instead of warning and
+    continuing with request signing silently disabled for the whole session.
+  - **Hardening sentinel** — the hardener now exits non-zero if it can't write
+    `/run/hardening/complete`, so docker compose surfaces a real launch failure
+    instead of starting a session in which the monitor denies every tool call as
+    "hardening incomplete". The app-container smoke re-run against the read-only
+    mount (where the real hardener already wrote the sentinel) stays benign.
+  - **Audit-only POST failure** — a short-circuited call whose audit-only POST
+    fails now also warns loudly on stderr (naming the unaudited gap and the
+    restart fix), not just on the easily-missed stdout `ask` verdict.
 - The PostToolUse output sanitizer now strips `<object>`, `<svg>`, `<embed>`,
   `<iframe>`, and `<math>` elements. Previously these passed through intact
   (their attributes/content survived) because the fast-path that decides whether
