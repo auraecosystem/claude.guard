@@ -35,6 +35,8 @@ ENTRYPOINT = REPO_ROOT / ".devcontainer" / "entrypoint.bash"
 DEPS_INSTALL = REPO_ROOT / ".devcontainer" / "deps-install.bash"
 INIT_FIREWALL = REPO_ROOT / ".devcontainer" / "init-firewall.bash"
 FIREWALL_LIB = REPO_ROOT / ".devcontainer" / "firewall-lib.bash"
+SQUID_CONFIG = REPO_ROOT / ".devcontainer" / "squid-config.bash"
+IP_VALIDATION = REPO_ROOT / ".devcontainer" / "ip-validation.bash"
 HARDEN_MONITOR = REPO_ROOT / ".devcontainer" / "harden-monitor.bash"
 GUARD_DIR_HELPER = REPO_ROOT / ".devcontainer" / "guard-dir.bash"
 SETUP_BASH = REPO_ROOT / "setup.bash"
@@ -860,9 +862,9 @@ class TestFirewallConfig:
         assert "nf_conntrack_max" in self.content
 
     def test_squid_blocks_writes_to_ro_domains(self) -> None:
-        # The squid.conf is rendered by firewall-lib.bash:write_squid_conf (so CI
+        # The squid.conf is rendered by squid-config.bash:write_squid_conf (so CI
         # can parse it); the write-denying directive lives there now.
-        assert "deny !safe_methods readonly_domains" in FIREWALL_LIB.read_text()
+        assert "deny !safe_methods readonly_domains" in SQUID_CONFIG.read_text()
 
     def _code_lines_matching(self, needle: str) -> list[int]:
         """Indices of non-comment lines containing needle, so substring checks
@@ -908,7 +910,7 @@ class TestFirewallConfig:
         # for the build path, the refresh loop, and live expansion).
         assert "validate_access" in loader
         assert "exit 1" in loader
-        assert '"$access" == "ro" || "$access" == "rw"' in FIREWALL_LIB.read_text()
+        assert '"$access" == "ro" || "$access" == "rw"' in IP_VALIDATION.read_text()
 
     @pytest.mark.parametrize(
         "forbidden",
@@ -1142,6 +1144,30 @@ class TestDockerfile:
         """Secret-bearing env vars are scrubbed from interactive shells via
         profile scripts copied into the image."""
         assert "scrub-secrets.sh" in self.content
+
+    def test_usr_local_bin_copy_includes_sourced_libraries(self) -> None:
+        """Every script COPYd into /usr/local/bin must bring along the sibling
+        libraries it `source`s, or the image ships a script whose source line
+        hits 'No such file or directory' at container startup (the firewall
+        sidecar then exits and every launch fails). Splitting firewall-lib.bash
+        into sub-modules without extending the COPY caused exactly that."""
+        copy_match = re.search(
+            r"^COPY (?P<sources>.+) /usr/local/bin/$", self.content, re.MULTILINE
+        )
+        assert copy_match, "missing the COPY ... /usr/local/bin/ line"
+        copied = set(copy_match.group("sources").split())
+        source_re = re.compile(
+            r'^\s*source "\$\w+/(?P<lib>[\w.-]+\.bash)"', re.MULTILINE
+        )
+        for script in sorted(copied):
+            if not script.endswith(".bash"):
+                continue
+            text = (REPO_ROOT / ".devcontainer" / script).read_text()
+            for lib in source_re.findall(text):
+                assert lib in copied, (
+                    f"{script} sources {lib}, which the Dockerfile COPY to "
+                    f"/usr/local/bin omits"
+                )
 
 
 class TestBakedGuardrails:
