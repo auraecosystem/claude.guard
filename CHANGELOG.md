@@ -16,6 +16,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Warm-path launch (verified prebuilt image, no local build) no longer dies with
+  `opening seccomp profile (seccomp-firewall.json) failed … no such file or
+directory`. The stripped no-build compose is written to the per-session cache
+  dir, which broke the firewall service's relative `seccomp:` profile path
+  (Compose resolves it against the compose file's directory). The path is now
+  absolutized against `.devcontainer/` so the profile loads wherever the compose
+  lands.
 - claude-guard now detects when a container runtime (e.g. runsc/gVisor) is
   registered with Docker but its binary is missing or won't actually run a
   container — a state OrbStack can leave behind after an update wipes the in-VM
