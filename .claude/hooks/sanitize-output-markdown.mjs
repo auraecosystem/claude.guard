@@ -143,7 +143,7 @@ const htmlSanitizer = unified()
  * @param {string} text
  * @returns {boolean}
  */
-function htmlHasDangerousNodes(text) {
+export function htmlHasDangerousNodes(text) {
   const tree = unified().use(rehypeParse, { fragment: true }).parse(text);
   let found = false;
   // @ts-ignore -- visit callback returns EXIT only on match; implicit undefined return is intentional
@@ -177,7 +177,7 @@ function parseHtmlTag(htmlValue) {
  * @param {string} htmlValue
  * @returns {string | null}
  */
-function isDangerousOpen(htmlValue) {
+export function isDangerousOpen(htmlValue) {
   if (htmlValue.startsWith("</")) return null;
   const el = parseHtmlTag(htmlValue);
   if (!el) return null;
@@ -195,7 +195,7 @@ function isDangerousOpen(htmlValue) {
  * @param {string} htmlValue
  * @returns {string | null}
  */
-function closingTagName(htmlValue) {
+export function closingTagName(htmlValue) {
   // The charset is a superset of CommonMark's closing-tag grammar, so remark
   // never emits a `</…>` html node this fails to match; the null guard below is
   // defense-in-depth against a future parser/grammar change (hence unreachable).
@@ -345,7 +345,7 @@ const remarkProcessor = unified()
  * @param {string} text
  * @returns {boolean}
  */
-function looksLikeHtmlSource(text) {
+export function looksLikeHtmlSource(text) {
   const lines = text.split("\n");
   if (lines.length < 5) return false;
   let htmlLines = 0;
@@ -430,7 +430,7 @@ export function checkExfilUrl(url) {
  * @param {string} url
  * @returns {string}
  */
-function stripQuery(url) {
+export function stripQuery(url) {
   // Relative URLs (e.g. "/api/log?token=...") throw on bare `new URL`, so parse
   // against a sentinel base; a resolved origin matching the base means relative.
   let parsed;
