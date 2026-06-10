@@ -56,6 +56,9 @@ adhere to [Semantic Versioning](https://semver.org/).
   instead. Each seeded IP is re-validated as public and the bogon-drop and
   squid-by-domain layers are unchanged, so the egress boundary is preserved. Only
   the base + per-project allowlist is cached, never runtime live-expansions.
+  `docker-compose.yml` now passes the matching `:-1` default (it previously
+  injected `:-0`, which would have silently kept the cache off for every compose
+  launch).
 - The monitor's deterministic action classifier now runs its six type-pattern
   passes (egress/obfuscation/persistence/infra/destructive/vcs) over a head+tail
   budget (`elide_middle`) instead of the entire tool input, cutting per-call cost
@@ -67,6 +70,12 @@ adhere to [Semantic Versioning](https://semver.org/).
   create files there), naming the host directory and the `chown` fix — instead
   of letting it surface later as a cryptic mid-session "Permission denied". The
   launch still proceeds, since an unwritable workspace is degraded, not unsafe.
+- The firewall's initial allowlist build now retries DNS stragglers immediately
+  instead of sleeping 1s+2s between passes — the backoff only delayed launch
+  readiness, and the post-pass straggler set is far below the resolver's
+  burst-shed threshold. The background refresh loop and live expansion keep the
+  backoff (latency gates nothing there); `CLAUDE_GUARD_DNS_RETRY_BACKOFF`
+  overrides the delay everywhere, including boot.
 - A locally-built sandbox image is now reused on later launches of the same commit
   instead of re-running `docker compose build` every time. The first clean build
   records the `:local` image IDs per commit; a subsequent launch on that commit
@@ -86,6 +95,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The firewall no longer retries a domain whose DNS query answered NXDOMAIN: a
+  definitive "does not exist" was previously indistinguishable from a dropped
+  query, so a nonexistent allowlist domain walked the entire retry-and-fallback
+  chain (3 resolvers × 3 attempts plus backoff sleeps, ~9s of pure sleep) on
+  every boot and refresh cycle. An NXDOMAIN answer now settles the domain for
+  that resolver on the pass that answers; the fallback resolvers still get to try it
+  (so a filtering primary resolver, e.g. Pi-hole, cannot deny a name a public
+  resolver answers), and genuinely shed queries (no answer) keep the full
+  retry/fallback treatment.
 - The `Bash(*squid*)` deny rule no longer blocks commands that merely mention
   "squid" in a path (e.g. `git add .devcontainer/squid-config.bash`). It is
   replaced by `Bash(*squid -*)` and `Bash(*kill* squid*)`, which still block
