@@ -46,7 +46,13 @@ def lib_volume_id(workspace: str) -> str:
     """The canonical id for `workspace`, computed by the shared library — the
     same code path bin/claude-guard uses to name the volumes."""
     r = subprocess.run(
-        ["bash", "-c", f'source "{VOLUME_ID_LIB}"; claude_volume_id "$1"', "_", workspace],
+        [
+            "bash",
+            "-c",
+            f'source "{VOLUME_ID_LIB}"; claude_volume_id "$1"',
+            "_",
+            workspace,
+        ],
         capture_output=True,
         text=True,
         check=True,
