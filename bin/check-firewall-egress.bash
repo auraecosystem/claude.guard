@@ -61,8 +61,10 @@ fi
 
 # ── 1. Firewall actually blocks ──────────────────────────────────────────────
 # Run as root (dnsmasq binds :53; squid drops to proxy itself) with default caps,
-# which include NET_BIND_SERVICE. The probe brings up squid+dnsmasq+origin and
-# drives traffic through the proxy, asserting on observed responses.
+# which include NET_BIND_SERVICE. Do NOT add --cap-drop here: dropping
+# NET_BIND_SERVICE would stop dnsmasq binding :53 and silently fail the probe. The
+# probe brings up squid+dnsmasq+origin and drives traffic through the proxy,
+# asserting on observed responses.
 status "[1/3] Firewall egress enforcement (real squid + dnsmasq + loopback origin)"
 if docker run --rm --user root -v "$PROBE:/probe.sh:ro" \
   --entrypoint bash "$IMAGE" /probe.sh; then
