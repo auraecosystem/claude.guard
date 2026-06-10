@@ -2,9 +2,14 @@
 
 coverage.py only instruments Python; the `bin/claude-*` wrappers run as
 subprocesses, so their branches are invisible to it. This module closes the gap
-for an explicit set of ENROLLED scripts by routing their subprocess invocations
-through `kcov`, which traces bash line-by-line via the DEBUG trap and enforces
-100% real line coverage — not just that a test claims to cover the script.
+by routing subprocess invocations through `kcov`, which traces bash line-by-line
+via the DEBUG trap and enforces 100% real line coverage — not just that a test
+claims to cover the script.
+
+Coverage is **opt-out**: every bash script discovered under `bin/` is enrolled
+automatically. To skip a script, add it to `KCOV_EXCLUDED` with a reason. To
+gate a sourced library that has no direct entry point, use `KCOV_GATED_VIA_VEHICLE`
+instead (see below).
 
 Mechanism: when `CLAUDE_GUARD_KCOV_OUT` is set, `install()` monkeypatches
 `subprocess.run`/`Popen` so any invocation of an enrolled script is rewritten to
@@ -14,8 +19,7 @@ Mechanism: when `CLAUDE_GUARD_KCOV_OUT` is set, `install()` monkeypatches
 Each invocation writes its own `<rundir>`; `kcov --merge` unions them at the end
 (a line covered in any run counts as covered). The interceptor is a no-op unless
 the env var is set, so the ordinary test run is untouched — only the dedicated
-kcov pass (see `tests/run-kcov.sh`) pays the tracing cost, and only for enrolled
-scripts.
+kcov pass (see `tests/run-kcov.sh`) pays the tracing cost.
 
 `--bash-method=DEBUG` is deliberate: the alternative `PS4` method stops tracing
 at heredocs (kcov#116), and these wrappers use several.
@@ -23,6 +27,7 @@ at heredocs (kcov#116), and these wrappers use several.
 
 import ast
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -48,32 +53,98 @@ def _timeout_bin() -> str:
     return shutil.which("timeout") or "timeout"
 
 
-# Scripts whose real line coverage is gated at 100% by `kcov_gate.py`. Adding a
-# path here enrolls it: its subprocess invocations get traced and the gate then
-# demands full coverage. Repo-root-relative.
+_BASH_SHEBANG = re.compile(r"^#!.*\bbash\b")
+
+
+def _is_bash(path: Path) -> bool:
+    """True for .bash files and for .sh/extensionless files with a bash shebang.
+    Library files with `# shellcheck shell=bash` (no shebang) are caught by the
+    .bash suffix check; POSIX sh scripts (.sh with a non-bash shebang) are not."""
+    if path.suffix == ".bash":
+        return True
+    try:
+        first_line = (
+            path.read_bytes().split(b"\n", 1)[0].decode("ascii", errors="replace")
+        )
+        return bool(_BASH_SHEBANG.match(first_line))
+    except OSError:
+        return False
+
+
+def _discover_bash_files() -> list[str]:
+    """All bash scripts under bin/, repo-relative, sorted.
+    Discovery scope is bin/ only: setup.bash, tests/drive-bash-completion.bash,
+    and completions/ are outside this tree and are handled via KCOV_GATED_VIA_VEHICLE."""
+    return sorted(
+        str(p.relative_to(REPO_ROOT))
+        for p in (REPO_ROOT / "bin").rglob("*")
+        if p.is_file() and _is_bash(p)
+    )
+
+
+# Files opted out of automatic kcov enrollment. Two categories:
 #
-# Only end-to-end-runnable wrappers belong here. The interceptor wraps an
-# invocation when argv[0] resolves to an enrolled path, so a script is traced
-# only when a test runs it directly. setup.bash as a WHOLE is deliberately
-# excluded: it is far too large to gate at 100% and most of its tests source
-# individual functions or run a temp copy, neither of which resolves to it. Its
-# uninstall path is the exception — run directly as a vehicle to gate the sourced
-# lib it loads (see KCOV_GATED_VIA_VEHICLE).
-KCOV_ENROLLED = [
-    "bin/claude-guard",
-    "bin/claude-github-app",
-    "bin/claude-guard-audit",
-    "bin/claude-guard-create-worktree",
-    "bin/claude-guard-panic",
-    "bin/claude-guard-remote",
-    "bin/claude-loosen-firewall",
-    "bin/merge-user-settings.sh",
-    "bin/lib/gc-volumes.bash",
-    "bin/lib/gc-images.bash",
+#   operational — check/bench/setup scripts driven against live infrastructure;
+#   no end-to-end-runnable test suite exists for them. Graduate by writing tests
+#   and removing from this list.
+#
+#   library-only — sourced into enrolled wrappers but not directly invocable for
+#   a standalone coverage run. Enroll via KCOV_GATED_VIA_VEHICLE once a vehicle
+#   entry point exists, or promote to direct enrollment once the script gains its
+#   own test suite.
+#
+# bin/claude-guard-doctor is absent: it is #!/usr/bin/env python3, so _is_bash()
+# returns False and it is never discovered — pytest owns its coverage.
+# bin/lib/uninstall.bash is absent: it is gated via KCOV_GATED_VIA_VEHICLE
+# (setup.bash --uninstall sources it), not via direct enrollment.
+KCOV_EXCLUDED: list[str] = [
+    # operational: no direct-invocation tests
+    "bin/bench-launch.bash",
+    "bin/check-compose-lifecycle.bash",
+    "bin/check-dev-lifecycle.bash",
+    "bin/check-devcontainer.bash",
+    "bin/check-firewall-caps.bash",
+    "bin/check-foreign-repo.bash",
+    "bin/check-runsc-smoke.bash",
+    "bin/check-sandbox-runtime.bash",
+    "bin/openrouter-privacy",
+    "bin/persist-perf-history.sh",
+    "bin/setup-ntfy.bash",
+    # library-only: sourced into enrolled wrappers, not directly invocable
+    "bin/lib/audit-archive.bash",
+    "bin/lib/auto-mint-gh-token.bash",
+    "bin/lib/build-heartbeat.bash",
+    "bin/lib/ccr-launch.bash",
+    "bin/lib/check-harness.bash",
+    "bin/lib/claude-auth.bash",
+    "bin/lib/cosign-verify.bash",
+    "bin/lib/docker-engine.bash",
+    "bin/lib/docker-plugins-repair.bash",
+    "bin/lib/docker-plugins.bash",
+    "bin/lib/docker-retry.bash",
+    "bin/lib/egress-archive.bash",
+    "bin/lib/ephemeral.bash",
+    "bin/lib/forensic-registry.bash",
+    "bin/lib/forensic-volume.bash",
+    "bin/lib/ghcr-metadata.bash",
+    "bin/lib/image-cache.bash",
+    "bin/lib/monitor-key.bash",
+    "bin/lib/msg.bash",
+    "bin/lib/onboarding.bash",
+    "bin/lib/overmounts.bash",
+    "bin/lib/pkg-install.bash",
+    "bin/lib/progress.bash",
+    "bin/lib/protection-state.bash",
+    "bin/lib/resolve-image.bash",
+    "bin/lib/runtime-detect.bash",
+    "bin/lib/sandbox-net.bash",
+    "bin/lib/sandbox-runtime.bash",
+    "bin/lib/sbom-cache.bash",
+    "bin/lib/scrub-allow.bash",
+    "bin/lib/sudo-helpers.bash",
+    "bin/lib/venice-resolve.bash",
+    "bin/lib/volume-id.bash",
 ]
-# bin/claude-guard-doctor is intentionally absent: it is a #!/usr/bin/env python3
-# script, and kcov's bash DEBUG method can only trace bash, so it would always
-# read NOT TRACED. Its coverage belongs to pytest, not kcov.
 
 # Vehicle entry points: a script run only to carry coverage into a sourced lib we
 # DO gate, without gating the script itself. Wrapped on argv[0] like an enrolled
@@ -88,6 +159,17 @@ KCOV_GATED_VIA_VEHICLE = {
     # kcov. The driver's own body isn't gated (include-pattern scopes to the lib).
     "tests/drive-bash-completion.bash": "completions/claude-guard.bash",
 }
+
+# Scripts whose real line coverage is gated at 100% by `kcov_gate.py`.
+# Computed from all bash files discovered under bin/, minus KCOV_EXCLUDED and
+# KCOV_GATED_VIA_VEHICLE libs (which are gated via their vehicle, not directly).
+# Repo-root-relative. Only end-to-end-runnable wrappers land here; the interceptor
+# wraps a run when argv[0] resolves to an enrolled path.
+KCOV_ENROLLED: list[str] = [
+    f
+    for f in _discover_bash_files()
+    if f not in set(KCOV_EXCLUDED) | set(KCOV_GATED_VIA_VEHICLE.values())
+]
 
 # Everything kcov_gate enforces at 100%: directly-enrolled wrappers + vehicle libs.
 KCOV_GATED = KCOV_ENROLLED + list(KCOV_GATED_VIA_VEHICLE.values())
