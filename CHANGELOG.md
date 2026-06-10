@@ -19,6 +19,11 @@ href="…">` smuggled past it untouched.
   context-sensitive fold left unchanged. Folding is now per-character and
   context-free, so a deny-listed token spelled entirely in look-alike glyphs is
   normalized to the ASCII the deny rules match instead of slipping past.
+- The PostToolUse secret redactor now redacts quoted values under token-family
+  keys (`"token": "…"`, `authorization`, `bearer`, `access_token`) in JSON/YAML
+  output. Previously only the unquoted `token=…` form was caught — detect-secrets'
+  KeywordDetector does not know these keys and the field-value regex excluded
+  quote characters, so a quoted opaque token leaked verbatim.
 
 ### Fixed
 
