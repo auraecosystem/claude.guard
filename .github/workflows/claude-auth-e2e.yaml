@@ -83,6 +83,14 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         uses: ./.github/actions/install-devcontainer-cli
 
+      # The launcher defaults to gVisor and fails closed when runsc isn't
+      # registered with Docker. Install it the way runsc-smoke.yaml does, so
+      # the e2e launches under the same runtime a real session uses instead of
+      # weakening the launch with CONTAINER_RUNTIME=runc.
+      - name: Install and register runsc (gVisor)
+        if: steps.gate.outputs.run == 'true'
+        run: bash bin/check-runsc-smoke.bash --install
+
       - name: Run the auth e2e check
         if: steps.gate.outputs.run == 'true'
         env:
