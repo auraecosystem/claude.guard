@@ -10,6 +10,7 @@ import { runHook as run, runHookRaw, hookOutput } from "./test-helpers.mjs";
 import { stripInvisible } from "./invisible-chars.mjs";
 import { createHmac } from "node:crypto";
 import {
+  applyLayer1,
   interpretArmor,
   filterInjection,
   hasMonitorKey,
@@ -416,6 +417,75 @@ describe("sanitize-output: Layer 1 U+00AD / U+FEFF (bug 3)", () => {
     const result = hookOutput(await post(`hi${cp(0xfe0f)}${cp(0xe0101)}de`));
     assert.equal(result.updatedToolOutput, "hide");
     assert.match(result.additionalContext, /Variation selectors/);
+  });
+});
+
+// ─── Layer 1 idempotency: reassembly neutralization ──────────────────────────
+// strip-ansi cannot match an escape sequence an invisible char splits at its
+// introducer; stripInvisible then reconstitutes a live ESC[32m the first ANSI
+// strip missed. applyLayer1 iterates to a fixed point so no ESC survives and a
+// second pass is a no-op. (A split *after* the introducer, ESC[3<ZW>2m, and
+// adjacent sequences are already handled by strip-ansi in one pass — see the
+// negative control below, which must stabilize without needing the iteration.)
+
+describe("sanitize-output: Layer 1 reassembly + idempotency", () => {
+  const ESC = cp(0x1b);
+  const ZW = cp(0x200b);
+
+  for (const [name, input] of [
+    // ESC orphaned from its "[" by the ZW: strip-ansi leaves the ESC, then
+    // stripInvisible removes the ZW and reconstitutes a live ESC[32m.
+    ["invisible at the introducer", `${ESC}${ZW}[32m payload`],
+    // ZW between "[" and the params: same reconstitution one byte later.
+    ["invisible after the bracket", `${ESC}[${ZW}32m payload`],
+    // Two invisibles in the same sequence — stripInvisible removes both at once,
+    // so it is still a single reconstitution (one extra pass).
+    ["two invisibles in one sequence", `${ESC}${ZW}[${ZW}32m payload`],
+  ]) {
+    it(`neutralizes and is idempotent (${name})`, async () => {
+      const first = await applyLayer1(input);
+      assert.ok(
+        !first.cleaned.includes(ESC),
+        `ESC byte survived Layer 1: ${JSON.stringify(first.cleaned)}`,
+      );
+      assert.match(first.found.join(", "), /ANSI escapes/);
+      // A second pass over the cleaned text changes nothing.
+      const second = await applyLayer1(first.cleaned);
+      assert.equal(second.cleaned, first.cleaned);
+      assert.deepEqual(second.found, []);
+    });
+  }
+
+  it("negative control: a post-introducer split needs no second pass", async () => {
+    // strip-ansi consumes ESC[3 even with a ZW after it, so capping at one pass
+    // still fully neutralizes — proving the iteration is for the introducer
+    // split above, not for every invisible-near-ANSI input.
+    const capped = await applyLayer1(`${ESC}[3${ZW}2m payload`, 1);
+    assert.ok(!capped.cleaned.includes(ESC));
+  });
+
+  it("end-to-end: a reassembled sequence never reaches the model", async () => {
+    const result = hookOutput(await post(`${ESC}${ZW}[32m secret-banner`));
+    assert.ok(!result.updatedToolOutput.includes(ESC));
+    assert.match(result.additionalContext, /ANSI escapes/);
+  });
+
+  it("leaves clean text untouched (no spurious modification)", async () => {
+    const out = await applyLayer1("plain text, no escapes");
+    assert.equal(out.cleaned, "plain text, no escapes");
+    assert.deepEqual(out.found, []);
+  });
+
+  it("stops at the pass cap, leaving a bounded residual (DoS bound)", async () => {
+    // The introducer-split sequence needs a second pass to neutralize. Capping
+    // at one pass forces the loop-exhaustion exit: the reconstituted ESC[32m
+    // survives, the bounded residual the cap trades for an O(passes·n) bound.
+    const input = `${ESC}${ZW}[32m payload`;
+    const capped = await applyLayer1(input, 1);
+    assert.ok(capped.cleaned.includes(ESC), "expected residual past the cap");
+    // The default (uncapped) iteration fully neutralizes the same input.
+    const full = await applyLayer1(input);
+    assert.ok(!full.cleaned.includes(ESC));
   });
 });
 
