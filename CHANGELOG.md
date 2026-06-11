@@ -17,6 +17,13 @@ adhere to [Semantic Versioning](https://semver.org/).
   publishing a prebuilt image set for commits that leave the image inputs
   unchanged — consumers keep resolving (and cosign-verifying) the previous
   input-touching commit's published images.
+- **Breaking:** the host-mode bypass is now `--dangerously-skip-sandbox`
+  (env `DANGEROUSLY_SKIP_SANDBOX=1`), renamed from `--dangerously-skip-container`
+  (`DANGEROUSLY_SKIP_CONTAINER=1`). The old flag and env var are no longer
+  recognised — update any scripts, wrappers, or env that set them. The new name
+  matches the user-facing terminology (the boundary is the "sandbox", not the
+  "container") and pairs more cleanly with `--dangerously-skip-firewall` /
+  `--dangerously-skip-monitor`.
 - A locally-built sandbox image (`<service>:local`) left on disk from a previous
   build no longer preempts a cosign-verified prebuilt published for the current
   commit: when a prebuilt is available for `HEAD`, launch now pulls and verifies
