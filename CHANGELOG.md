@@ -90,6 +90,10 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- An alpha-tester onboarding guide ([`docs/alpha-testing.md`](docs/alpha-testing.md))
+  — supported platforms, a 15-minute test drive, known rough edges, and how to
+  report — plus a GitHub bug-report issue template that asks for the
+  `claude-guard doctor` output up front.
 - Granular opt-outs for the model-authored-content sanitizer:
   `SANITIZE_CLAUDE_INVISIBLE_DISABLED=1` keeps legitimate i18n invisible
   characters (ZWNJ/ZWJ joiners, variation selectors) while terminal-control
