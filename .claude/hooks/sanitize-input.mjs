@@ -78,10 +78,14 @@ function describeFolds(findings) {
     ...new Set(
       findings.map(
         (finding) =>
-          `U+${(finding.char.codePointAt(0) ?? 0)
-            .toString(16)
-            .toUpperCase()
-            .padStart(4, "0")} → "${finding.latinEquivalent}"`,
+          // char is always a non-empty confusable glyph, so codePointAt(0) is
+          // defined; the cast avoids an unreachable `?? 0` fallback branch.
+          `U+${
+            /** @type {number} */ (finding.char.codePointAt(0))
+              .toString(16)
+              .toUpperCase()
+              .padStart(4, "0")
+          } → "${finding.latinEquivalent}"`,
       ),
     ),
   ];
