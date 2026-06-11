@@ -24,6 +24,26 @@
 # completions/claude-guard.{bash,zsh,fish}; setup.bash sources them per-shell.
 set -euo pipefail
 
+# macOS ships bash 3.2, and the libs this wrapper sources use bash 4+/5-only
+# features (mapfile, ${var,,}) that abort mid-launch there with a cryptic "bad
+# substitution". Catch it up front: re-exec under a modern bash (setup.bash
+# installs one via Homebrew), prepending its dir to PATH so the subcommand
+# scripts' `env bash` shebangs resolve to it too — or fail with the fix.
+# kcov-ignore-start  fires only under bash < 5; CI's bash is modern, so these lines are structurally unreachable there
+if ((BASH_VERSINFO[0] < 5)); then
+  for _modern_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [[ -x "$_modern_bash" ]] || continue
+    # shellcheck disable=SC2016  # expansion must happen in the candidate bash
+    if [[ "$("$_modern_bash" -c 'echo "${BASH_VERSINFO[0]}"')" -ge 5 ]]; then
+      PATH="$(dirname "$_modern_bash"):$PATH" exec "$_modern_bash" "$0" "$@"
+    fi
+  done
+  echo "claude-guard: bash $BASH_VERSION is too old — this stack needs bash 5+." >&2
+  echo "claude-guard: install it ('brew install bash') or re-run setup.bash, then retry." >&2
+  exit 1
+fi
+# kcov-ignore-end
+
 # Strip wrapper-specific flags before any code path can exec claude.
 _skip_firewall=false
 _skip_sandbox=false

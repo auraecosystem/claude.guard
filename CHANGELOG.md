@@ -124,6 +124,13 @@ but this checkout's image inputs last changed at def456abc123`) — so a stale
 
 ### Fixed
 
+- `claude-guard` no longer aborts mid-launch with a cryptic "bad substitution"
+  under macOS's stock bash 3.2 (e.g. when Homebrew's bash isn't first on the
+  invoking shell's `PATH`). The wrapper now checks its bash version up front,
+  silently re-executing itself under the Homebrew bash that `setup.bash`
+  installs — and making sure subcommands resolve the same modern bash — or, if
+  none is installed, failing immediately with the `brew install bash`
+  instruction instead of partway through the launch.
 - The secret redactor no longer redacts documentation placeholders or
   secret-metadata fields: caps metavariables (`YOUR_API_KEY`,
   `SCRUB_SECRETS_ALLOW="GITHUB_TOKEN …"`), bracket-wrapped stand-ins
