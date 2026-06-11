@@ -142,6 +142,13 @@ but this checkout's image inputs last changed at def456abc123`) — so a stale
   the session; because seeding runs only for ephemeral sessions, whose config
   volume is destroyed on exit, the credential still never outlives the session.
 
+- The output sanitizer's ANSI stripping now runs to a fixed point: removing one
+  escape sequence can reconstitute another around it (a lone `ESC` followed by
+  `ESC[32m[0m` gains `[0m` once the inner sequence is removed), and the single
+  pass left such sequences to the residual-ESC sweep, which beheaded them and
+  leaked inert tails like `[0m` into the model's view. The view stayed free of
+  live escape codes either way; the leak was visible debris, caught by the
+  rehydration round-trip property suite.
 - The PostToolUse output sanitizer no longer routes `Read` results through the
   HTML/markdown re-serialization pass, which mangled local source files —
   escaping underscores, reflowing indentation, rewriting bullets — and handed

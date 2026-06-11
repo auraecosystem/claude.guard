@@ -371,14 +371,30 @@ const ESC = "\u001b";
  * PreToolUse rehydration layer (rehydrate-redacted.mjs) derives the exact view
  * this hook showed the model at Read time — a re-implementation there would
  * drift. Lazy import: a missing node_modules on cold start must route into the
- * caller's fail-closed catch. `deAnsi` is the first ANSI strip of the original
+ * caller's fail-closed catch. `deAnsi` is the ANSI strip of the original
  * (invisible runs intact), the scope the caller's LONG_RUN payload check needs.
  * @param {string} text
  * @returns {Promise<{ cleaned: string, deAnsi: string, found: string[] }>}
  */
 export async function applyLayer1(text) {
   const { default: stripAnsi } = await import("strip-ansi");
-  const deAnsi = stripAnsi(text);
+  // Removing an ANSI sequence can reconstitute another around it: a lone ESC
+  // left of `ESC[32m[0m` gains the trailing `[0m` once the inner sequence is
+  // removed, forming a brand-new valid sequence the single pass would miss
+  // (the sweep below would then behead it, leaking an inert `[0m` into the
+  // view). Strip to a fixed point instead — every changed pass consumes at
+  // least one ESC introducer, so the pass count is bounded by the input's ESC
+  // count with no tuned cap, and ANSI-free text exits after one pass.
+  const stripAnsiFully = (input) => {
+    let prev = input;
+    let out = stripAnsi(prev);
+    while (out !== prev) {
+      prev = out;
+      out = stripAnsi(prev);
+    }
+    return out;
+  };
+  const deAnsi = stripAnsiFully(text);
   // Detect against the same view stripInvisible acts on: a preserved leading
   // BOM must not register here, else we'd report a strip that never happens.
   const detectScope =
@@ -389,7 +405,7 @@ export async function applyLayer1(text) {
   let ansiFound = deAnsi.length !== text.length;
 
   // Removing an invisible character can reconstitute an escape its split hid
-  // from the first strip-ansi (`ESC`<ZWSP>`[32m` → `ESC[32m`), so strip ANSI
+  // from the ANSI pass (`ESC`<ZWSP>`[32m` → `ESC[32m`), so strip ANSI
   // again — but only when stripInvisible changed something, since reconstitution
   // is impossible otherwise and the re-strip is a wasted regex pass on the hot
   // clean-output path. strip-ansi still cannot match an *incomplete*
@@ -397,12 +413,11 @@ export async function applyLayer1(text) {
   // is removed from a nested split (`ESC<ZW>[ESC<ZW>[32m` → `ESC[ESC[32m` →
   // `ESC[`) — so a final sweep removes every residual raw ESC outright. That
   // sweep, not strip-ansi's matching, is the guarantee that no control
-  // introducer survives; it makes the result ESC-free for any input in fixed
-  // work, with no iteration or pass cap to tune.
+  // introducer survives; it makes the result ESC-free for any input.
   const afterInvis = stripInvisible(deAnsi);
   let cleaned = afterInvis;
   if (afterInvis !== deAnsi) {
-    const reStripped = stripAnsi(afterInvis);
+    const reStripped = stripAnsiFully(afterInvis);
     if (reStripped.length !== afterInvis.length) ansiFound = true;
     cleaned = reStripped;
   }
