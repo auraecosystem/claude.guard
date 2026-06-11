@@ -6,6 +6,20 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Security
+
+- macOS now defaults to the standard `runc` runtime inside the OrbStack Linux
+  VM instead of gVisor/runsc: gVisor is currently broken on macOS upstream
+  (runsc fatally rejects the OrbStack VM's `/tmp` symlink,
+  [orbstack#2362](https://github.com/orbstack/orbstack/issues/2362), and Claude
+  Code hangs in an `epoll_pwait` loop under runsc on ARM64,
+  [claude-code#35454](https://github.com/anthropics/claude-code/issues/35454)).
+  The VM still separates the agent from the Mac, but containers share the VM's
+  kernel — the launch banner, `claude-guard doctor`, and `SECURITY.md` now state
+  this boundary honestly. `CONTAINER_RUNTIME=runsc` opts back in (setup and
+  `bin/check-sandbox-runtime.bash` then install gVisor as before). Linux
+  behavior is unchanged.
+
 ### Changed
 
 - A locally-built sandbox image (`<service>:local`) left on disk from a previous
@@ -20,6 +34,12 @@ adhere to [Semantic Versioning](https://semver.org/).
   no longer need to delete the `:local` images by hand.
 
 ### Added
+
+- `bin/check-macos-release.bash` — pre-release smoke check to run on a real Mac
+  (CI cannot host the OrbStack VM): verifies the provider, runtime resolution,
+  container launch, and that the unprivileged user can write a bind-mounted
+  workspace, then prints the manual checklist (live session, firewall block,
+  monitor push, audit log).
 
 - Locally-built (and published) sandbox images are now engraved with their build
   commit — sha, date, and subject — in a `claude-guard.git-commit` image label, fed
