@@ -64,9 +64,10 @@ find_app() {
 launch_pid=""
 cleanup() {
   echo "==> Tearing down..."
-  # AUTH_E2E_DEBUG=1 traces every teardown command: the teardown has failed
-  # silently in CI (exit 1 with no stderr), and the trace is the only way to
-  # see which command dies inside a trap on a runner.
+  # AUTH_E2E_DEBUG=1 traces every teardown command: a command failing inside
+  # an EXIT trap takes the job down as a bare exit code, and its final stderr
+  # can lose the flush race with the runner's process-exit handling — so the
+  # trace is the only reliable way to see which command died.
   [[ "${AUTH_E2E_DEBUG:-0}" != "1" ]] || {
     PS4='+ teardown[${SECONDS}s] '
     set -x
