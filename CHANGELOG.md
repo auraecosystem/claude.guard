@@ -59,6 +59,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Granular opt-outs for the model-authored-content sanitizer:
+  `SANITIZE_CLAUDE_INVISIBLE_DISABLED=1` keeps legitimate i18n invisible
+  characters (ZWNJ/ZWJ joiners, variation selectors) while terminal-control
+  stripping stays on, and `SANITIZE_CLAUDE_TERMINAL_DISABLED=1` keeps raw
+  escape-sequence fixtures while stego stripping stays on. Previously the only
+  opt-out (`SANITIZE_CLAUDE_OUTPUT_DISABLED=1`, still supported) dropped both
+  protections at once. All three are pinned in managed settings.
+
 - Locally-built (and published) sandbox images are now engraved with their build
   commit — sha, date, and subject — in a `claude-guard.git-commit` image label, fed
   from the launcher via a compose build arg. `claude-guard doctor` reads it to flag
@@ -94,6 +102,16 @@ but this checkout's image inputs last changed at def456abc123`) — so a stale
   untrusted incoming content (WebFetch/WebSearch and command output).
 
 ### Changed
+
+- Pasting colored terminal output into the prompt no longer blocks the prompt:
+  when the only escape content is display-only SGR color/style codes
+  (`ESC [ … m`) and no invisible-character threshold trips, the prompt passes
+  with a note telling the model to read through the color codes. Cursor
+  movement, erase, OSC, DCS/APC/PM, and partial escape sequences still block,
+  as do invisible-character payloads.
+- The confusable-normalization warning now names each folded glyph
+  (`U+0430 → "a"`) and explains that a path failing to resolve afterwards means
+  the on-disk name itself carries the look-alike character.
 
 - Output sanitization for `Read` no longer neutralizes data-exfil URLs or
   hidden HTML in the file's bytes (a consequence of the fidelity fix above).
