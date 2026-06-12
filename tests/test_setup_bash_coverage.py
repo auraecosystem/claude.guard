@@ -42,7 +42,6 @@ import pytest
 
 from tests._helpers import (
     REPO_ROOT,
-    SUDO_REEXEC,
     run_capture,
     slice_bash_function,
     write_exe,
@@ -498,7 +497,7 @@ def _make_env(
     stubs = _make_stubs_dir(
         tmp_path,
         extra={
-            # jq stub: pass through to real jq if available, else print minimal responses.
+            # docker stub: `info` succeeds with '{}'; everything else fails.
             "docker": "#!/bin/bash\nif [[ \"$1\" == 'info' ]]; then echo '{}'; exit 0; fi\nexit 1\n",
             # pnpm stub; `bin -g` answers with pnpm_gbin so a test can present
             # real claude/ccr shims to verify_install_artifacts.
@@ -528,13 +527,12 @@ def _make_env(
 def _hermetic_full_env(tmp_path: Path, env: dict) -> dict:
     """Extend a _make_env environment for a REAL full-script run: optional
     tools stubbed present (so the install runs through the wrapper-linking
-    section), a re-exec `sudo`, and the system seams (managed settings, docker
-    daemon.json, kata shims) redirected to absent paths so the run never
-    touches the real host /etc."""
+    section) and the system seams (managed settings, docker daemon.json, kata
+    shims) redirected to absent paths so the run never touches the real host
+    /etc. The passthrough `sudo` comes from _make_stubs_dir."""
     stub_dir = Path(env["PATH"].split(":")[0])
     for tool in ("uv", "dig", "cosign"):
         write_exe(stub_dir / tool, "#!/bin/bash\nexit 0\n")
-    write_exe(stub_dir / "sudo", SUDO_REEXEC)
     return {
         **env,
         "CLAUDE_GUARD_MANAGED_SETTINGS": str(tmp_path / "absent-settings.json"),
@@ -766,7 +764,11 @@ def _run_summary_runtime_line(
     CONTAINER_RUNTIME and the reported kernel."""
     stubs = _make_stubs_dir(tmp_path, kernel=kernel)
     fn = slice_bash_function(SETUP, "summary_runtime_line")
-    script = f'source "{RUNTIME_DETECT}"\n{fn}\nsummary_runtime_line\n'
+    # Strict mode matches setup.bash, so the rc-0 assertion really pins that
+    # the helper chain can't kill a `set -e` run.
+    script = (
+        f'set -euo pipefail\nsource "{RUNTIME_DETECT}"\n{fn}\nsummary_runtime_line\n'
+    )
     env = {"PATH": str(stubs)}
     if runtime is not None:
         env["CONTAINER_RUNTIME"] = runtime
