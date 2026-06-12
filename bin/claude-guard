@@ -37,8 +37,11 @@ if [[ ${BASH_VERSINFO[0]:-0} -lt 5 ]]; then
     [[ -x "$_brew_bash" && "$_brew_bash" != "${BASH:-}" ]] || continue
     exec "$_brew_bash" "$0" "$@"
   done
-  cg_error 'claude-guard: bash %s at %s is too old (need ≥ 5). Run claude-guard-doctor for details, or rerun setup.bash to install brew bash and fix PATH.\n' \
-    "${BASH_VERSION:-unknown}" "${BASH:-bash}"
+  # printf, not cg_error: msg.bash is sourced ~70 lines below (and may use bash 4+
+  # syntax that won't even parse under the 3.2 this branch is reached on), so the
+  # fail-loud message must stand alone. printf is a 3.2-safe builtin.
+  printf 'claude-guard: bash %s at %s is too old (need ≥ 5). Run claude-guard-doctor for details, or rerun setup.bash to install brew bash and fix PATH.\n' \
+    "${BASH_VERSION:-unknown}" "${BASH:-bash}" >&2
   exit 1
   # kcov-ignore-end
 fi
