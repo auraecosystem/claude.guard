@@ -3,8 +3,10 @@
 
 Reports the REAL enforcement state so you can tell whether `claude-guard` will run
 sandboxed or has silently degraded to host execution. Read-only by default: it
-never launches a container and writes nothing. The sole exception is `--fix`,
-which repairs the `~/.local/bin/claude` alias so typing `claude` runs the wrapper.
+never launches a container and writes nothing. The two exceptions are `--fix`,
+which repairs the `~/.local/bin/claude` alias so typing `claude` runs the wrapper,
+and `--bug-report`, which writes one diagnostics bundle under the temp directory
+for attaching to a GitHub issue.
 
 Runtime, monitor-key, and prebuilt-image facts are read by sourcing the same
 bash libs the `claude-guard` wrapper uses, so the report can never drift from what an
@@ -21,10 +23,13 @@ Exit status:
 import argparse
 import json
 import os
+import platform
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -54,8 +59,14 @@ from rich.text import Text  # noqa: E402
 # bold, dim) — no_color alone keeps bold/dim escapes and breaks the contract.
 SUPPRESS = bool(os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb")
 _force = False if SUPPRESS else None
-console = Console(highlight=False, force_terminal=_force, no_color=SUPPRESS)
-errs = Console(stderr=True, highlight=False, force_terminal=_force, no_color=SUPPRESS)
+# record=True keeps a plain-text copy of everything printed so --bug-report can
+# replay the full report into its bundle via export_text().
+console = Console(
+    highlight=False, force_terminal=_force, no_color=SUPPRESS, record=True
+)
+errs = Console(
+    stderr=True, highlight=False, force_terminal=_force, no_color=SUPPRESS, record=True
+)
 
 # Reasons accumulate; the final verdict is the worst severity present. Section
 # reporters below append to these module-level lists.
@@ -1086,6 +1097,127 @@ def report_prebuilt_image() -> None:
     )
 
 
+# --bug-report: bundle the report plus host diagnostics (platform, filtered
+# environment, tool versions, container list + logs) into one shareable file so
+# "attach diagnostics" is a single command for an issue reporter. Secret-named
+# env values are redacted by name, and the whole bundle is piped through
+# lib/redact-debug-stream.py — the same filter that masks resolved inference
+# keys out of the `claude-guard --debug` stream — before it touches disk.
+
+NEW_ISSUE_URL = "https://github.com/alexander-turner/claude-guard/issues/new"
+
+_ENV_NAME_PREFIXES = ("CLAUDE", "DEVCONTAINER", "DANGEROUSLY_", "MONITOR_")
+_ENV_NAME_EXACT = frozenset({"CONTAINER_RUNTIME", "NO_COLOR", "TERM", "TMPDIR", "PATH"})
+_SECRETISH_NAME_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
+
+# Stack-adjacent tools whose versions a maintainer needs to reproduce a report.
+_VERSIONED_TOOLS = ("docker", "devcontainer", "node", "git")
+
+
+def bug_report_env() -> str:
+    """claude-guard-relevant environment, with secret-named values redacted."""
+    rows = []
+    for name in sorted(os.environ):
+        if not (name.startswith(_ENV_NAME_PREFIXES) or name in _ENV_NAME_EXACT):
+            continue
+        value = "[redacted]" if _SECRETISH_NAME_RE.search(name) else os.environ[name]
+        rows.append(f"{name}={value}")
+    return "\n".join(rows)
+
+
+def bug_report_cmd(argv: list[str]) -> str:
+    """argv's combined output for the bundle. A missing binary or a failing exit
+    becomes a note instead of an error: the bundle must still assemble on exactly
+    the broken installs it exists to describe."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return f"({argv[0]}: not found)"
+    out = (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0:
+        out += f"\n(exit status {proc.returncode})"
+    return out
+
+
+def claude_containers() -> list[str]:
+    """Names of the stack's containers, matched on name OR image: compose derives
+    container names from the workspace folder (no "claude" in them), so the
+    stack's secure-claude-* images are the reliable marker. Best-effort — [] when
+    docker is absent or the daemon is down (the bundle then simply has no log
+    sections)."""
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Image}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
+    if proc.returncode != 0:
+        return []
+    return [
+        line.split("\t", 1)[0] for line in proc.stdout.splitlines() if "claude" in line
+    ]
+
+
+def write_bug_report(report_text: str) -> Path:
+    """Assemble the diagnostics bundle, scrub it, and write it 0600 under the
+    temp directory; returns the bundle's path."""
+    sections: list[tuple[str, str]] = [
+        ("claude-guard doctor report", report_text.strip()),
+        ("platform", platform.platform()),
+        ("environment (filtered, secret-named values redacted)", bug_report_env()),
+        (
+            "tool versions",
+            "\n".join(
+                f"$ {tool} --version\n{bug_report_cmd([tool, '--version'])}"
+                for tool in _VERSIONED_TOOLS
+            ),
+        ),
+        (
+            "containers",
+            bug_report_cmd(
+                [
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--format",
+                    "{{.Names}}\t{{.Image}}\t{{.Status}}",
+                ]
+            ),
+        ),
+    ]
+    sections += [
+        (
+            f"docker logs --tail 100 {name}",
+            bug_report_cmd(["docker", "logs", "--tail", "100", name]),
+        )
+        for name in claude_containers()
+    ]
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    body = (
+        f"# claude-guard bug report ({stamp})\n\n"
+        f"Attach this file to a new issue: {NEW_ISSUE_URL}\n"
+        "Secret-named env values are redacted and known key values masked, "
+        "but review before sharing.\n"
+    )
+    for title, text in sections:
+        body += f"\n## {title}\n\n```\n{text}\n```\n"
+    body = subprocess.run(
+        [sys.executable, str(LIB / "redact-debug-stream.py")],
+        input=body,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    path = Path(tempfile.gettempdir()) / f"claude-guard-bug-report-{stamp}.md"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(body)
+    return path
+
+
 def print_verdict() -> None:
     # Worst reason wins: any UNPROTECTED → exit 2, else any DEGRADED → exit 1.
     console.print()
@@ -1138,6 +1270,13 @@ def main() -> None:
         help="repair the ~/.local/bin/claude alias so typing `claude` runs the "
         "wrapper (the one write this command makes; the report stays read-only)",
     )
+    parser.add_argument(
+        "--bug-report",
+        action="store_true",
+        help="after the report, bundle it with host diagnostics (platform, tool "
+        "versions, filtered environment, container logs) into a secrets-scrubbed "
+        "file under the temp directory, ready to attach to a GitHub issue",
+    )
     args = parser.parse_args()
     console.print()
     console.print(
@@ -1170,7 +1309,21 @@ def main() -> None:
     report_output_sanitization()
     report_panic_snapshots()
     report_prebuilt_image()
-    print_verdict()
+    # try/finally so the bundle is written (and its path printed) even though
+    # print_verdict() exits the process; the verdict's exit code is preserved.
+    try:
+        print_verdict()
+    finally:
+        if args.bug_report:
+            report = console.export_text() + errs.export_text()
+            bundle = write_bug_report(report)
+            console.print()
+            console.print(f"Bug-report bundle written to: {bundle}", soft_wrap=True)
+            console.print(
+                "Review it for anything sensitive, then attach it to a new issue:\n"
+                f"{NEW_ISSUE_URL}",
+                soft_wrap=True,
+            )
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ pre-commit run --all-files   # shellcheck/shfmt + hygiene (not run in CI)
 
 ## Filing an issue
 
-Search [existing issues](https://github.com/alexander-turner/claude-guard/issues) first. Include what you ran, what happened, and `claude-guard doctor` output where relevant.
+Search [existing issues](https://github.com/alexander-turner/claude-guard/issues) first. Include what you ran and what happened, and attach the diagnostics bundle from `claude-guard doctor --bug-report` (written under `/tmp`, secrets scrubbed — still worth a skim before sharing) to a [new issue](https://github.com/alexander-turner/claude-guard/issues/new).
 
 ## Pull requests
 
