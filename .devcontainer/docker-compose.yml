@@ -240,14 +240,22 @@ services:
     mem_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-2048}m
     memswap_limit: ${DEVCONTAINER_HARDENER_MEM_MB:-2048}m
     cpus: 1
-    # No depends_on: the hardener runs in PARALLEL with the firewall, hiding its
-    # multi-second leg under the firewall's. Nothing it does on the common path
-    # touches the network (settings merge, chmods, checksums, stamp-checked
-    # offline installs, secret scan); the one step that does — the fallback
-    # online `pnpm install` — gates itself on the proxy accepting connections
-    # (deps-install.bash: _deps_wait_for_proxy). The app still waits for BOTH
-    # the hardener's completion and the firewall's health below, so the agent
-    # never starts before the egress lockdown is verified.
+    depends_on:
+      firewall:
+        # service_STARTED, not service_healthy: the hardener overlaps the
+        # firewall's multi-second init (the savings) but must not be CREATED
+        # before the firewall container is up. The firewall pins the static
+        # SANDBOX_IP on the sandbox network while the hardener takes a dynamic
+        # address from the same subnet; if the hardener attaches first it grabs
+        # that IP and the firewall's fixed-address claim fails with "Address
+        # already in use", a non-deterministic launch failure. Ordering the
+        # firewall's network attach first removes the race. The app still gates
+        # on the firewall's HEALTH (and the hardener's completion) below, so the
+        # agent never starts before the egress lockdown is verified; the one
+        # hardener step that needs the network — the fallback online `pnpm
+        # install` — gates itself on the proxy (deps-install.bash:
+        # _deps_wait_for_proxy), since service_started does not imply squid is up.
+        condition: service_started
 
   app:
     image: ${CLAUDE_GUARD_IMAGE_MAIN:-secure-claude-sandbox:local}

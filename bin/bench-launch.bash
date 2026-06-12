@@ -154,9 +154,10 @@ docker volume create claude-gh-meta-cache >/dev/null
 # the stack up in dependency order (a foreground `up -d` blocks until every
 # healthy-gated dependency is satisfied, hiding the intermediate steps). The
 # checks still run in launch-gating order — services_running implies both
-# hardener_done and firewall_healthy — but the hardener runs in parallel with
-# the firewall, so its leg measures only the residual after firewall health
-# (~0 when hardening finished first; wait_until returns immediately then).
+# hardener_done and firewall_healthy — but the hardener overlaps the firewall's
+# init (it depends on the firewall only at service_started, not health), so its
+# leg measures only the residual after firewall health (~0 when hardening
+# finished first; wait_until returns immediately then).
 t_up=$(now_ms)
 "${DC[@]}" up -d &
 up_pid=$!
