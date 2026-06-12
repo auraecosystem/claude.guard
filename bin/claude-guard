@@ -384,6 +384,56 @@ fi
 
 target_cwd="$PWD"
 
+# When another claude-guard session is already running in this workspace, two
+# agents share the same files and git index and can overwrite each other. Offer
+# a per-session git worktree (the clean way to run several agents on one repo);
+# 'a' remembers the choice via a marker so future concurrent launches use a
+# worktree without asking. Skipped when the user already decided (CLAUDE_WORKTREE
+# set, even empty), outside git repos (no worktree possible), and for
+# persistent/shared sessions — their running container is this launch's own
+# reattach target, not a concurrent neighbour. Non-interactive callers get a
+# one-line warning, never a prompt.
+offer_worktree_for_concurrent_session() {
+  [[ -n "${CLAUDE_WORKTREE+x}" || -z "$repo_root" ]] && return 0
+  [[ "${CLAUDE_PERSIST:-}" == "1" || "${CLAUDE_SHARED_AUTH:-}" == "1" ]] && return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  local neighbor _wt_marker
+  neighbor=$(docker ps --filter "label=devcontainer.local_folder=$workspace_folder" --format '{{.ID}}' 2>/dev/null | head -1) || true
+  [[ -z "$neighbor" ]] && return 0
+  _wt_marker="${XDG_STATE_HOME:-$HOME/.local/state}/claude-monitor/worktree-on-concurrent"
+  if [[ -f "$_wt_marker" ]]; then
+    export CLAUDE_WORKTREE=1
+    cg_info "claude-guard: another session is running in this workspace — using a per-session git worktree (your saved default; remove $_wt_marker to be asked again)."
+    return 0
+  fi
+  if [[ -t 0 && -t 1 ]]; then
+    # kcov-ignore-start kcov pipes the child's stdout, so [[ -t 1 ]] reads false
+    # under the coverage harness and this interactive path can't be traced; its
+    # accept/always/decline behavior is asserted by the pty tests
+    # (test_concurrent_session_prompt_* in tests/test_claude_guard_coverage.py).
+    cg_warn "claude-guard: another claude-guard session is already running in this workspace — two agents editing the same files can overwrite each other's changes."
+    printf 'claude-guard: give this session its own git worktree (separate working copy on its own branch)? Y = yes; a = yes, always; n = no, share files. [Y/a/n] ' >&2
+    IFS= read -r _wt_ack
+    case "$_wt_ack" in
+    [Nn]*) ;;
+    [Aa]*)
+      export CLAUDE_WORKTREE=1
+      if mkdir -p "$(dirname "$_wt_marker")" 2>/dev/null && : >"$_wt_marker" 2>/dev/null; then
+        cg_info "claude-guard: saved — concurrent sessions in a workspace will use worktrees from now on (remove $_wt_marker to undo)."
+      else
+        cg_warn "claude-guard: could not write $_wt_marker; using a worktree for this session only."
+      fi
+      ;;
+    *) export CLAUDE_WORKTREE=1 ;;
+    esac
+    # kcov-ignore-end
+  else
+    cg_warn "claude-guard: another claude-guard session is running in this workspace; set CLAUDE_WORKTREE=1 to give each session its own git worktree."
+  fi
+  return 0
+}
+offer_worktree_for_concurrent_session
+
 wt_dir=$("$(dirname "$SELF_CANONICAL")/claude-guard-create-worktree") || {
   cg_error "claude-guard: worktree creation failed; unset CLAUDE_WORKTREE to skip."
   exit 1

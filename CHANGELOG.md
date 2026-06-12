@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- When another claude-guard session is already running in the same workspace,
+  an interactive launch now offers to give the new session its own git worktree
+  (two agents sharing one working tree can overwrite each other's changes).
+  Answer `a` to make worktrees the default for concurrent launches (remove
+  `$XDG_STATE_HOME/claude-monitor/worktree-on-concurrent` to be asked again).
+  Non-interactive launches print a one-line warning instead of prompting.
+
 ### Changed
 
 - The ephemeral-session startup line no longer suggests `CLAUDE_PERSIST=1` to

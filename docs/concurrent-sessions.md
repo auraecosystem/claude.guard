@@ -3,6 +3,16 @@
 claude-guard allocates a **per-session sandbox subnet** so many sessions run at
 once. Up to **64** concurrent sessions are supported out of the box.
 
+## Sharing one repo: worktrees
+
+Concurrent sessions in the **same workspace** share the bind-mounted files and
+git index, so two agents can overwrite each other's changes. `CLAUDE_WORKTREE=1`
+gives each session its own git worktree (own branch, shared object store). An
+interactive launch that detects another session already running in the workspace
+offers this automatically; answering `a` saves it as the default for concurrent
+launches (marker: `$XDG_STATE_HOME/claude-monitor/worktree-on-concurrent`).
+Non-interactive launches just get a one-line warning.
+
 ## Why a fixed subnet blocked concurrency
 
 The `sandbox` Docker network needs a _known_ firewall IP: the app's DNS, the squid
