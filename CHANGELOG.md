@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- The sandbox no longer shows a spurious "Auto-update failed" status line.
+  `DISABLE_AUTOUPDATER` was set only in the settings `env` block, which Claude
+  Code applies during session init — after the auto-update check has already
+  run, failed against the egress-firewalled npm registry, and painted the
+  indicator. It is now baked into the image as a real process environment
+  variable so it is present before `claude` starts, matching the sandbox's
+  pinned, never-auto-updated invariant.
+
 ### Added
 
 - A SessionStart hook (`firewall-summary.mjs`) now tells the in-sandbox agent,
@@ -23,6 +33,19 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Project-defined MCP servers are now covered at session start, the one
+  execution path with no per-call review: approving a server from a repo's
+  `.mcp.json` is a sticky grant whose command runs automatically every session.
+  Managed settings now pin `enableAllProjectMcpServers: false` (a repo cannot
+  self-approve its servers), a new SessionStart hook shows the user the
+  verbatim command behind each server when it first appears, and if an approved
+  server's definition later changes, its stored approval is revoked so Claude
+  Code asks again instead of running the new command under the old approval.
+- Secret-redaction warnings now note when the flagged text matches one of this
+  repo's own credential-shaped test fixtures (`tests/secret-format-samples.json`),
+  so a session working on the sanitizer's tests can tell fixture noise from a
+  real leak. Redaction itself is unchanged — only the warning text gains the
+  note.
 - The force-push deny rule no longer blocks `git push --force-with-lease` /
   `--force-if-includes`. Bare `--force`/`-f` is still denied; the lease-checked
   variants are not, since they refuse to overwrite remote commits the server
@@ -72,6 +95,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Launch is faster: the app-hardening step now runs in parallel with the
+  firewall instead of waiting for it (its rare online dependency fetch waits for
+  the proxy itself, and the agent still starts only after both finish), the
+  allowlist's resolved IPs are loaded into the kernel in one batch instead of
+  one call per address, and startup readiness is polled every 250ms instead of
+  every second.
 - The startup credential warning is now content-based instead of name-based:
   config-shaped files (anything at the workspace top level, under a
   `conf`/`config`/`configs`/`.config` directory, or with a config-style
@@ -161,6 +190,14 @@ but this checkout's image inputs last changed at def456abc123`) — so a stale
 
 ### Fixed
 
+- `claude-guard audit` now finds an ephemeral session's audit trail after the
+  session ends. An ephemeral session names its audit volume for a throwaway
+  session id, but teardown archived the log to the host under that same
+  throwaway name — while the reader resolves the archive from the workspace
+  path. The two never matched, so a post-session `claude-guard audit` reported
+  "no audit log" even though the trail had been saved. Teardown now archives
+  under the workspace-keyed name (matching what the egress snapshot already
+  did), so the reader finds it from the workspace alone.
 - The startup credential warning's content scan now checks only files whose
   name conventionally holds a secret (`.env`/`.npmrc`/`*.tfvars`/`*secret*`, the
   `.docker`/`.kube` auth paths, …) instead of every top-level and config-shaped
