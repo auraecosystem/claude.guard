@@ -13,7 +13,7 @@ Right now you're probably handing Claude a shell on a machine full of your code,
 
 For each way an agent with shell access can hurt you, the [threat model](#threat-models) section names the **hard boundary** a model can't talk its way past, and marks the layers that are merely best-effort filters you should be wary of. 
 
-![A guard goose wearing a visor stands watch atop a flaming brick firewall. In a field below, Claude-logo flowers sway. Some of them look suspicious.](https://assets.turntrout.com/static/images/guard-goose-sccd.avif)
+![A guard goose wearing a visor stands watch atop a flaming brick firewall. In a field below, Claude-logo flowers sway. Some of them look suspicious.](https://assets.turntrout.com/static/images/claude-guard.png)
 
 _Disclaimer: I'm an AI professional but not a security professional. I cannot personally ensure the security of this code, though it is surely more secure than nothing at all. I aim to pay for a real security audit. I welcome issues and PRs. Also, MacOS users only get `runc` plus the VM boundary—upstream issues need to be resolved before full-strength VMs are possible._
 
