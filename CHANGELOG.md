@@ -131,6 +131,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Read-only allowlisted domains now permit only `GET`/`HEAD` — `OPTIONS` (a
+  CORS-preflight method servers-side fetches don't need) is no longer accepted,
+  so "read-only" means pure reads.
+- `claude-loosen-firewall` now **fails** (non-zero) when squid can't reload after
+  an allowlist expansion, instead of only warning. A silent warning could leave
+  the operator believing a grant applied when the method restriction hadn't
+  loaded; the overlay files persist, so re-running once squid is healthy applies
+  it.
 - `MONITOR_ASK_ONLY=1` now only downgrades the monitor's `deny` to `allow` when
   the call is actually in **auto mode** (where Claude Code's built-in classifier
   still blocks). Previously the downgrade applied unconditionally on the
@@ -164,6 +172,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Two sessions launched at the same instant no longer race for the same sandbox
+  subnet (which surfaced as a `devcontainer up` "Pool overlaps" failure for the
+  loser). Subnet allocation is now serialized with a file lock and records a
+  short-lived reservation, so a concurrent scan skips an octet another launch
+  just picked until its network appears in Docker's list. Best-effort — if the
+  lock dir isn't writable the pick still runs unserialized.
 - The launch summary box no longer spills its right border off-screen on a
   terminal narrower than its content (the long "Protection" row, which carries
   the full isolation description, pushed the box past ~160 columns). Over-wide
