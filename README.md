@@ -26,7 +26,7 @@ brew trust --formula alexander-turner/tap/claude-guard && brew install alexander
 claude-guard setup
 ```
 
-`brew install` puts the wrapper on your `PATH` but can't run the privileged setup step itself (Homebrew's post-install has no `sudo`/TTY), so finish with `claude-guard setup` — the first time you launch `claude-guard` it will also offer to run this for you if you skip it. `setup` installs and configures everything (Docker via [OrbStack](https://orbstack.dev/), the sandbox runtime, and supporting tools), prompting before each install and for `sudo` on system-level changes. It finishes by running `claude-guard doctor` to confirm your setup is fully protected.[^add]
+`brew install` only puts the wrapper on your `PATH` — finish with `claude-guard setup` (Homebrew's post-install can't run privileged setup itself). It installs Docker (via [OrbStack](https://orbstack.dev/)), the sandbox runtime, and supporting tools, then runs `claude-guard doctor` to confirm you're protected.[^add]
 
 ### Linux / from source
 
@@ -37,7 +37,7 @@ cd ~/.local/share/claude-guard
 bash setup.bash
 ```
 
-`setup.bash` runs the same install and configuration as `claude-guard setup`, prompting before each install and for `sudo` on system-level changes (or run non-interactively with `CLAUDE_GUARD_ASSUME_YES=1`). It finishes by running `claude-guard doctor` to confirm your setup is fully protected.[^add]
+`setup.bash` does the same as `claude-guard setup`, then runs `claude-guard doctor` to confirm you're protected.[^add]
 
 **Windows:** run everything inside [WSL2](https://learn.microsoft.com/windows/wsl/install). Native Windows (Git Bash / MSYS2 / Cygwin) can't host the Linux containers and sandbox runtime this stack depends on, so `setup.bash` detects those shells and exits with guidance instead of attempting a doomed install.
 
