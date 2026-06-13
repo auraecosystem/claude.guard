@@ -18,39 +18,22 @@ agent's scrubbed `gh` shell, while the host's *own* broad GH_TOKEN never does
 authorization, so the test asserts at each link rather than only the endpoint.
 """
 
-import os
 from pathlib import Path
 
-from tests._helpers import REPO_ROOT, run_capture, write_exe
+from tests._helpers import (
+    REPO_ROOT,
+    current_path,
+    fake_github_app_dir,
+    git_repo_with_origin,
+    run_capture,
+    write_exe,
+)
 
 AUTOMINT = REPO_ROOT / "bin" / "lib" / "auto-mint-gh-token.bash"
 SCRUBALLOW = REPO_ROOT / "bin" / "lib" / "scrub-allow.bash"
 SCRUB = REPO_ROOT / ".devcontainer" / "profiles" / "scrub-secrets.sh"
 
 _UNSET = "@@UNSET@@"  # sentinel: distinguishes "" (set-but-empty) from truly unset
-
-
-def _path() -> str:
-    return os.environ.get("PATH", "/usr/bin:/bin")
-
-
-def _git_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "work"
-    repo.mkdir()
-    run_capture(["git", "init", "-q"], cwd=repo)
-    run_capture(
-        ["git", "remote", "add", "origin", "https://github.com/owner/scoped-repo.git"],
-        cwd=repo,
-    )
-    return repo
-
-
-def _app_dir(tmp_path: Path) -> Path:
-    """An XDG_CONFIG_HOME whose app.json marks the GitHub App as installed."""
-    cfg = tmp_path / "cfg" / "claude" / "github-app"
-    cfg.mkdir(parents=True)
-    (cfg / "app.json").write_text('{"installation_id": 123}')
-    return tmp_path / "cfg"
 
 
 def _read_var(stdout: str, key: str) -> str:
@@ -70,7 +53,9 @@ def _mint(repo: Path, env: dict[str, str]) -> tuple[str, str]:
         f'echo "GH_TOKEN=${{GH_TOKEN-{_UNSET}}}"\n'
         f'echo "SCRUB_SECRETS_ALLOW=${{SCRUB_SECRETS_ALLOW-{_UNSET}}}"'
     )
-    r = run_capture(["bash", "-c", script], cwd=repo, env={"PATH": _path(), **env})
+    r = run_capture(
+        ["bash", "-c", script], cwd=repo, env={"PATH": current_path(), **env}
+    )
     assert r.returncode == 0, r.stderr
     return _read_var(r.stdout, "GH_TOKEN"), _read_var(r.stdout, "SCRUB_SECRETS_ALLOW")
 
@@ -78,7 +63,7 @@ def _mint(repo: Path, env: dict[str, str]) -> tuple[str, str]:
 def _forwarded_names(gh_token: str, scrub_allow: str) -> list[str]:
     """Link 2: the launcher gate. Given the post-mint env, return the var names
     scrub_allow_exec_flags would forward into the container (`docker exec -e NAME`)."""
-    env = {"PATH": _path()}
+    env = {"PATH": current_path()}
     if gh_token != _UNSET:
         env["GH_TOKEN"] = gh_token
     if scrub_allow != _UNSET:
@@ -101,7 +86,7 @@ def _agent_gh_token(forwarded: list[str], gh_token: str, scrub_allow: str) -> st
     src = {"GH_TOKEN": gh_token, "SCRUB_SECRETS_ALLOW": scrub_allow}
     # `env -i` so only the forwarded vars exist, mirroring the container; GH_TOKEN
     # starts blanked by compose and is overlaid only if it was forwarded.
-    container = ["GH_TOKEN=", f"PATH={_path()}", f"BASH_ENV={SCRUB}"]
+    container = ["GH_TOKEN=", f"PATH={current_path()}", f"BASH_ENV={SCRUB}"]
     for name in forwarded:
         if name in src and src[name] != _UNSET:
             container.append(f"{name}={src[name]}")
@@ -123,7 +108,7 @@ def _agent_gh_token(forwarded: list[str], gh_token: str, scrub_allow: str) -> st
 def test_minted_token_reaches_the_agents_gh(tmp_path: Path) -> None:
     """Happy path: with the App installed, the scoped token flows all the way to
     the agent's `gh` shell, repo-scoped, and survives the scrub."""
-    repo = _git_repo(tmp_path)
+    repo = git_repo_with_origin(tmp_path, "https://github.com/owner/scoped-repo.git")
     fake = write_exe(
         tmp_path / "claude-github-app",
         '#!/usr/bin/env bash\necho "$@" >"$ARGS_FILE"\necho scoped-tok-abc\n',
@@ -131,7 +116,7 @@ def test_minted_token_reaches_the_agents_gh(tmp_path: Path) -> None:
     args_file = tmp_path / "args.txt"
     env = {
         "FAKE_BIN": str(fake),
-        "XDG_CONFIG_HOME": str(_app_dir(tmp_path)),
+        "XDG_CONFIG_HOME": str(fake_github_app_dir(tmp_path)),
         "HOME": str(tmp_path),
         "ARGS_FILE": str(args_file),
     }
@@ -151,7 +136,7 @@ def test_minted_token_reaches_the_agents_gh(tmp_path: Path) -> None:
 def test_host_broad_token_never_reaches_the_agent(tmp_path: Path) -> None:
     """Without the App, a host GH_TOKEN is neither forwarded nor spared: it is
     scrubbed from the agent's shell, so it can never authorize the agent's `gh`."""
-    repo = _git_repo(tmp_path)
+    repo = git_repo_with_origin(tmp_path, "https://github.com/owner/scoped-repo.git")
     fake = write_exe(tmp_path / "claude-github-app", "#!/usr/bin/env bash\nexit 0\n")
     env = {
         "FAKE_BIN": str(fake),
@@ -173,14 +158,14 @@ def test_host_broad_token_never_reaches_the_agent(tmp_path: Path) -> None:
 def test_minted_token_overrides_a_host_token_through_the_chain(tmp_path: Path) -> None:
     """Even when a host GH_TOKEN is present, the App installation wins end to end:
     the agent sees the scoped minted token, never the host's broad one."""
-    repo = _git_repo(tmp_path)
+    repo = git_repo_with_origin(tmp_path, "https://github.com/owner/scoped-repo.git")
     fake = write_exe(
         tmp_path / "claude-github-app",
         "#!/usr/bin/env bash\necho scoped-wins\n",
     )
     env = {
         "FAKE_BIN": str(fake),
-        "XDG_CONFIG_HOME": str(_app_dir(tmp_path)),
+        "XDG_CONFIG_HOME": str(fake_github_app_dir(tmp_path)),
         "HOME": str(tmp_path),
         "GH_TOKEN": "host-broad-token",
     }
