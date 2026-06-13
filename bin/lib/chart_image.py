@@ -21,12 +21,10 @@ from typing import Protocol
 
 import matplotlib
 
+# pylint: disable=wrong-import-position  # pyplot import must follow use("Agg")
 matplotlib.use("Agg")  # headless: no display, write straight to a file
 import matplotlib.pyplot as plt  # noqa: E402  (must follow the Agg backend select)
-from matplotlib.ticker import (  # noqa: E402  (same Agg-backend ordering)
-    FuncFormatter,
-    MaxNLocator,
-)
+from matplotlib.ticker import FuncFormatter, MaxNLocator  # noqa: E402
 
 
 class SeriesLike(Protocol):
@@ -133,7 +131,8 @@ def render_chart(
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
         ax.spines[side].set_color("#bbbbbb")
-    ax.tick_params(colors="#666666", length=0)
+    ax.tick_params(axis="y", colors="#666666", length=0)
+    ax.tick_params(axis="x", colors="#aaaaaa", length=0)
 
     # Small left pad so the first point isn't glued to the axis; on the right,
     # reserve room for the inline end-of-line labels (none needed for a legend).
