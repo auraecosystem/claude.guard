@@ -8,6 +8,14 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `pnpm`/`pnpx` no longer crash with a read-only-filesystem error (`EROFS:
+... mkdir '/usr/local/share/corepack/...'`) in projects whose
+  `packageManager` field pins a version other than the image's baked pnpm.
+  The corepack cache now lives on the session's writable home directory,
+  seeded on first use from the image-baked copy — the baked pnpm still works
+  without network access and stays the default for unpinned projects, while
+  any other pinned version is downloaded into the writable cache instead of
+  failing.
 - A local sandbox-image build no longer floods the terminal with BuildKit's
   per-step progress. BuildKit's default `auto` mode wrote those lines straight
   to the controlling TTY, bypassing the launcher's stderr capture and scrolling
