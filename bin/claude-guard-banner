@@ -136,10 +136,11 @@ def _freeze_on_sigterm(signum: int, frame: object) -> None:
 
 
 def _print_framed(console: Console, art: Text) -> None:
-    """Print the banner framed by blank lines so it has room to breathe above the
-    launch summary box / prompt that follows."""
-    console.print()
+    """Print the banner with no blank line above it (it sits flush where the pulse
+    cleared / the cursor is) and two below, so it stands apart from the launch
+    summary box / prompt that follows."""
     console.print(art)
+    console.print()
     console.print()
 
 

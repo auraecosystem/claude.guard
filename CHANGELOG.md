@@ -37,7 +37,8 @@ adhere to [Semantic Versioning](https://semver.org/).
   Instead it pulses from the very start of the load and **freezes into a solid
   masthead** when the sandbox is ready (a warm reattach, with nothing to load,
   paints the solid masthead immediately); a Ctrl-C abort clears it. The summary
-  box drops its title, since the banner names the session.
+  box now follows the masthead (instead of preceding it) and drops its title,
+  since the banner names the session.
 - Trimmed routine noise from the launch output: on a TTY the pulsing banner is
   the sole loading indicator (the `Resolving sandbox image…` line and the
   `image ready` / `building locally` notes are suppressed there, kept for

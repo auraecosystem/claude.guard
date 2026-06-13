@@ -1026,19 +1026,6 @@ else
   _box_session="persistent — per-workspace volume kept across sessions"
 fi
 
-# One summary box for the security + monitor settings, replacing the scattered
-# per-setting status lines. Untitled: the CLAUDE GUARD banner names the session —
-# painted as a pulse during a cold build that freezes into a solid masthead when
-# the load completes, or solid right away on a warm reattach (show_session_banner
-# below) — so a box title would just repeat it. Container path only: host mode and
-# the privacy tiers exec before here. Degraded specifics already printed loudly
-# above; this is the at-a-glance posture the operator sees before the (possibly
-# slow) launch. One physical call: kcov attributes a line-continued command to its
-# closing line, leaving the opener reading 0 hits and failing the 100% gate.
-_box_fw="outgoing-traffic firewall on"
-[[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]] && _box_fw="firewall OFF — unrestricted network access"
-cg_box "" "Protection  ${PROTECTION_LABEL} — ${ISOLATION_LABEL}; ${_box_fw}" "Monitor     ${_box_monitor}" "Session     ${_box_session}"
-
 # Ephemeral teardown: archive this session's audit log to the host (not a volume,
 # unreachable by the container, so it preserves the forensic trail without
 # granting persistence), then delete the session's containers and volumes.
@@ -1515,6 +1502,18 @@ if [[ -z "$container_id" ]]; then
   cg_error "claude-guard: (intentional bypass: --dangerously-skip-sandbox runs on the host without the sandbox.)"
   exit 1
 fi
+
+# One summary box for the security + monitor settings, replacing the scattered
+# per-setting status lines. Printed AFTER the CLAUDE GUARD banner (the cold-path
+# freeze or the warm-path solid masthead above), so the masthead leads and the
+# settings follow it. Untitled: the banner already names the session, so a box
+# title would just repeat it. Container path only: host mode and the privacy tiers
+# exec before here. Degraded specifics already printed loudly above. One physical
+# call: kcov attributes a line-continued command to its closing line, leaving the
+# opener reading 0 hits and failing the 100% gate.
+_box_fw="outgoing-traffic firewall on"
+[[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]] && _box_fw="firewall OFF — unrestricted network access"
+cg_box "" "Protection  ${PROTECTION_LABEL} — ${ISOLATION_LABEL}; ${_box_fw}" "Monitor     ${_box_monitor}" "Session     ${_box_session}"
 
 # Best-effort snapshot of /home/node/.claude (the claude-code-config named
 # volume) so a corruption inside this session is rollback-able. Keeps 10.
