@@ -594,6 +594,17 @@ describe("unit: spliceRanges exact behavior", () => {
       ]),
       `01${HIDDEN_PLACEHOLDER}89`,
     ));
+  it("keeps adjacent (touching) ranges as separate placeholders", () =>
+    // `range.start < last.end` (strict): a range starting exactly AT the
+    // previous range's end does not merge — two comments back-to-back stay two
+    // placeholders, not one.
+    assert.equal(
+      spliceRanges(text, [
+        { start: 2, end: 5, kind: "comment" },
+        { start: 5, end: 8, kind: "comment" },
+      ]),
+      `01${COMMENT_PLACEHOLDER}${COMMENT_PLACEHOLDER}89`,
+    ));
   it("returns the text unchanged for no ranges", () =>
     assert.equal(spliceRanges(text, []), text));
 });
@@ -646,13 +657,13 @@ describe("unit: sanitizeHtml exact result shapes", () => {
     assert.deepEqual(result.removed, { comments: 1, hidden: 1 });
   });
 
-  it("accumulates warned counts across separate html blocks", () => {
-    // Two flow blocks separated by paragraphs: mergeWarned must ADD, not
-    // overwrite or subtract.
-    const result = sanitizeHtml(
-      '<script>a</script>\n\npara\n\n<script>b</script>\n\n<img src="data:x,1">\n\npara\n\n<img src="data:x,2">',
-    );
-    assert.deepEqual(result.warned, { tags: { script: 2 }, dataSrc: 2 });
+  it("accumulates warned counts across separate html blocks (mergeWarned)", () => {
+    // Two separate root-level html blocks, short enough to route through the
+    // markdown branch (not the html-source single-fragment branch), so the
+    // per-block sub-results go through mergeWarned: it must ADD the second
+    // block's count onto the first, not overwrite or reset it.
+    const result = sanitizeHtml("<script>a</script>\n\n<script>b</script>");
+    assert.deepEqual(result.warned, { tags: { script: 2 }, dataSrc: 0 });
   });
 
   it("region balancing: a different inner tag neither extends nor closes the region", () => {
