@@ -2,8 +2,8 @@
 every anthropics/claude-code-action step to pin an explicit --model in claude_args.
 
 Imports the module by path and drives check_file / main directly so every branch
-is covered: clean steps, missing --model, opted-out steps, non-dict YAML shapes,
-and non-action steps are all exercised.
+is covered: clean steps, missing --model, non-dict YAML shapes, and non-action
+steps are all exercised.
 """
 
 import importlib.util
@@ -36,9 +36,9 @@ def _write(dirpath: Path, name: str, body: str) -> Path:
 
 ACTION = ccm.ACTION
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── fixtures ──────────────────────────────────────────────────────────────────
 
-_USES_WITH_MODEL = f"""\
+_WITH_MODEL = f"""\
 jobs:
   x:
     steps:
@@ -47,7 +47,7 @@ jobs:
           claude_args: "--model claude-haiku-4-5 --allowedTools Bash"
 """
 
-_USES_WITHOUT_MODEL = f"""\
+_WITHOUT_MODEL = f"""\
 jobs:
   x:
     steps:
@@ -56,7 +56,7 @@ jobs:
           claude_args: "--allowedTools Bash"
 """
 
-_USES_NO_CLAUDE_ARGS = f"""\
+_NO_CLAUDE_ARGS = f"""\
 jobs:
   x:
     steps:
@@ -65,7 +65,7 @@ jobs:
           anthropic_api_key: "***"
 """
 
-_USES_NULL_CLAUDE_ARGS = f"""\
+_NULL_CLAUDE_ARGS = f"""\
 jobs:
   x:
     steps:
@@ -74,16 +74,7 @@ jobs:
           claude_args: null
 """
 
-_USES_OPTED_OUT = f"""\
-jobs:
-  x:
-    steps:
-      - uses: {ACTION}@abc123 # v1 # {ccm.OPT_OUT}
-        with:
-          claude_args: "--allowedTools Bash"
-"""
-
-_USES_OTHER_ACTION = """\
+_OTHER_ACTION = """\
 jobs:
   x:
     steps:
@@ -91,9 +82,7 @@ jobs:
 """
 
 _NON_DICT_DOC = "- item1\n- item2\n"
-
 _NON_DICT_JOBS = "jobs: scalar\n"
-
 _NON_DICT_JOB = "jobs:\n  x: scalar\n"
 
 _NON_DICT_STEP = f"""\
@@ -116,69 +105,62 @@ jobs:
 # ── check_file ────────────────────────────────────────────────────────────────
 
 
-def test_check_file_passes_with_model(tmp_path):
-    assert ccm.check_file(_write(tmp_path, "wf.yaml", _USES_WITH_MODEL)) == []
+def test_passes_with_model(tmp_path):
+    assert ccm.check_file(_write(tmp_path, "wf.yaml", _WITH_MODEL)) == []
 
 
-def test_check_file_flags_missing_model(tmp_path):
-    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _USES_WITHOUT_MODEL))
+def test_flags_missing_model(tmp_path):
+    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _WITHOUT_MODEL))
     assert len(violations) == 1
     lineno, msg = violations[0]
     assert lineno == 4
     assert ACTION in msg and "--model" in msg
 
 
-def test_check_file_flags_no_claude_args(tmp_path):
-    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _USES_NO_CLAUDE_ARGS))
+def test_flags_no_claude_args(tmp_path):
+    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _NO_CLAUDE_ARGS))
     assert len(violations) == 1
     assert "--model" in violations[0][1]
 
 
-def test_check_file_flags_null_claude_args(tmp_path):
-    # `claude_args: null` → the `or ""` coercion must still trigger a violation.
-    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _USES_NULL_CLAUDE_ARGS))
-    assert len(violations) == 1
+def test_flags_null_claude_args(tmp_path):
+    # claude_args: null → `or ""` coercion still triggers a violation.
+    assert len(ccm.check_file(_write(tmp_path, "wf.yaml", _NULL_CLAUDE_ARGS))) == 1
 
 
-def test_check_file_respects_opt_out(tmp_path):
-    assert ccm.check_file(_write(tmp_path, "wf.yaml", _USES_OPTED_OUT)) == []
+def test_ignores_other_actions(tmp_path):
+    assert ccm.check_file(_write(tmp_path, "wf.yaml", _OTHER_ACTION)) == []
 
 
-def test_check_file_ignores_other_actions(tmp_path):
-    assert ccm.check_file(_write(tmp_path, "wf.yaml", _USES_OTHER_ACTION)) == []
-
-
-def test_check_file_ignores_non_dict_document(tmp_path):
+def test_ignores_non_dict_document(tmp_path):
     assert ccm.check_file(_write(tmp_path, "wf.yaml", _NON_DICT_DOC)) == []
 
 
-def test_check_file_ignores_non_dict_jobs(tmp_path):
+def test_ignores_non_dict_jobs(tmp_path):
     assert ccm.check_file(_write(tmp_path, "wf.yaml", _NON_DICT_JOBS)) == []
 
 
-def test_check_file_ignores_non_dict_job(tmp_path):
+def test_ignores_non_dict_job(tmp_path):
     assert ccm.check_file(_write(tmp_path, "wf.yaml", _NON_DICT_JOB)) == []
 
 
-def test_check_file_ignores_non_dict_step(tmp_path):
+def test_ignores_non_dict_step(tmp_path):
     # The scalar step is skipped; the claude-code-action step (no claude_args) fires.
-    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _NON_DICT_STEP))
-    assert len(violations) == 1
+    assert len(ccm.check_file(_write(tmp_path, "wf.yaml", _NON_DICT_STEP))) == 1
 
 
-def test_check_file_ignores_null_uses(tmp_path):
-    # `uses: null` is not a str → skipped; the claude-code-action step (no args) fires.
-    violations = ccm.check_file(_write(tmp_path, "wf.yaml", _NULL_USES))
-    assert len(violations) == 1
+def test_ignores_null_uses(tmp_path):
+    # uses: null is not a str → skipped; the claude-code-action step (no args) fires.
+    assert len(ccm.check_file(_write(tmp_path, "wf.yaml", _NULL_USES))) == 1
 
 
-def test_check_file_uses_line_1_when_action_not_in_text(tmp_path):
-    # A YAML unicode escape resolves to the action string, but the literal bytes
-    # ("\\u0040" vs "@") differ — the for loop exhausts all lines, leaving uses_lineno=1.
+def test_uses_line_1_when_action_not_in_text(tmp_path):
+    # YAML unicode escape → parsed value doesn't appear literally in any line;
+    # next() defaults to 1.
     body = 'jobs:\n  j:\n    steps:\n      - uses: "anthropics/claude-code-action\\u0040abc"\n'
     violations = ccm.check_file(_write(tmp_path, "wf.yaml", body))
     assert len(violations) == 1
-    assert violations[0][0] == 1  # defaulted to line 1
+    assert violations[0][0] == 1
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -194,15 +176,15 @@ def _point_at(tmp_path, monkeypatch):
 
 def test_main_returns_zero_when_clean(tmp_path, monkeypatch, capsys):
     wf = _point_at(tmp_path, monkeypatch)
-    _write(wf, "ok.yaml", _USES_WITH_MODEL)
+    _write(wf, "ok.yaml", _WITH_MODEL)
     assert ccm.main() == 0
     assert "ERROR" not in capsys.readouterr().out
 
 
 def test_main_reports_and_fails_on_violation(tmp_path, monkeypatch, capsys):
     wf = _point_at(tmp_path, monkeypatch)
-    _write(wf, "bad.yaml", _USES_WITHOUT_MODEL)
-    _write(wf, "ok.yaml", _USES_WITH_MODEL)
+    _write(wf, "bad.yaml", _WITHOUT_MODEL)
+    _write(wf, "ok.yaml", _WITH_MODEL)
     assert ccm.main() == 1
     out = capsys.readouterr().out
     assert "::error file=.github/workflows/bad.yaml,line=4::" in out
