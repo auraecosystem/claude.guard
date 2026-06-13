@@ -16,9 +16,12 @@ const EXPECTED =
   "against printed tool output. When you Edit or Write a file, your input is " +
   "automatically matched against the real bytes on disk, so an old_string copied " +
   "from output containing [REDACTED: ...] still matches the real secret -- you do " +
-  "not need to reconstruct it. An edit that would make a redacted secret visible " +
-  "again in your next read is refused; that is the protection working, not a bug " +
-  "-- leave the redacted span in place rather than editing around it.";
+  "not need to reconstruct it. This applies only to Edit/Write file inputs: a " +
+  "[REDACTED: ...] placeholder in a shell command is literal text, not the secret. " +
+  "Editing a file that holds secrets is fine; only an edit that would make a " +
+  "redacted secret newly visible in your next read is refused (that is the " +
+  "protection working, not a bug), so keep the redacted span in place rather than " +
+  "rewriting around it.";
 
 describe("sanitizerSummary", () => {
   const note = sanitizerSummary();
@@ -43,8 +46,16 @@ describe("sanitizerSummary", () => {
     assert.match(note, /still matches the real secret/);
     assert.match(
       note,
-      /make a redacted secret visible again .* is refused; that is the protection working, not a bug/,
+      /make a\s+redacted secret newly visible in your next read is refused \(that is the\s+protection working, not a bug\)/,
     );
+  });
+
+  it("scopes re-anchoring to file edits and OKs editing secret-bearing files", () => {
+    assert.match(
+      note,
+      /applies only to Edit\/Write file inputs: a .* placeholder in a shell command is literal text, not the secret/,
+    );
+    assert.match(note, /Editing a file that holds secrets is fine/);
   });
 
   it("is plain ASCII (no smart quotes / invisible chars that the gate would flag)", () => {
