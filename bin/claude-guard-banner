@@ -93,11 +93,16 @@ def pulse(
     """
     art = "\n".join(banner_lines())
     frame_delay = 1 / fps
+    # Capture the launcher's PID so the splash self-reaps if the launcher exits
+    # WITHOUT sending its SIGTERM stop — e.g. a runtime gate aborts the launch
+    # mid-load. getppid() then changes and the loop ends, clearing the transient
+    # animation, instead of orphaning an immortal splash over the error output.
+    parent = os.getppid()
     with Live(
         console=console, refresh_per_second=fps, screen=False, transient=True
     ) as live:
         start = time.monotonic()
-        while True:
+        while os.getppid() == parent:
             live.update(pulse_frame(art, time.monotonic() - start, period))
             time.sleep(frame_delay)
 
