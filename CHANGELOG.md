@@ -27,11 +27,11 @@ adhere to [Semantic Versioning](https://semver.org/).
   `/workspace`. A payload the agent writes into your project tree persists like
   any file on disk (bounded by the firewall/audit/sandbox and visible in your VCS
   diff), so agent-authored workspace changes should be reviewed before trusting.
-- `setup.bash` now asks for confirmation before downloading or building the sandbox images 
-  (several GB), reports free space on Docker's storage filesystem, and notes that 
-  previous image versions are removed automatically on each `claude-guard` launch 
-  so only one set is stored at a time. Non-interactive installs 
-  (`CLAUDE_GUARD_ASSUME_YES=1`, no TTY) and `CLAUDE_GUARD_NO_PREWARM=1` skip 
+- `setup.bash` now asks for confirmation before downloading or building the sandbox images
+  (several GB), reports free space on Docker's storage filesystem, and notes that
+  previous image versions are removed automatically on each `claude-guard` launch
+  so only one set is stored at a time. Non-interactive installs
+  (`CLAUDE_GUARD_ASSUME_YES=1`, no TTY) and `CLAUDE_GUARD_NO_PREWARM=1` skip
   the prompt and behave as before.
 - Trimmed routine noise from the launch output: the static `CLAUDE GUARD` ASCII
   banner that headed every launch is gone — the brand now shows compactly as the
