@@ -13,14 +13,18 @@ from tests._helpers import run_capture, write_exe
 HOOKS_DIR = Path(__file__).resolve().parents[1] / ".claude" / "hooks"
 DISPATCH = HOOKS_DIR / "monitor-dispatch.bash"
 LIB_CHECKS = HOOKS_DIR / "lib-checks.sh"
+MSG_BASH = Path(__file__).resolve().parents[1] / "bin" / "lib" / "msg.bash"
 _ENVELOPE = (
     '{"tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"test-123"}'
 )
 
 
 def _install_lib(tmp_path: Path) -> None:
-    """Copy lib-checks.sh next to the test script so source works."""
+    """Copy lib-checks.sh and msg.bash next to / under the test script so source works."""
     shutil.copy2(LIB_CHECKS, tmp_path / "lib-checks.sh")
+    msg_dir = tmp_path / "bin" / "lib"
+    msg_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MSG_BASH, msg_dir / "msg.bash")
 
 
 def _install_scrubber(tmp_path: Path) -> None:
