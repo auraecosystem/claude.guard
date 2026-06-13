@@ -13,19 +13,21 @@ Right now you're probably handing Claude a shell on a machine full of your code,
 
 [`SECURITY.md`](SECURITY.md) breaks the design into defense layers, distinguishing the **hard boundaries** a model can't talk its way past from the best-effort filters you should be wary of.
 
-![A guard goose wearing a visor stands watch atop a flaming brick firewall. In a field below, Claude-logo flowers sway. Some of them look suspicious.](https://assets.turntrout.com/static/images/guard-goose-sccd.avif)
+![A guard goose wearing a visor stands watch atop a flaming brick firewall. In a field below, Claude-logo flowers sway. Some of them look suspicious.](https://assets.turntrout.com/static/images/claude-guard.png)
 
-_Disclaimer: I'm an AI professional but not a security professional. I cannot personally ensure the security of this code, though it is surely more secure than nothing at all. I aim to pay for a real security audit. I welcome issues and PRs._
+_Disclaimer: I'm an AI professional but not a security professional. I cannot personally ensure the security of this code, though it is surely more secure than nothing at all. I aim to pay for a real security audit. I welcome issues and PRs. Also, MacOS users only get `runc` plus the VM boundary—upstream issues need to be resolved before full-strength VMs are possible._
 
 ## FAQ
 
 ### Why not just use auto mode?
 
-Here are some things which `claude-guard` has and auto-mode doesn't:
+Here are just a few of the things things which `claude-guard` has and auto-mode doesn't:
 
-- **A sufficiently scary command has the monitor stop the AI immediately.** Auto mode tolerates [up to 20 hard-deny verdicts](https://www.anthropic.com/engineering/claude-code-auto-mode) before requiring human attention.
+- **A sufficiently scary command lets `claude-guard`'s monitor stop the AI immediately.** Auto mode tolerates [up to 20 hard-deny verdicts](https://www.anthropic.com/engineering/claude-code-auto-mode) before requiring human attention.
 - **The allowlist firewall makes it harder to proliferate on some remote server farm.** Before, bad-Claude could just fire off some experiments using one of your API tokens, have those experiments (on a remote server) make money and get their own tokens, then proliferate unwatched.
 - **Tamper-evident audit logs**. A smart misaligned AI would remove traces of its bad behavior.
+- **Protect your own system with a sandbox.** Claude can make hard-to-audit changes to unversioned parts of your filesystem, screwing up your computer with its high permissions and low accountability. A misaligned AI could subtly sabotage your work by making key files mysteriously disappear.
+- **Ephemeral state blocks cross-session staging.** A misaligned AI seeds a payload _outside_ your project — a poisoned shell init (`~/.bashrc`), a tampered `~/.claude` config, cached credentials, seeded history — to fire in a later, innocent-looking session that the monitor reviews fresh. The throwaway per-session volumes (`$HOME`, history, config, monitor state) are wiped on exit, so nothing staged there survives. (Files the agent writes into your project tree _do_ persist — that's your code on disk — so they're bounded by the firewall/audit/sandbox and show up in your VCS diff; treat agent-authored workspace changes as untrusted until reviewed. See [`SECURITY.md`](SECURITY.md).)
 
 ### Why not just the built-in sandbox?
 
@@ -33,16 +35,9 @@ Claude Code's built-in `sandbox` confines only Bash subprocesses with OS-level p
 
 ## Install
 
-### macOS — Homebrew (recommended)
+### Clone and set up (recommended)
 
-```bash
-brew trust --formula alexander-turner/tap/claude-guard && brew install alexander-turner/tap/claude-guard
-claude-guard setup
-```
-
-`brew install` only puts the wrapper on your `PATH` — finish with `claude-guard setup` (Homebrew's post-install can't run privileged setup itself).
-
-### Linux / from source
+Works on macOS and Linux, and tracks the latest fixes — the stack is iterating quickly, so a fresh clone is the most up-to-date way in.
 
 ```bash
 git clone https://github.com/alexander-turner/claude-guard.git \
@@ -51,7 +46,16 @@ cd ~/.local/share/claude-guard
 bash setup.bash
 ```
 
-`setup.bash` does the same as `claude-guard setup`, then runs `claude-guard doctor` to confirm you're protected.
+`setup.bash` does the same as `claude-guard setup`, then runs `claude-guard doctor` to confirm you're protected. To update later, `git pull` in that directory and re-run `bash setup.bash`.
+
+### macOS — Homebrew
+
+```bash
+brew trust --formula alexander-turner/tap/claude-guard && brew install alexander-turner/tap/claude-guard
+claude-guard setup
+```
+
+`brew install` only puts the wrapper on your `PATH` — finish with `claude-guard setup` (Homebrew's post-install can't run privileged setup itself). The tap follows tagged releases, which can lag the source repo while the stack is moving fast; for the newest fixes, prefer the clone-and-set-up path above.
 
 **Windows:** run everything inside [WSL2](https://learn.microsoft.com/windows/wsl/install). Native Windows (Git Bash / MSYS2 / Cygwin) can't host the Linux containers and sandbox runtime this stack depends on, so `setup.bash` detects those shells and exits with guidance instead of attempting a doomed install.
 
