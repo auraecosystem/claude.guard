@@ -39,8 +39,6 @@ bash setup.bash
 
 `setup.bash` runs the same install and configuration as `claude-guard setup`, prompting before each install and for `sudo` on system-level changes (or run non-interactively with `CLAUDE_GUARD_ASSUME_YES=1`). It finishes by running `claude-guard doctor` to confirm your setup is fully protected.[^add]
 
-On a **fresh Docker install on Linux**, your new `docker` group membership isn't active in the current shell yet — `setup.bash` handles this automatically, re-execing the remaining steps under the new group (via `sg`) so the install completes in one pass with no manual re-login. Only if that re-exec isn't possible does it fall back to asking you to run `newgrp docker` (or log out and back in) and re-run.
-
 **Windows:** run everything inside [WSL2](https://learn.microsoft.com/windows/wsl/install). Native Windows (Git Bash / MSYS2 / Cygwin) can't host the Linux containers and sandbox runtime this stack depends on, so `setup.bash` detects those shells and exits with guidance instead of attempting a doomed install.
 
 Claude Code itself is pinned to a verified, known-good version (`@anthropic-ai/claude-code` in `package.json`) that the guardrails are tested against; update it whenever you like by bumping that pin or setting `CLAUDE_CODE_VERSION`.
