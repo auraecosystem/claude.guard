@@ -34,10 +34,10 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Launcher status lines (`✓` success, `▸` info, `⚠` warning, `✗` error) now
-  color their whole message body, not just the leading glyph, so warnings and
-  errors — including the "Secrets found in workspace" notice — stand out from
-  neutral output. Plain text in no-color / non-TTY mode.
+- Launcher warning (`⚠`) and error (`✗`) lines now color their whole message
+  body, not just the leading glyph, so they — including the "Secrets found in
+  workspace" notice — stand out from neutral output. Success (`✓`) and info
+  (`▸`) lines still color only the glyph. Plain text in no-color / non-TTY mode.
 - macOS setup no longer asks to install bash when a modern one (brew's
   `bash` ≥ 5) is already present — it re-execs straight into it. Previously a
   repeat `claude-guard setup` prompted "install via brew?" only for brew to
