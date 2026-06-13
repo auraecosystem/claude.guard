@@ -1,7 +1,7 @@
 #!/bin/bash
 # Shared helpers for Claude Code hook scripts.
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+PROJECT_DIR="$CLAUDE_PROJECT_DIR"
 cd "$PROJECT_DIR" || exit 1
 
 exists() { command -v "$1" &>/dev/null; }
