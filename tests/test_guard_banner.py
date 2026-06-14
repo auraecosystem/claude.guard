@@ -7,6 +7,7 @@ parser instead, leaving the animation to manual use.
 
 import importlib.util
 import math
+import os
 import sys
 import types
 from importlib.machinery import SourceFileLoader
@@ -18,6 +19,11 @@ from rich.console import Group
 
 def _fake_console(is_terminal: bool, width: int = 100):
     return types.SimpleNamespace(is_terminal=is_terminal, width=width)
+
+
+def io_stub(is_tty: bool, fileno: int = 0):
+    """A stand-in for sys.stdin exposing just isatty()/fileno()."""
+    return types.SimpleNamespace(isatty=lambda: is_tty, fileno=lambda: fileno)
 
 
 SRC = Path(__file__).resolve().parent.parent / "bin" / "claude-guard-banner"
@@ -203,6 +209,53 @@ def test_on_sigwinch_sets_resize_flag():
     banner._resize_requested = False
     banner._on_sigwinch(banner.signal.SIGWINCH, None)
     assert banner._resize_requested is True
+
+
+def test_erase_below_writes_erase_to_end_of_screen():
+    import io
+
+    file = io.StringIO()
+    console = types.SimpleNamespace(file=file)
+    banner._erase_below(console)
+    # CSI J with no parameter = erase from cursor to end of display; crucially NOT
+    # CSI 2J (whole screen), which would blank the launch log above the banner.
+    assert file.getvalue() == "\x1b[J"
+
+
+def test_quiet_input_is_noop_without_a_tty():
+    # No fd (stdin not a terminal): the context manager must do nothing and not raise.
+    with banner._quiet_input(None):
+        pass
+
+
+def test_quiet_input_disables_then_restores_echo():
+    import pty
+
+    primary, replica = pty.openpty()
+    try:
+        before = banner.termios.tcgetattr(replica)
+        # Echo + canonical mode are on for a fresh pty.
+        assert before[3] & banner.termios.ECHO
+        assert before[3] & banner.termios.ICANON
+        with banner._quiet_input(replica):
+            during = banner.termios.tcgetattr(replica)
+            assert not (during[3] & banner.termios.ECHO)
+            assert not (during[3] & banner.termios.ICANON)
+        # Original lflags restored verbatim on exit.
+        assert banner.termios.tcgetattr(replica)[3] == before[3]
+    finally:
+        os.close(primary)
+        os.close(replica)
+
+
+def test_stdin_tty_fd_none_when_not_a_terminal(monkeypatch):
+    monkeypatch.setattr(banner.sys, "stdin", io_stub(is_tty=False))
+    assert banner._stdin_tty_fd() is None
+
+
+def test_stdin_tty_fd_returns_fileno_for_a_terminal(monkeypatch):
+    monkeypatch.setattr(banner.sys, "stdin", io_stub(is_tty=True, fileno=7))
+    assert banner._stdin_tty_fd() == 7
 
 
 def test_freeze_on_sigterm_sets_flag_and_raises():

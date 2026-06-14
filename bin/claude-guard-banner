@@ -2,7 +2,9 @@
 """Render the CLAUDE GUARD loading banner.
 
 Art comes from pyfiglet; all color and the pulsing animation are driven by
-rich (Live + Style), so this script never emits raw ANSI escape codes itself.
+rich (Live + Style), so no color or layout is hand-rolled in ANSI. The one
+exception is a single erase-to-end-of-screen on resize (rich exposes no control
+code for it) — see _erase_below.
 
 Modes:
   pulse   (default) breathing red, ideal as a loading splash; Ctrl-C to stop
@@ -17,6 +19,7 @@ import math
 import os
 import signal
 import sys
+import termios
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -197,13 +200,17 @@ def pulse(
     (on the launcher's SIGTERM) so the masthead stays frozen, or nothing (on a
     Ctrl-C/SIGINT abort).
 
-    On terminal resize (SIGWINCH): the Live context exits (transient erases the
-    current animation), the visible screen is cleared so reflow residue can't
-    persist, and the outer loop re-enters Live with art sized for the new width.
+    Terminal resize (SIGWINCH) reflows the previous frame's lines, which desyncs
+    rich's redraw and leaves stacked ghost copies. On resize the Live context is
+    torn down (transient clears what rich tracked) and _erase_below scrubs the
+    reflowed remnants from the region top down — preserving the launch log above,
+    unlike a full-screen clear — then the loop re-enters Live with art sized for the
+    new width. Echo is suppressed throughout so a stray Enter can't scroll the
+    region and produce the same ghosting.
 
     This is the untestable I/O driver: an unbounded Live loop on a real
     terminal. The per-frame rendering it delegates to lives in _PulseBanner
-    and pulse_frame, which the suite covers directly.
+    and pulse_frame, and the resize/echo helpers are covered directly.
     """
     global _resize_requested
     signal.signal(signal.SIGWINCH, _on_sigwinch)
@@ -213,19 +220,20 @@ def pulse(
     # animation, instead of orphaning an immortal splash over the error output.
     parent = os.getppid()
     renderable = _PulseBanner(time.monotonic(), period, os.environ.get(PROGRESS_ENV))
-    while os.getppid() == parent:
-        _resize_requested = False
-        with Live(
-            renderable,
-            console=console,
-            refresh_per_second=fps,
-            screen=False,
-            transient=True,
-        ):
-            while os.getppid() == parent and not _resize_requested:
-                time.sleep(1 / fps)
-        if _resize_requested:
-            console.clear()
+    with _quiet_input(_stdin_tty_fd()):
+        while os.getppid() == parent:
+            _resize_requested = False
+            with Live(
+                renderable,
+                console=console,
+                refresh_per_second=fps,
+                screen=False,
+                transient=True,
+            ):
+                while os.getppid() == parent and not _resize_requested:
+                    time.sleep(1 / fps)
+            if _resize_requested:
+                _erase_below(console)
 
 
 def _hue_to_rgb(hue: float) -> Color:
@@ -260,6 +268,47 @@ def _on_sigwinch(signum: int, frame: object) -> None:
     """Record a terminal resize so pulse() can clear reflow residue before re-rendering."""
     global _resize_requested
     _resize_requested = True
+
+
+def _stdin_tty_fd() -> int | None:
+    """The file descriptor of the controlling terminal's input, or None when stdin
+    is not a terminal (piped/redirected) — in which case there are no keystrokes to
+    echo, so the echo-suppression below is a no-op."""
+    with contextlib.suppress(OSError, ValueError):
+        if sys.stdin.isatty():
+            return sys.stdin.fileno()
+    return None
+
+
+@contextlib.contextmanager
+def _quiet_input(fd: int | None) -> Iterator[None]:
+    """Suppress terminal echo and line buffering on `fd` for the duration of the
+    block, restoring the original settings on exit. While the splash animates the
+    cursor is parked at the top of rich's live region; a stray keystroke (most often
+    Enter) would otherwise echo a newline there, scroll the region, and desync rich's
+    redraw — leaving ghost copies of the banner. No-op when `fd` is None."""
+    if fd is None:
+        yield
+        return
+    saved = termios.tcgetattr(fd)
+    quiet = termios.tcgetattr(fd)
+    quiet[3] &= ~(termios.ECHO | termios.ICANON)  # lflags: drop echo + canonical mode
+    termios.tcsetattr(fd, termios.TCSADRAIN, quiet)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _erase_below(console: Console) -> None:
+    """Erase from the cursor to the end of the screen, leaving everything above it
+    intact. After a resize tears down and rebuilds the live region, rich's transient
+    teardown leaves the cursor at the region's top, so erasing downward scrubs the
+    reflowed remnants of the pre-resize frame without the full-screen wipe (and
+    surrounding-output loss) that console.clear() would cause. rich has no control
+    code for erase-to-end-of-display, so this writes the single CSI sequence."""
+    console.file.write("\x1b[J")
+    console.file.flush()
 
 
 def _print_framed(console: Console, art: Text) -> None:
