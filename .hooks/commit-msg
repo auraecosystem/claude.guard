@@ -17,10 +17,11 @@ fi
 # still get conventional-commit enforcement.
 config="config/javascript/commitlint.config.js"
 if [ -f "$git_root/node_modules/.bin/commitlint" ]; then
-  # Run the installed binary directly; `pnpm exec`/`npx` would trigger a package
-  # manager pre-run check that crashes on a read-only pnpm store even though the
-  # tool is already installed.
-  "$git_root/node_modules/.bin/commitlint" --edit "$1" --config "$config"
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm exec commitlint --edit "$1" --config "$config"
+  else
+    npx commitlint --edit "$1" --config "$config"
+  fi
 elif command -v pnpm >/dev/null 2>&1; then
   pnpm dlx --package=@commitlint/cli --package=@commitlint/config-conventional \
     commitlint --edit "$1" --config "$config"

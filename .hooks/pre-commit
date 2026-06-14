@@ -20,13 +20,14 @@ if [ ! -f "$git_root/node_modules/.bin/lint-staged" ]; then
   exit 1
 fi
 
-# Run the locally installed lint-staged binary directly. Going through a package
-# manager (`pnpm exec`/`npx`) triggers its pre-run dependency/store checks, which
-# crash on a read-only pnpm store (prebuilt-image sessions) even though the tool
-# is already installed. lint-staged prepends node_modules/.bin to PATH for the
-# linters it spawns, so no package manager is needed; the check above guarantees
-# the binary exists.
-"$git_root/node_modules/.bin/lint-staged" --allow-empty
+# Run lint-staged (via pnpm or npm)
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm exec lint-staged --allow-empty
+elif command -v npm >/dev/null 2>&1; then
+  npx lint-staged --allow-empty
+else
+  echo "Warning: Neither pnpm nor npm found. Skipping lint-staged." >&2
+fi
 
 # Run pre-commit framework hooks if available (shellcheck, yaml/json checks, etc.)
 # Auto-fixers (shfmt -w, ruff format, trailing-whitespace, end-of-file-fixer) exit
