@@ -522,6 +522,16 @@ for _prereq in "${_prereqs[@]}"; do
     warn "$_prereq not found and not installed — later steps that need it will fail."
 done
 
+# python3 backs claude-guard-doctor and the launcher's redaction/secret-scan
+# helpers (redact-debug-stream.py, secret-ignore.py). A minimal host can lack it;
+# install it now rather than letting a later launch or `claude-guard doctor` die
+# with a bare `env: python3: not found`. Its package name varies, so it is not in
+# the uniform-name loop above.
+command_exists python3 ||
+  offer_install Python python3 "$(python_pkg_name)" ||
+  command_exists python3 ||
+  warn "python3 not found and not installed — claude-guard doctor and the launcher's redaction helpers need it."
+
 # ── Global config ──────────────────────────────────────────────────────────
 status "Merging security defaults into /etc/claude-code/managed-settings.json..."
 
@@ -836,12 +846,13 @@ elif [[ -t 0 ]] && [[ "${CLAUDE_GUARD_ASSUME_YES:-}" != 1 ]]; then
   status "Push notifications not configured for monitor ASK alerts."
   echo "   ntfy.sh is a free service that sends push alerts to your phone — here,"
   echo "   so you can approve or deny when the safety monitor pauses on a risky action."
-  # -t 30 so an unattended install never hangs here. `read` returns non-zero on
-  # the timeout (or EOF), so gate on its exit status: a timeout skips, while a
+  # This prompt only runs at an interactive TTY (the `-t 0` guard above), so it
+  # waits for the human rather than timing out. `read` returns non-zero only on
+  # EOF (Ctrl-D / closed stdin) — gate on its exit status so that skips, while a
   # user who presses Enter exits 0 with an empty $choice and gets the default
   # (Y → set up now). Keying the skip off an empty $choice instead would launch
-  # the interactive setup on timeout — the opposite of "never hang".
-  if read -t 30 -rp "   Set up ntfy.sh now? (Y/n) " choice; then
+  # the interactive setup on EOF — the opposite of a skip.
+  if read -rp "   Set up ntfy.sh now? (Y/n) " choice; then
     case "$choice" in
     n | N) status "Skipped. Run 'bash $SCRIPT_DIR/bin/setup-ntfy.bash' later." ;;
     *) bash "$SCRIPT_DIR/bin/setup-ntfy.bash" ;;
@@ -1201,7 +1212,7 @@ ensure_man_page() {
 # when a sandbox runtime is actually registered (no point building an image we
 # can't launch) and Docker is reachable. Best-effort: never abort setup on it.
 # Opt out with CLAUDE_GUARD_NO_PREWARM=1.
-if "$sandbox_ok" && command_exists docker && docker info >/dev/null 2>&1; then
+if "$sandbox_ok" && command_exists docker && docker_info_bounded >/dev/null 2>&1; then
   _do_prewarm=true
   if [[ "${CLAUDE_GUARD_NO_PREWARM:-}" != "1" ]] &&
     [[ "${CLAUDE_GUARD_ASSUME_YES:-}" != "1" ]] &&
@@ -1212,7 +1223,7 @@ if "$sandbox_ok" && command_exists docker && docker info >/dev/null 2>&1; then
     # engine (e.g. OrbStack) the Docker root dir doesn't exist on the host, so df
     # is skipped rather than printing a misleading host number.
     _free_gb=""
-    _docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" || _docker_root=""
+    _docker_root="$(docker_info_bounded --format '{{.DockerRootDir}}' 2>/dev/null)" || _docker_root=""
     if [[ -n "$_docker_root" && -d "$_docker_root" ]]; then
       _avail_kb="$(df -Pk "$_docker_root" 2>/dev/null | awk 'NR==2{print $4}')" || _avail_kb=""
       [[ "$_avail_kb" =~ ^[0-9]+$ ]] && _free_gb="$((_avail_kb / 1048576))"
