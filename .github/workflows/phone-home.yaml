@@ -50,12 +50,9 @@ jobs:
         if: steps.extract.outputs.has_lessons == 'true'
         env:
           GH_TOKEN: ${{ secrets.TEMPLATE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
-<<<<<<< local
-=======
           PR_TITLE: ${{ steps.extract.outputs.pr_title }}
           PR_URL: ${{ steps.extract.outputs.pr_url }}
           SOURCE_REPO: ${{ steps.extract.outputs.source_repo }}
->>>>>>> template
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ env.GH_TOKEN }}

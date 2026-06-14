@@ -196,8 +196,13 @@ adhere to [Semantic Versioning](https://semver.org/).
   fell back to a shared, world-writable `/tmp/claude-guard`; it now uses
   `/tmp/claude-guard-<uid>` created `0700`, so a co-tenant on a multi-user host
   can't read or pre-seed another user's allocation state.
-
-### Security
+- Every `PreToolUse` hook is now invoked through `safe-launch.sh`, so a syntax
+  error in a hook (for example an unresolved merge conflict marker) can no longer
+  silently block the session: the launcher degrades open — self-repair edits under
+  `.claude/hooks`/`.hooks` are allowed, every other tool call asks for
+  confirmation. `safe-launch.sh` now syntax-checks Node hooks (`node --check`) as
+  well as bash, so the JavaScript hooks are protected too.
+- Reading `.env`, `.env.*`, `*.pem`, and `*.key` files is now denied by default.
 
 - On a fresh install whose interactive shell is bash, setup now ensures a login
   profile (`~/.bash_profile`) sources `~/.bashrc`, so the `~/.local/bin` entry it

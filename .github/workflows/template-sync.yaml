@@ -53,7 +53,12 @@ env:
   # exclude the template's equivalents here to avoid duplicate CI jobs.
   # Common candidates: .github/workflows/js.yaml,
   # .github/workflows/format-check.yaml
-  EXCLUDE_PATHS: ".claude/skills/conventional-commits .claude/skills/markdown-block .claude/skills/update-pr"
+  # The .github/workflows/* and run-hook-lifecycle.sh entries are template CI
+  # this repo already covers with its own workflows (js.yaml, format-check.yaml,
+  # validate-config.yaml, actionlint.yaml) or deliberately omits (a CI pre-commit
+  # job duplicates the local hooks); excluding them keeps the sync from
+  # re-adding duplicate or unwanted CI.
+  EXCLUDE_PATHS: ".claude/skills/conventional-commits .claude/skills/markdown-block .claude/skills/update-pr .github/workflows/claude.yaml .github/workflows/dependabot-auto-merge.yaml .github/workflows/hook-lifecycle.yaml .github/workflows/lint.yaml .github/workflows/node-tests.yaml .github/workflows/pre-commit.yaml .github/workflows/zizmor.yaml .github/scripts/run-hook-lifecycle.sh"
 
 permissions:
   contents: write
@@ -64,23 +69,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout child repository
-<<<<<<< local
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-=======
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
->>>>>>> template
         with:
           persist-credentials: false
           fetch-depth: 0
           filter: blob:none
-          persist-credentials: false
 
       - name: Checkout template repository
-<<<<<<< local
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-=======
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
->>>>>>> template
         with:
           persist-credentials: false
           repository: ${{ env.TEMPLATE_REPO }}
@@ -88,7 +84,6 @@ jobs:
           token: ${{ secrets.TEMPLATE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
           filter: blob:none
-          persist-credentials: false
 
       - name: Check token workflow scope
         env:

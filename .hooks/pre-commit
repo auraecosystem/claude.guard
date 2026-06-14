@@ -1,10 +1,5 @@
 #!/bin/bash
-<<<<<<< local
 # Pre-commit hook: lint-staged + pre-commit framework
-=======
-# Pre-commit hook: Format and lint staged files via lint-staged.
-# Skips gracefully when lint-staged is not installed (non-Node projects).
->>>>>>> template
 
 set -euo pipefail
 

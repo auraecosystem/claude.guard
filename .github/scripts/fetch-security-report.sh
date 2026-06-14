@@ -94,25 +94,6 @@ fi
 
 cat "$REPORT_PATH"
 
-<<<<<<< local
-# The report body comes from semi-untrusted sources (advisory text, rule
-# descriptions, Socket bot comments, pnpm-audit output). A fixed sentinel could
-# be reproduced by that content to break out and inject vars into $GITHUB_ENV,
-# so use a random-suffixed one — as in template-sync.sh / list-dependabot-prs.sh.
-if [ -r /proc/sys/kernel/random/uuid ]; then
-  sentinel="REPORT_EOF_$(cat /proc/sys/kernel/random/uuid)"
-elif command -v uuidgen >/dev/null 2>&1; then
-  sentinel="REPORT_EOF_$(uuidgen)"
-else
-  sentinel="REPORT_EOF_$$_${RANDOM}_${RANDOM}"
-fi
-
-{
-  echo "SECURITY_REPORT<<${sentinel}"
-  head -c 50000 "$REPORT_PATH"
-  echo ""
-  echo "$sentinel"
-=======
 # Use a random sentinel to prevent delimiter injection — report content comes
 # from external sources (advisory descriptions, bot comments) that an attacker
 # could craft to contain a static sentinel and inject arbitrary env vars.
@@ -131,6 +112,5 @@ fi
   echo "SECURITY_REPORT<<${report_sentinel}"
   head -c 50000 "$REPORT_PATH"
   echo ""
-  echo "${report_sentinel}"
->>>>>>> template
+  echo "$report_sentinel"
 } >>"$GITHUB_ENV"

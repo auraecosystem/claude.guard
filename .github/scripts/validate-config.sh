@@ -43,20 +43,12 @@ fi
 echo "Checking hook script permissions and syntax..."
 for f in .hooks/* .claude/hooks/*; do
   [ -f "$f" ] || continue
-<<<<<<< local
-  case "$f" in *.test.* | *.py | *.mjs | *.json) continue ;; esac
-  if [ ! -x "$f" ]; then
-    error "$f is not executable"
-  fi
-  if ! bash_err=$(bash -n "$f" 2>&1); then
-    error "$f has a bash syntax error: $bash_err"
-=======
+  case "$f" in *.test.* | *.mjs | *.json) continue ;; esac
   has_shebang=0
   IFS= read -r first_line <"$f" || true
   case "$first_line" in '#!'*) has_shebang=1 ;; esac
   if [ "$has_shebang" = "1" ] && [ ! -x "$f" ]; then
     error "$f has a shebang but is not executable"
->>>>>>> template
   fi
   case "$f" in
   *.py)
@@ -83,7 +75,7 @@ if [ -f .claude/settings.json ]; then
     pretooluse_cmds=""
   fi
   while IFS= read -r cmd; do
-    [ -z "$cmd" ] && continue
+    [ "$cmd" = "" ] && continue
     read -ra tokens <<<"$cmd"
     case "${tokens[0]}" in
     */safe-launch.sh | safe-launch.sh) ;;

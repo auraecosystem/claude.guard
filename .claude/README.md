@@ -92,10 +92,7 @@ Create new skill directories in `.claude/skills/` following the pattern in `pr-c
 
 ### Customizing Hooks
 
-<<<<<<< local
 Modify `.claude/settings.json` to add more hooks. See the [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-code) for available hook types.
-=======
-Modify `settings.json` to add more hooks. See the [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-code) for available hook types.
 
 **Always wrap PreToolUse hooks with `safe-launch.sh`.** A PreToolUse hook that fails to parse (e.g. unresolved merge conflict markers) exits non-zero, which Claude Code treats as a block—locking the session out of repairing the very file that’s broken. `safe-launch.sh` detects the parse failure and degrades open: edits under `.claude/hooks/` and `.hooks/` are allowed for self-repair; all other tools get `permissionDecision: "ask"`.
 
@@ -107,4 +104,3 @@ Modify `settings.json` to add more hooks. See the [Claude Code documentation](h
 ```
 
 Any script under `.claude/hooks/` or `.hooks/` is also syntax-checked at session start by `session-setup.sh`—broken hooks surface as loud warnings before they can block the first tool call.
->>>>>>> template

@@ -10,7 +10,7 @@
 # Behavior:
 #   * Fast path — if <hook-script> parses cleanly, exec it. The PreToolUse
 #     stdin payload is forwarded transparently.
-#   * Degraded path — if <hook-script> fails `bash -n`, fall back to a
+#   * Degraded path — if <hook-script> fails to parse, fall back to a
 #     fail-safe policy instead of exiting non-zero (which Claude Code would
 #     treat as a tool block):
 #       - Edit/Write/MultiEdit/NotebookEdit targeting .claude/hooks/ or
@@ -26,21 +26,31 @@ set -uo pipefail
 target="${1:-}"
 shift || true
 
-if [ -z "$target" ] || [ ! -f "$target" ]; then
+if [ "$target" = "" ] || [ ! -f "$target" ]; then
   echo "safe-launch: missing target hook: $target" >&2
   exit 1
 fi
 
+# Pick the syntax checker for the hook's language: node hooks (.mjs/.cjs/.js)
+# are parsed with `node --check`, everything else with `bash -n`. Both kinds of
+# target carry a shebang and are executable, so the fast path execs them
+# directly regardless of language. If the checker's interpreter is missing, the
+# check fails and we degrade open — the hook couldn't have run anyway.
+case "$target" in
+*.mjs | *.cjs | *.js) syntax_check=(node --check) ;;
+*) syntax_check=(bash -n) ;;
+esac
+
 # Fast path: target parses — run it as-is. The PreToolUse stdin payload is
 # inherited automatically because we exec into the target.
-if bash -n "$target" 2>/dev/null; then
+if "${syntax_check[@]}" "$target" 2>/dev/null; then
   exec "$target" "$@"
 fi
 
 # Degraded path. Read the PreToolUse payload before we touch stdin again.
-parse_error=$(bash -n "$target" 2>&1)
+parse_error=$("${syntax_check[@]}" "$target" 2>&1)
 echo "safe-launch: target hook failed to parse — degrading open: $target" >&2
-[ -n "$parse_error" ] && echo "$parse_error" >&2
+[ "$parse_error" != "" ] && echo "$parse_error" >&2
 
 # Cap the read at 10 MiB so a pathological payload can't OOM the degraded path.
 # (No timeout: stdin is the in-flight PreToolUse payload, already fully buffered
@@ -62,10 +72,10 @@ fi
 # caller falls through to the "ask" default.
 is_under() {
   local candidate="$1" parent="$2" parent_dir resolved
-  [ -n "$candidate" ] && [ -n "$parent" ] || return 1
+  [ "$candidate" != "" ] && [ "$parent" != "" ] || return 1
   case "$candidate" in *..*) return 1 ;; esac
   parent_dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
-  [ -n "$parent_dir" ] || return 1
+  [ "$parent_dir" != "" ] || return 1
   resolved="$parent_dir/$(basename "$candidate")"
   case "$resolved" in
   "$parent"/*) return 0 ;;
