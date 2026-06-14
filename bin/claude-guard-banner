@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Render the CLAUDE GUARD loading banner.
 
-Art comes from pyfiglet; all color and the pulsing animation are driven by
-rich (Live + Style), so no color or layout is hand-rolled in ANSI. The one
-exception is a single erase-to-end-of-screen on resize (rich exposes no control
-code for it) — see _erase_below.
+Art comes from pyfiglet; all color and layout are driven by rich (Style + the
+capture renderer), so no color or wrapping is hand-rolled in ANSI. The pulse
+loop additionally drives two cursor primitives rich does not expose — erase-to-
+end-of-screen and relative cursor movement — to redraw the splash in place
+without leaving ghosts on resize (see pulse()).
 
 Modes:
   pulse   (default) breathing red, ideal as a loading splash; Ctrl-C to stop
@@ -33,8 +34,7 @@ sys.path[:0] = [str(p) for p in _VENV_LIB.glob("python*/site-packages")]
 
 from pyfiglet import figlet_format  # noqa: E402  (after the venv bootstrap above)
 from rich.color import Color  # noqa: E402
-from rich.console import Console, ConsoleOptions, Group  # noqa: E402
-from rich.live import Live  # noqa: E402
+from rich.console import Console, Group  # noqa: E402
 from rich.style import Style  # noqa: E402
 from rich.text import Text  # noqa: E402
 
@@ -51,14 +51,16 @@ PROGRESS_ENV = "CLAUDE_GUARD_PULL_PROGRESS_FILE"
 BAR_FILLED = "█"  # full block
 BAR_EMPTY = "░"  # light shade
 
+# Cursor control for the in-place pulse loop (see pulse()). rich drives all color
+# and layout; these are the two primitives it doesn't expose — erase-to-end-of-
+# screen and relative cursor movement — needed to redraw the splash without ghosts.
+_CSI = "\x1b["
+_ERASE_BELOW = f"{_CSI}J"  # erase from the cursor to the end of the screen (ED 0)
+
 # Set by the SIGTERM handler so main() knows to freeze a solid banner in place
 # after the (transient) pulse animation exits. A plain Ctrl-C (SIGINT) leaves it
 # False, so an aborted launch clears the splash and leaves nothing behind.
 _freeze_requested = False
-
-# Set by the SIGWINCH handler so pulse()'s inner loop exits cleanly on resize,
-# letting the outer loop clear the visible screen before re-entering Live.
-_resize_requested = False
 
 
 def _figlet_rows(text: str) -> list[str]:
@@ -163,29 +165,31 @@ def pulse_group(banner: Text, fraction: float | None) -> Text | Group:
     return Group(banner, Text(), progress_renderable(fraction))
 
 
-class _PulseBanner:
-    """Rich renderable for the breathing pulse animation.
+def pulse_renderable(
+    console: Console, start: float, period: float, progress_path: str | None
+) -> tuple[str, int]:
+    """The current pulse frame rendered to a color (ANSI) string sized to the live
+    terminal width, plus its height in rows. Re-measuring the width every call is
+    what lets the loop reflow the art when the terminal is resized."""
+    width = console.size.width
+    art = "\n".join(banner_lines(width))
+    elapsed = time.monotonic() - start
+    frame = pulse_group(
+        pulse_frame(art, elapsed, period), read_pull_progress(progress_path)
+    )
+    with console.capture() as capture:
+        console.print(frame, end="", soft_wrap=True, crop=False)
+    # A Group (masthead + progress bar) renders a trailing newline; drop it so the
+    # cursor ends on the last content row, keeping the region height exact and never
+    # scrolling the screen when the splash sits at the very bottom.
+    rendered = capture.get().removesuffix("\n")
+    return rendered, rendered.count("\n") + 1
 
-    Computes banner art from ``options.max_width`` on every render call.
-    Rich invokes ``__rich_console__`` both on our explicit refreshes and on its
-    own SIGWINCH-triggered refresh, so the art is always sized for the live
-    terminal width — no stale frames accumulate in the scrollback on resize.
-    """
 
-    def __init__(self, start: float, period: float, progress_path: str | None) -> None:
-        self._start = start
-        self._period = period
-        self._progress_path = progress_path
-
-    def __rich_console__(
-        self, console: Console, options: ConsoleOptions
-    ) -> Iterator[Text | Group]:
-        art = "\n".join(banner_lines(options.max_width))
-        elapsed = time.monotonic() - self._start
-        yield pulse_group(
-            pulse_frame(art, elapsed, self._period),
-            read_pull_progress(self._progress_path),
-        )
+def _cursor_to_region_top(rows: int) -> str:
+    """Control string moving the cursor from the end of a just-drawn `rows`-tall
+    region back to its top-left, so the next frame's erase starts from there."""
+    return "\r" if rows <= 1 else f"\r{_CSI}{rows - 1}A"
 
 
 def pulse(
@@ -193,46 +197,43 @@ def pulse(
 ) -> None:  # pragma: no cover
     """Animate the banner as a breathing red until interrupted.
 
-    Renders on the *normal* screen (screen=False), not the alternate buffer: an
-    alt-screen splash is wiped the instant the Live context exits and shows
-    nothing in terminals/multiplexers that don't switch buffers. transient=True
-    clears the animation in place on stop; main() then reprints a solid banner
-    (on the launcher's SIGTERM) so the masthead stays frozen, or nothing (on a
-    Ctrl-C/SIGINT abort).
+    Renders in place on the normal screen (not the alternate buffer, which would
+    hide the surrounding launch log). rich's Live can neither anchor the cursor nor
+    erase-to-end-of-display, so the loop drives the cursor directly: between frames
+    the cursor is parked at the region's top-left, and each frame begins with an
+    erase-to-end-of-screen (_ERASE_BELOW). Because that erase clears everything below
+    the cursor, it removes the previous frame whether or not a resize reflowed it
+    into more rows — the failure mode that made rich's line-counted erase leave
+    stacked ghosts. Echo is suppressed (see _quiet_input) so a stray Enter can't
+    scroll the region and reintroduce the same ghosting. On exit the splash is erased
+    in place; main() then reprints a solid banner (on the launcher's SIGTERM freeze)
+    or leaves nothing (on a Ctrl-C/SIGINT abort).
 
-    Terminal resize (SIGWINCH) reflows the previous frame's lines, which desyncs
-    rich's redraw and leaves stacked ghost copies. On resize the Live context is
-    torn down (transient clears what rich tracked) and _erase_below scrubs the
-    reflowed remnants from the region top down — preserving the launch log above,
-    unlike a full-screen clear — then the loop re-enters Live with art sized for the
-    new width. Echo is suppressed throughout so a stray Enter can't scroll the
-    region and produce the same ghosting.
-
-    This is the untestable I/O driver: an unbounded Live loop on a real
-    terminal. The per-frame rendering it delegates to lives in _PulseBanner
-    and pulse_frame, and the resize/echo helpers are covered directly.
+    This is the untestable I/O driver: an unbounded redraw loop on a real terminal.
+    Frame rendering lives in pulse_renderable / pulse_frame and the cursor/echo
+    helpers, all covered directly.
     """
-    global _resize_requested
-    signal.signal(signal.SIGWINCH, _on_sigwinch)
     # Capture the launcher's PID so the splash self-reaps if the launcher exits
     # WITHOUT sending its SIGTERM stop — e.g. a runtime gate aborts the launch
-    # mid-load. getppid() then changes and the loop ends, clearing the transient
-    # animation, instead of orphaning an immortal splash over the error output.
+    # mid-load. getppid() then changes and the loop ends, clearing the splash,
+    # instead of orphaning an immortal animation over the error output.
     parent = os.getppid()
-    renderable = _PulseBanner(time.monotonic(), period, os.environ.get(PROGRESS_ENV))
-    with _quiet_input(_stdin_tty_fd()):
-        while os.getppid() == parent:
-            _resize_requested = False
-            with Live(
-                renderable,
-                console=console,
-                refresh_per_second=fps,
-                screen=False,
-                transient=True,
-            ):
-                while os.getppid() == parent and not _resize_requested:
-                    time.sleep(1 / fps)
-            if _resize_requested:
+    start = time.monotonic()
+    progress_path = os.environ.get(PROGRESS_ENV)
+    out = console.file
+    drawn = False
+    with _quiet_input(_stdin_tty_fd()), _hidden_cursor(console):
+        try:
+            while os.getppid() == parent:
+                rendered, rows = pulse_renderable(console, start, period, progress_path)
+                out.write(_ERASE_BELOW + rendered + _cursor_to_region_top(rows))
+                out.flush()
+                drawn = True
+                time.sleep(1 / fps)
+        finally:
+            # Cursor is parked at the region top, so this erases the splash in place
+            # (transient) without disturbing the launch log above it.
+            if drawn:
                 _erase_below(console)
 
 
@@ -264,12 +265,6 @@ def _freeze_on_sigterm(signum: int, frame: object) -> None:
     raise KeyboardInterrupt
 
 
-def _on_sigwinch(signum: int, frame: object) -> None:
-    """Record a terminal resize so pulse() can clear reflow residue before re-rendering."""
-    global _resize_requested
-    _resize_requested = True
-
-
 def _stdin_tty_fd() -> int | None:
     """The file descriptor of the controlling terminal's input, or None when stdin
     is not a terminal (piped/redirected) — in which case there are no keystrokes to
@@ -284,9 +279,10 @@ def _stdin_tty_fd() -> int | None:
 def _quiet_input(fd: int | None) -> Iterator[None]:
     """Suppress terminal echo and line buffering on `fd` for the duration of the
     block, restoring the original settings on exit. While the splash animates the
-    cursor is parked at the top of rich's live region; a stray keystroke (most often
-    Enter) would otherwise echo a newline there, scroll the region, and desync rich's
-    redraw — leaving ghost copies of the banner. No-op when `fd` is None."""
+    cursor is parked at the top of the redraw region; a stray keystroke (most often
+    Enter) would otherwise echo a newline there, scroll the region, and desync the
+    redraw — leaving ghost copies of the banner. ISIG is left set so Ctrl-C still
+    interrupts. No-op when `fd` is None (stdin is not a terminal)."""
     if fd is None:
         yield
         return
@@ -300,14 +296,25 @@ def _quiet_input(fd: int | None) -> Iterator[None]:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
+@contextlib.contextmanager
+def _hidden_cursor(console: Console) -> Iterator[None]:
+    """Hide the terminal cursor while the splash animates, restoring it on exit so a
+    crash or abort never leaves the user without a cursor."""
+    console.show_cursor(False)
+    try:
+        yield
+    finally:
+        console.show_cursor(True)
+
+
 def _erase_below(console: Console) -> None:
     """Erase from the cursor to the end of the screen, leaving everything above it
-    intact. After a resize tears down and rebuilds the live region, rich's transient
-    teardown leaves the cursor at the region's top, so erasing downward scrubs the
-    reflowed remnants of the pre-resize frame without the full-screen wipe (and
-    surrounding-output loss) that console.clear() would cause. rich has no control
-    code for erase-to-end-of-display, so this writes the single CSI sequence."""
-    console.file.write("\x1b[J")
+    intact. The pulse loop parks the cursor at the redraw region's top between frames,
+    so erasing downward scrubs the previous frame — even one a resize reflowed into
+    extra rows — without the full-screen wipe (and surrounding-output loss) that
+    console.clear() would cause. rich exposes no erase-to-end-of-display control, so
+    this writes the single CSI sequence directly."""
+    console.file.write(_ERASE_BELOW)
     console.file.flush()
 
 
