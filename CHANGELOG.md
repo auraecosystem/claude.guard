@@ -74,6 +74,12 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The Docker-daemon reachability probes no longer hang on a wedged-but-present
+  daemon (socket open, never answers): `setup.bash`'s prewarm gate and the
+  launcher's daemon/runtime poll loops now wrap every `docker info` in a
+  wall-clock bound, so a hung daemon fails fast (and setup/launch falls through)
+  instead of blocking forever on the first probe. Tune with
+  `CLAUDE_GUARD_DOCKER_PROBE_TIMEOUT` (default 10s).
 - The status line now shows the monitor's running spend (`mon $spent/$cap`) in
   the default sandboxed mode, not only in host mode. The per-session total was
   written to the monitor process's isolated filesystem, so the app container that
