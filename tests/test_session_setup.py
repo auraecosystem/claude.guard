@@ -382,9 +382,10 @@ _GH_STUB_INSTALLATION_TOKEN = (
 )
 
 
-def _global_email(home: Path) -> str:
+def _global_cfg(home: Path, key: str) -> str:
+    """Read a key from the global git config under the given HOME."""
     return subprocess.run(
-        ["git", "config", "--global", "user.email"],
+        ["git", "config", "--global", key],
         env={**os.environ, "HOME": str(home)},
         capture_output=True,
         text=True,
@@ -418,17 +419,10 @@ def test_installation_token_falls_back_to_bot_identity(
     env.pop("GH_REPO", None)
     r = run_capture(["bash", str(SESSION_SETUP)], cwd=repo, env=env)
     assert r.returncode == 0, f"stderr: {r.stderr}"
-
-    def _g(key: str) -> str:
-        return subprocess.run(
-            ["git", "config", "--global", key],
-            env={**os.environ, "HOME": str(home)},
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
-    assert _g("user.name") == "claude-guard[bot]"
-    assert _g("user.email") == "claude-guard[bot]@users.noreply.github.com"
+    assert _global_cfg(home, "user.name") == "claude-guard[bot]"
+    assert (
+        _global_cfg(home, "user.email") == "claude-guard[bot]@users.noreply.github.com"
+    )
 
 
 def test_no_auth_context_leaves_identity_unset(
@@ -457,4 +451,4 @@ def test_no_auth_context_leaves_identity_unset(
     env.pop("GH_REPO", None)
     r = run_capture(["bash", str(SESSION_SETUP)], cwd=repo, env=env)
     assert r.returncode == 0, f"stderr: {r.stderr}"
-    assert _global_email(home) == ""
+    assert _global_cfg(home, "user.email") == ""
