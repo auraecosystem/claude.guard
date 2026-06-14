@@ -736,14 +736,16 @@ def test_non_ephemeral_audit_archive_runs(tmp_path: Path) -> None:
     assert "LAUNCHED-CLAUDE" in r.stdout
 
 
-def test_skip_firewall_clears_proxy_env_into_container(tmp_path: Path) -> None:
-    """--dangerously-skip-firewall passes empty proxy vars into `docker exec` so
-    the container isn't pointed at the (now-absent) egress proxy."""
+def test_skip_firewall_keeps_proxy_env_into_container(tmp_path: Path) -> None:
+    """--dangerously-skip-firewall must NOT clear the container's proxy env: the app
+    is on the internal sandbox network and reaches the internet only through the
+    allow-all squid init-firewall.bash runs in skip mode. Clearing the proxy would
+    strand the agent (the FailedToOpenSocket bug)."""
     _init_repo(tmp_path)
     _, log, env = _container_env(tmp_path)
     r = _run_container(tmp_path, env, "--dangerously-skip-firewall")
     assert r.returncode == 0, r.stderr
-    assert "http_proxy=" in log.read_text()
+    assert "http_proxy=" not in log.read_text()
 
 
 def test_scrub_secrets_allow_forwarded(tmp_path: Path) -> None:
