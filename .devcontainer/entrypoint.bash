@@ -56,11 +56,15 @@ while IFS= read -r -d '' f; do
 done < <(scan_key_files "$WORKSPACE")
 # The content scan runs to a temp file, not a process substitution, so a
 # detector crash fails the launch loudly instead of silently passing as clean.
+# Each record is "<path>\t<hash1,hash2,...>": the flagged file and the SHA-256 of
+# each secret in it (empty for an unreadable, fail-closed flag).
 CREDSCAN_OUT="$(mktemp)"
 scan_files_with_secrets "$WORKSPACE" "$GUARD_DIR/.claude/hooks/redact-secrets.py" >"$CREDSCAN_OUT"
 SECRET_FILES=()
-while IFS= read -r -d '' f; do
-  SECRET_FILES+=("$f")
+SECRET_HASHES=()
+while IFS= read -r -d '' rec; do
+  SECRET_FILES+=("${rec%%$'\t'*}")
+  SECRET_HASHES+=("${rec#*$'\t'}")
 done <"$CREDSCAN_OUT"
 rm -f "$CREDSCAN_OUT"
 
@@ -76,6 +80,17 @@ if [[ ${#KEY_FILES[@]} -gt 0 || ${#SECRET_FILES[@]} -gt 0 ]]; then
   fi
   echo "Consider removing them or mounting a narrower workspace."
   echo "================================================================"
+  # Machine-readable findings for the host wrapper's per-repo secret-ignore
+  # prompt (bin/claude-guard reads these from this container's logs; the human
+  # block above is for direct devcontainer launches that bypass the wrapper). A
+  # key file is flagged by name without reading its body, so it has no per-secret
+  # hash — key it by its content digest instead, the only stable id available.
+  for f in "${KEY_FILES[@]}"; do
+    printf 'CREDSCAN_FINDING\tkey\t%s\t%s\n' "$f" "$(sha256sum -- "$f" 2>/dev/null | cut -d' ' -f1)"
+  done
+  for i in "${!SECRET_FILES[@]}"; do
+    printf 'CREDSCAN_FINDING\tsecret\t%s\t%s\n' "${SECRET_FILES[$i]}" "${SECRET_HASHES[$i]}"
+  done
 fi
 
 # Harden the monitor against the authoritative guardrail copy ($GUARD_DIR): read-hide
