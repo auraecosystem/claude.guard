@@ -75,19 +75,16 @@ _ob_offer_install_claude() {
   hash -r 2>/dev/null || true
 }
 
-# Echo the real Claude Code CLI to run `setup-token` against — resolved DIRECTLY,
-# not via the `claude` on PATH, which is usually the claude-guard wrapper alias and
-# would loop back into this flow (`CLAUDE_PASSTHROUGH=1 claude` then fails to find a
-# real binary distinct from itself). Scans PATH plus the official installer's target
-# (~/.local/bin), skipping any entry that is (or symlinks to) the claude-guard
-# wrapper. Returns 1 when no real CLI is found.
-_ob_real_claude() {
-  local dir candidate target
+# Echo the first $1-named CLI on PATH (plus the official installer's target,
+# ~/.local/bin), skipping any entry that is (or symlinks to) the claude-guard
+# wrapper. Returns 1 when none is found.
+_ob_first_real() {
+  local name="$1" dir candidate target
   local -a dirs
   IFS=: read -ra dirs <<<"$PATH"
   dirs+=("${HOME:-}/.local/bin")
   for dir in "${dirs[@]}"; do
-    candidate="$dir/claude"
+    candidate="$dir/$name"
     [[ -x "$candidate" && ! -d "$candidate" ]] || continue
     # safe_symlink installs the alias as a direct symlink to .../bin/claude-guard,
     # so a target basename of claude-guard marks the wrapper; the real CLI's does not.
@@ -97,6 +94,17 @@ _ob_real_claude() {
     return 0
   done
   return 1
+}
+
+# Echo the real Claude Code CLI to run `setup-token` against — resolved DIRECTLY,
+# not via the `claude` on PATH, which is usually the claude-guard wrapper alias and
+# would loop back into this flow (`CLAUDE_PASSTHROUGH=1 claude` then fails to find a
+# real binary distinct from itself). Prefers a real `claude`; falls back to
+# `claude-original`, where setup.bash/doctor relocate a CLI the official installer
+# lands at ~/.local/bin/claude (our alias path). Returns 1 when no real CLI exists.
+_ob_real_claude() {
+  _ob_first_real claude && return 0
+  _ob_first_real claude-original
 }
 
 # Run `claude setup-token` on the host and persist the token the user pastes back

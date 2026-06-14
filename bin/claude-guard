@@ -146,14 +146,14 @@ if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/claude/github-app/app.json" ]]; then
   auto_mint_gh_token "$_self_dir/claude-github-app"
 fi
 
-# First `claude` (the inner Claude CLI) on PATH that isn't this wrapper. The
-# SELF_CANONICAL skip prevents re-exec if a `claude` symlink resolves back here.
-find_real_claude() {
-  local p candidate cand
+# First $1-named executable on PATH that isn't this wrapper. The SELF_CANONICAL
+# skip prevents re-exec if the resolved candidate is (or symlinks back to) us.
+_first_nonwrapper_on_path() {
+  local name="$1" p candidate cand
   local -a path_dirs
   IFS=: read -ra path_dirs <<<"$PATH"
   for p in "${path_dirs[@]}"; do
-    candidate="$p/claude"
+    candidate="$p/$name"
     [[ -x "$candidate" && ! -d "$candidate" ]] || continue
     cand=$(canonicalize "$candidate")
     [[ "$cand" == "$SELF_CANONICAL" ]] && continue
@@ -161,6 +161,16 @@ find_real_claude() {
     return 0
   done
   return 1
+}
+
+# The real `claude` (inner Claude CLI) to exec. Prefers a `claude` on PATH that
+# isn't this wrapper; falls back to `claude-original`, where setup.bash/doctor
+# relocate a real CLI that the official installer (claude.ai/install.sh) lands at
+# ~/.local/bin/claude — the very path our alias occupies, so it can't stay named
+# `claude` once the alias takes that slot.
+find_real_claude() {
+  _first_nonwrapper_on_path claude && return 0
+  _first_nonwrapper_on_path claude-original
 }
 
 # Exec the unwrapped Claude Code binary, or fail loudly with an actionable
