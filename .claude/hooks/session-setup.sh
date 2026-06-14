@@ -498,24 +498,45 @@ fi
 
 # Give the session a commit identity derived from the gh-authenticated account.
 # A fresh web/CI container configures no git user, so the first `git commit` dies
-# with "Author identity unknown". Deriving name+email from `gh api user` (with
-# GitHub's `<id>+<login>@users.noreply.github.com` no-reply address) ties commits
-# to the same account that authenticated gh. Written to the GLOBAL config so it
-# applies in every repo the agent touches, not just this one. Only fills a gap — a
-# user who already configured an identity (any scope) keeps theirs untouched.
+# with "Author identity unknown". Written to the GLOBAL config so it applies in
+# every repo the agent touches, not just this one. Only fills a gap — a user who
+# already configured an identity (any scope, or the GIT_*_EMAIL env vars git
+# itself reads) keeps theirs untouched. Override the fallback by exporting
+# GIT_AUTHOR_*/GIT_COMMITTER_* (e.g. the host launcher injecting a known bot).
 _configure_git_identity_from_gh() {
   git config user.email &>/dev/null && return 0
-  # git also reads these env vars when config is unset; with them present there is
-  # no "Author identity unknown" to fix, so leave them be.
   [ "${GIT_AUTHOR_EMAIL:-}" != "" ] && [ "${GIT_COMMITTER_EMAIL:-}" != "" ] && return 0
-  command -v gh &>/dev/null || return 0
-  local fields login id
-  fields=$(gh api user --jq '.login + " " + (.id|tostring)' 2>/dev/null) || return 0
-  login=${fields%% *}
-  id=${fields##* }
-  [ "$login" != "" ] && [ "$id" != "" ] && [ "$login" != "$id" ] || return 0
-  git config --global user.name "$login"
-  git config --global user.email "${id}+${login}@users.noreply.github.com"
+
+  local name="" email=""
+  # Preferred: the real account behind a user/OAuth token (web, CI, local login).
+  # `<id>+<login>@users.noreply.github.com` is GitHub's no-reply address, so the
+  # commit links to that account without exposing a private email.
+  if command -v gh &>/dev/null; then
+    local fields login id
+    fields=$(gh api user --jq '.login + " " + (.id|tostring)' 2>/dev/null)
+    login=${fields%% *}
+    id=${fields##* }
+    if [ "$fields" != "" ] && [ "$login" != "" ] && [ "$id" != "" ] && [ "$login" != "$id" ]; then
+      name="$login"
+      email="${id}+${login}@users.noreply.github.com"
+    fi
+  fi
+
+  # Fallback: the guarded sandbox authenticates gh with a GitHub App INSTALLATION
+  # token, which 403s on `GET /user`, so the block above yields nothing there.
+  # Use a stable automation identity so commits aren't blocked (the push stays
+  # bounded by the repo-scoped token — see the git-push firewall carve-out).
+  # Gated on GH_TOKEN: with no auth context at all (e.g. a misconfigured local
+  # dev) leave git to raise its honest "Author identity unknown" rather than
+  # fabricating an author.
+  if [ "$email" = "" ]; then
+    [ "${GH_TOKEN:-}" != "" ] || return 0
+    name="claude-guard[bot]"
+    email="claude-guard[bot]@users.noreply.github.com"
+  fi
+
+  git config --global user.name "$name"
+  git config --global user.email "$email"
 }
 _configure_git_identity_from_gh
 

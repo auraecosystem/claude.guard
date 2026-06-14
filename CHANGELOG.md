@@ -17,7 +17,10 @@ adhere to [Semantic Versioning](https://semver.org/).
 - Session setup gives the container a commit identity derived from the
   gh-authenticated account (`<id>+<login>@users.noreply.github.com`) when none is
   configured, so a fresh web/CI session's first commit no longer fails with
-  "Author identity unknown". An identity the user already set is left untouched.
+  "Author identity unknown". In the guarded sandbox — where gh holds a GitHub App
+  installation token that can't read `/user` — it falls back to a `claude-guard[bot]`
+  identity (override via `GIT_AUTHOR_*`/`GIT_COMMITTER_*`). An identity the user
+  already set is left untouched.
 - The monitor's perf and eval charts in PR comments are now rendered locally and
   hosted as SVGs instead of encoding the whole dataset into a quickchart.io URL.
   A multi-series chart with confidence bands (the per-stage timing chart)
