@@ -73,6 +73,36 @@ adhere to [Semantic Versioning](https://semver.org/).
   A multi-series chart with confidence bands (the per-stage timing chart)
   overflowed GitHub's image-proxy limit and rendered as a broken image (HTTP 414
   URI Too Long); the hosted SVG has no such limit.
+- `setup.bash` no longer reports a hardened container runtime as installed when
+  Docker Desktop is the active provider on Linux/WSL2. Docker Desktop runs its
+  daemon in its own VM that ignores the host's `/etc/docker/daemon.json`, so the
+  old path wrote that file and restarted Docker — registering nothing — then
+  claimed success. Setup now detects Docker Desktop, refuses, and points you at
+  turning off its WSL/Linux integration so setup can install the in-distro
+  Docker engine instead.
+- `setup.bash` and the kata/runsc registration now work when run as **root
+  without `sudo`** (minimal containers often ship neither). Privileged writes
+  (e.g. `/etc/docker/daemon.json`) and the Docker restart run the command
+  directly as root instead of failing on a missing `sudo`.
+- `claude-guard` on macOS now starts OrbStack itself when the Docker daemon is
+  down (e.g. just after a reboot) — `orb start` then waits for the daemon —
+  instead of bailing with a "run `open -a OrbStack`" hint and a needless stall.
+- `bin/check-sandbox-runtime.bash` now matches registered Docker runtimes
+  exactly (via `docker_has_runtime`) instead of a substring `grep`, so unrelated
+  `docker info` text mentioning `runsc`/`kata-fc` can't be mistaken for a
+  registered runtime.
+- `claude-guard --uninstall` now also strips the `PATH` export blocks setup
+  appended to your shell profile (`~/.local/bin`, the pnpm global bin, and the
+  Homebrew bin), not just the completions line — so an uninstalled or moved
+  checkout leaves no stale `PATH` edits behind.
+
+### Security
+
+- The per-session sandbox subnet reservation directory is now namespaced per
+  user. Without `XDG_RUNTIME_DIR` (notably macOS, and bare logins) it previously
+  fell back to a shared, world-writable `/tmp/claude-guard`; it now uses
+  `/tmp/claude-guard-<uid>` created `0700`, so a co-tenant on a multi-user host
+  can't read or pre-seed another user's allocation state.
 
 ### Added
 

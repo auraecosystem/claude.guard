@@ -849,6 +849,17 @@ if ! command -v docker >/dev/null 2>&1; then
   require_tool "docker" "https://docs.docker.com/engine/install/ (macOS: OrbStack)"
 fi
 
+# On macOS, bring OrbStack up ourselves rather than telling the user to run
+# `open -a OrbStack` and bailing — after a reboot the daemon just isn't started
+# yet, and an active `orb start` + wait spares a needless manual step (and the
+# 45s round-trip of failing, reading the hint, then starting it by hand). Matches
+# what setup.bash and check-sandbox-runtime.bash already do.
+if ! docker ps >/dev/null 2>&1 && [[ "$(uname -s)" == "Darwin" ]] && command -v orb >/dev/null 2>&1; then
+  cg_info "claude-guard: starting OrbStack and waiting for the Docker daemon..."
+  orb start >/dev/null 2>&1 || open -gj -a OrbStack >/dev/null 2>&1 || true
+  wait_for_docker_info 60 || true
+fi
+
 if ! docker ps >/dev/null 2>&1; then
   cg_error "claude-guard: ERROR — Docker daemon not reachable (is it running?). Start it: 'sudo systemctl start docker' (Linux), or run: 'open -a OrbStack' (macOS)."
   cg_error "claude-guard: (intentional bypass: --dangerously-skip-sandbox runs on the host without the sandbox.)"

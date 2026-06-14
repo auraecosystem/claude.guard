@@ -799,13 +799,18 @@ def _write_runtime_stubs(real_dir: Path, kata_registered: bool) -> None:
 def test_detect_runtime_on_linux(
     tmp_path: Path, kata_registered: bool, expected: str
 ) -> None:
-    """On Linux, detect_container_runtime() prefers kata-fc when Docker reports
-    it registered, else falls back to runsc."""
+    """On Linux, detect_container_runtime() prefers kata-fc when Docker reports it
+    registered AND /dev/kvm is present, else falls back to runsc."""
     real_dir = tmp_path / "stubs"
     real_dir.mkdir()
     _write_runtime_stubs(real_dir, kata_registered)
 
-    r = _detect_runtime(real_dir)
+    # Pin KVM_DEVICE to a present file so the kata path is deterministic regardless
+    # of whether the CI runner exposes a real /dev/kvm (it often doesn't) — kata-fc
+    # selection gates on host_has_kvm, the same override test_runtime_detect.py uses.
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    r = _detect_runtime(real_dir, KVM_DEVICE=str(kvm))
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert r.stdout.strip() == expected
 

@@ -59,14 +59,14 @@ if "$IS_MAC"; then
     # restart. NOTE: requires OrbStack >= 2.2.0 (runsc crashed under earlier
     # versions); an OrbStack update may drop the in-VM binary — re-run this
     # script if runsc containers later fail to start.
-    if ! docker info 2>/dev/null | grep -q "runsc"; then
+    if ! docker_has_runtime runsc; then
       status "Installing gVisor/runsc in the OrbStack VM..."
       # shellcheck source=lib/sandbox-runtime.bash disable=SC1091
       source "$SCRIPT_DIR/lib/sandbox-runtime.bash"
       install_runsc_orbstack || die "runsc install failed"
     fi
 
-    docker info 2>/dev/null | grep -q "runsc" || die "runsc not registered with Docker after install"
+    docker_has_runtime runsc || die "runsc not registered with Docker after install"
 
     status "Running container with runsc runtime..."
     pull_with_retry "$ALPINE_IMAGE"
@@ -78,7 +78,7 @@ if "$IS_MAC"; then
   fi
 else
   # ── Linux: Kata Containers ────────────────────────────────────────────
-  if docker info 2>/dev/null | grep -q "kata-fc"; then
+  if docker_has_runtime kata-fc; then
     status "kata-fc already registered — skipping install"
   else
     # host_has_kvm (runtime-detect.bash) is the SSOT for "can a Kata microVM
@@ -128,13 +128,10 @@ else
     [ -f "$f" ] && e=$(cat "$f") || e='{}'
     echo "$e" | jq '.runtimes["kata-fc"] = {"runtimeType":"io.containerd.kata-fc.v2"}' | sudo tee "$f" >/dev/null
     sudo systemctl restart docker
-    for _i in {1..30}; do
-      docker info 2>/dev/null | grep -q "kata-fc" && break
-      sleep 1
-    done
+    wait_for_docker_runtime kata-fc || true
   fi
 
-  docker info 2>/dev/null | grep -q "kata-fc" || die "kata-fc not registered with Docker after install"
+  docker_has_runtime kata-fc || die "kata-fc not registered with Docker after install"
 
   status "Running container with kata-fc runtime..."
   pull_with_retry "$ALPINE_IMAGE"
