@@ -624,10 +624,18 @@ run_host_claude() {
 source "$(dirname "$SELF_CANONICAL")/lib/monitor-key.bash"
 resolve_monitor_key
 
-# Monitor row for the launch summary box (rendered below). Refined to AUTO/FULL
-# when a key is configured; left as the keyless/disabled default otherwise.
-_box_monitor="no API key — fails closed (asks) on every call"
-[[ "${DANGEROUSLY_SKIP_MONITOR:-}" == "1" ]] && _box_monitor="DISABLED via --dangerously-skip-monitor"
+# Monitor row for the launch summary box (rendered below) as a status + detail
+# pair (the box lays them out as two aligned columns). Refined to AUTO/FULL when a
+# key is configured; left as the keyless/disabled default otherwise.
+# _box_monitor_color tints the Monitor row: yellow for a degraded monitor (no key
+# / disabled), green once it's actively reviewing.
+_box_monitor_status="no API key"
+_box_monitor_detail="fails closed (asks every call)"
+_box_monitor_color="yellow"
+[[ "${DANGEROUSLY_SKIP_MONITOR:-}" == "1" ]] && {
+  _box_monitor_status="DISABLED"
+  _box_monitor_detail="--dangerously-skip-monitor"
+}
 
 # No key resolved and the monitor isn't opted out: surface setup guidance in the
 # terminal. This launcher runs pre-session so its output is seen — unlike the
@@ -692,11 +700,16 @@ elif [[ "${DANGEROUSLY_SKIP_MONITOR:-}" != "1" ]]; then
   # .claude/hooks/monitor-dispatch.bash), whereas private/e2ee run bypassPermissions
   # so it reviews every call.
   case "${CLAUDE_PRIVACY_MODE:-}" in
-  private | e2ee) _box_monitor="FULL — reviews every tool call" ;;
-  *) _box_monitor="AUTO — reviews only classifier-denied calls" ;;
+  private | e2ee)
+    _box_monitor_status="FULL"
+    _box_monitor_detail="reviews every tool call"
+    ;;
+  *)
+    _box_monitor_status="AUTO"
+    _box_monitor_detail="reviews hard denies from auto mode"
+    ;;
   esac
-  # shellcheck disable=SC2016  # the apostrophes are literal output; ${MONITOR_KEY_NS} still expands
-  _box_monitor="${_box_monitor}${MONITOR_KEY_NS:+ (key: envchain '${MONITOR_KEY_NS}')}"
+  _box_monitor_color="green"
   # Surface the previous session's spend so the monitor's cost is visible up
   # front, not just at SessionEnd, with the one-knob way to cut it. Self-suppressing
   # — silent on a first run, no prior archive, or nothing billed — so it never adds
@@ -786,16 +799,29 @@ maybe_show_image_ready_tip() {
 # Summary box for the security + monitor settings. Rendered right after the
 # CLAUDE GUARD masthead and BEFORE any credential warnings. Called in both
 # host mode (before run_host_claude) and container mode (after startup).
-# Host mode omits ISOLATION_LABEL and the Session row (no container volumes).
-# One cg_box call per branch: kcov attributes a line-continued command to its
-# closing line, leaving the opener at 0 hits.
+# claude-guard-settings-box (rich) draws it as a grid table — a rule between every
+# row — with each row tinted by its leading severity field (red = unrestricted
+# network, yellow = a real but non-fatal degradation, green = full protection).
+# Host mode omits the isolation backend and the Session row (no container volumes).
+# Each argument is "severity<TAB>label<TAB>status<TAB>detail". A render failure
+# (e.g. a broken install missing rich) warns but never aborts the launch — the box
+# is informative, not a security control.
 print_settings_box() {
-  local box_fw="outgoing-traffic firewall on"
-  [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]] && box_fw="firewall OFF — unrestricted network access"
-  if "$_skip_sandbox"; then
-    cg_box "" "Protection  ${PROTECTION_LABEL}; ${box_fw}" "Monitor     ${_box_monitor}"
+  local net_row
+  if [[ "${DANGEROUSLY_SKIP_FIREWALL:-}" == "1" ]]; then
+    net_row=$'red\tNetwork\tfirewall OFF\tUNRESTRICTED network access'
   else
-    cg_box "" "Protection  ${PROTECTION_LABEL} — ${ISOLATION_LABEL}; ${box_fw}" "Monitor     ${_box_monitor}" "Session     ${_box_session}"
+    net_row=$'green\tNetwork\tfirewall on\taccess limited to the allowlist'
+  fi
+  local mon_row="$_box_monitor_color"$'\t'"Monitor"$'\t'"$_box_monitor_status"$'\t'"$_box_monitor_detail"
+  local box_render_failed="could not render the settings box (is the install complete? rich is required)"
+  if "$_skip_sandbox"; then
+    local prot_row=$'yellow\tProtection\thost mode\tNO container isolation (deny-rules only)'
+    "$_self_dir/claude-guard-settings-box" "$prot_row" "$net_row" "$mon_row" || cg_warn "$box_render_failed"
+  else
+    local prot_row="green"$'\t'"Protection"$'\t'"sandboxed"$'\t'"$ISOLATION_SHORT"
+    local ses_row="green"$'\t'"Session"$'\t'"$_box_session_status"$'\t'"$_box_session_detail"
+    "$_self_dir/claude-guard-settings-box" "$prot_row" "$net_row" "$mon_row" "$ses_row" || cg_warn "$box_render_failed"
   fi
 }
 
@@ -1098,7 +1124,8 @@ if "$_ephemeral"; then
   # per-workspace default so a relaunch still reattaches to their stopped containers.
   CLAUDE_COMPOSE_PROJECT="${CLAUDE_VOLUME_ID//-/x}"
   export COMPOSE_PROJECT_NAME="$CLAUDE_COMPOSE_PROJECT"
-  _box_session="throwaway config/history volumes, deleted on exit; your workspace files on the host are kept"
+  _box_session_status="ephemeral"
+  _box_session_detail="config/history wiped on exit, workspace kept"
   # Without host auth the throwaway config volume means a re-login every session.
   # On the first such launch offer the interactive capture flow (the same one
   # setup.bash runs) so the user can fix it on the spot; afterward (marker set) or
@@ -1127,13 +1154,15 @@ if "$_ephemeral"; then
 elif [[ "${CLAUDE_SHARED_AUTH:-}" == "1" ]]; then
   export CLAUDE_VOLUME_ID="shared-auth"
   cg_warn "CLAUDE_SHARED_AUTH=1 — one shared config/history/auth volume across all projects; per-project isolation is OFF."
-  _box_session="shared auth — one volume across all projects; per-project isolation OFF"
+  _box_session_status="shared auth"
+  _box_session_detail="one volume across all projects; per-project isolation OFF"
 else
   # Per-workspace volume isolation — prevents cross-project state sharing
   # (and AI sessions coordinating through shared config volumes).
   CLAUDE_VOLUME_ID="$(claude_volume_id "$workspace_folder")"
   export CLAUDE_VOLUME_ID
-  _box_session="persistent — per-workspace volume kept across sessions"
+  _box_session_status="persistent"
+  _box_session_detail="per-workspace volume kept across sessions"
 fi
 
 # Ephemeral teardown: archive this session's audit log to the host (not a volume,
