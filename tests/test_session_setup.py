@@ -370,3 +370,91 @@ def test_existing_git_identity_not_overwritten_by_gh(
         text=True,
     ).stdout.strip()
     assert global_email == ""
+
+
+# gh stub that reports a current version (so the installer is skipped) but fails
+# `gh api user` — modelling the GitHub App installation token, which 403s there.
+_GH_STUB_INSTALLATION_TOKEN = (
+    "#!/bin/sh\n"
+    '[ "$1" = "--version" ] && echo "gh version 2.99.0" && exit 0\n'
+    '[ "$1 $2" = "api user" ] && exit 1\n'
+    "exit 0\n"
+)
+
+
+def _global_email(home: Path) -> str:
+    return subprocess.run(
+        ["git", "config", "--global", "user.email"],
+        env={**os.environ, "HOME": str(home)},
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_installation_token_falls_back_to_bot_identity(
+    repo: Path, env_file: Path, tmp_path: Path
+) -> None:
+    """In the guarded sandbox gh holds a GitHub App installation token, so
+    `gh api user` 403s. Setup must still configure a stable bot identity so the
+    agent can commit (the push stays bounded by the repo-scoped token)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    stub = tmp_path / "stub-bin"
+    write_exe(stub / "gh", _GH_STUB_INSTALLATION_TOKEN)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"}
+    }
+    env.update(
+        {
+            "CLAUDE_PROJECT_DIR": str(repo),
+            "CLAUDE_ENV_FILE": str(env_file),
+            "HOME": str(home),
+            "GH_TOKEN": "x",  # authenticated, just not as a user
+            "PATH": f"{stub}:{os.environ['PATH']}",
+        }
+    )
+    env.pop("GH_REPO", None)
+    r = run_capture(["bash", str(SESSION_SETUP)], cwd=repo, env=env)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+
+    def _g(key: str) -> str:
+        return subprocess.run(
+            ["git", "config", "--global", key],
+            env={**os.environ, "HOME": str(home)},
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    assert _g("user.name") == "claude-guard[bot]"
+    assert _g("user.email") == "claude-guard[bot]@users.noreply.github.com"
+
+
+def test_no_auth_context_leaves_identity_unset(
+    repo: Path, env_file: Path, tmp_path: Path
+) -> None:
+    """No usable token at all (gh api user fails AND GH_TOKEN unset): setup writes
+    no identity, leaving git to raise its honest "Author identity unknown" rather
+    than fabricating an author."""
+    home = tmp_path / "home"
+    home.mkdir()
+    stub = tmp_path / "stub-bin"
+    write_exe(stub / "gh", _GH_STUB_INSTALLATION_TOKEN)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL", "GH_TOKEN"}
+    }
+    env.update(
+        {
+            "CLAUDE_PROJECT_DIR": str(repo),
+            "CLAUDE_ENV_FILE": str(env_file),
+            "HOME": str(home),
+            "PATH": f"{stub}:{os.environ['PATH']}",
+        }
+    )
+    env.pop("GH_REPO", None)
+    r = run_capture(["bash", str(SESSION_SETUP)], cwd=repo, env=env)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert _global_email(home) == ""
