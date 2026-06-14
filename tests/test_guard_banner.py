@@ -6,7 +6,6 @@ parser instead, leaving the animation to manual use.
 """
 
 import importlib.util
-import io
 import math
 import os
 import sys
@@ -158,63 +157,29 @@ def test_pulse_group_is_masthead_alone_without_progress():
     assert banner.pulse_group(art, None) is art
 
 
-def _render_console(width: int):
-    """A real rich Console that captures to a buffer at a fixed width, for exercising
-    pulse_renderable's width-driven layout without a live terminal."""
-    from rich.console import Console
-
-    return Console(
-        file=io.StringIO(), force_terminal=True, color_system="truecolor", width=width
-    )
-
-
-def test_pulse_renderable_lays_out_for_console_width_and_counts_rows():
+def test_pulse_banner_lays_out_for_max_width_so_it_restacks_on_resize():
     single = banner.banner_lines()
     full_width = max(len(line) for line in single)
 
-    # Wide console: single-line layout, row count matches the art height.
-    wide = _render_console(full_width + 20)
-    rendered, rows = banner.pulse_renderable(
-        wide, start=0.0, period=1.6, progress_path=None
+    renderable = banner._PulseBanner(start=0.0, period=1.6, progress_path=None)
+
+    # Narrow: the art fits within the reported max_width (stacked layout).
+    narrow = full_width - 1
+    items = list(
+        renderable.__rich_console__(None, types.SimpleNamespace(max_width=narrow))
     )
-    assert rows == len(single)
-    assert "\x1b[" in rendered  # color survives the capture
+    assert len(items) == 1
+    art_width = max(len(line) for line in items[0].plain.splitlines() if line.strip())
+    assert art_width <= narrow
 
-    # Narrow console: the art reflows to more rows, and the reported count tracks it.
-    narrow = _render_console(full_width - 1)
-    _, narrow_rows = banner.pulse_renderable(
-        narrow, start=0.0, period=1.6, progress_path=None
+    # Wide: the art is the unconstrained single-line layout. Re-reading max_width on
+    # each render is what makes the masthead restack when the terminal is resized.
+    wide = list(
+        renderable.__rich_console__(
+            None, types.SimpleNamespace(max_width=full_width + 50)
+        )
     )
-    assert narrow_rows > rows
-
-
-def test_pulse_renderable_appends_progress_bar_when_pull_in_flight(tmp_path):
-    p = tmp_path / "progress"
-    p.write_text("50")
-    single = banner.banner_lines()
-    console = _render_console(max(len(line) for line in single) + 20)
-    rendered, rows = banner.pulse_renderable(
-        console, start=0.0, period=1.6, progress_path=str(p)
-    )
-    # Banner + blank spacer + bar row, so taller than the bare masthead.
-    assert rows > len(single)
-    assert "50%" in rendered
-
-
-def test_cursor_to_region_top_moves_up_for_multi_row():
-    # A single-row region only needs a carriage return — no cursor-up.
-    assert banner._cursor_to_region_top(1) == "\r"
-    assert banner._cursor_to_region_top(0) == "\r"
-    # Taller regions move up height-1 rows so the cursor lands on the top row.
-    assert banner._cursor_to_region_top(5) == "\r\x1b[4A"
-
-
-def test_hidden_cursor_hides_then_restores():
-    states = []
-    console = types.SimpleNamespace(show_cursor=lambda visible: states.append(visible))
-    with banner._hidden_cursor(console):
-        assert states == [False]
-    assert states == [False, True]
+    assert wide[0].plain.splitlines() == single
 
 
 def test_pulse_group_stacks_bar_while_downloading():
@@ -236,15 +201,6 @@ def test_main_rejects_unknown_mode(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["claude-guard-banner", "bogus"])
     with pytest.raises(SystemExit):
         banner.main()
-
-
-def test_erase_below_writes_erase_to_end_of_screen():
-    file = io.StringIO()
-    console = types.SimpleNamespace(file=file)
-    banner._erase_below(console)
-    # CSI J with no parameter = erase from cursor to end of display; crucially NOT
-    # CSI 2J (whole screen), which would blank the launch log above the banner.
-    assert file.getvalue() == "\x1b[J"
 
 
 def test_quiet_input_is_noop_without_a_tty():
