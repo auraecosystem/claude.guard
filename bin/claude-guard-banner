@@ -160,12 +160,14 @@ def pulse(
 ) -> None:  # pragma: no cover
     """Animate the banner as a breathing red until interrupted.
 
-    Renders on the *normal* screen (screen=False), not the alternate buffer: an
-    alt-screen splash is wiped the instant the Live context exits and shows
-    nothing in terminals/multiplexers that don't switch buffers. transient=True
-    clears the animation in place on stop; main() then reprints a solid banner
-    (on the launcher's SIGTERM) so the masthead stays frozen, or nothing (on a
-    Ctrl-C/SIGINT abort).
+    Renders on the alternate screen buffer (screen=True) so the animation is
+    isolated from the normal scrollback: resizing or pressing Enter can't leave
+    ghost frames in the history. When the Live context exits, the terminal
+    switches back to the normal buffer automatically. main() then prints a solid
+    banner there on the launcher's SIGTERM so the masthead stays frozen, or
+    prints nothing on a Ctrl-C/SIGINT abort. In terminals that don't support
+    alt-screen the animation may be invisible, but the frozen masthead always
+    appears in the normal buffer after.
 
     This is the untestable I/O driver: an unbounded Live loop on a real
     terminal. The per-frame rendering it delegates to lives in pulse_frame,
@@ -181,7 +183,7 @@ def pulse(
     # animation, instead of orphaning an immortal splash over the error output.
     parent = os.getppid()
     with Live(
-        console=console, refresh_per_second=fps, screen=False, transient=True
+        console=console, refresh_per_second=fps, screen=True, transient=True
     ) as live:
         start = time.monotonic()
         while os.getppid() == parent:
