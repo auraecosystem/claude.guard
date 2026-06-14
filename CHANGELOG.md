@@ -80,6 +80,12 @@ adhere to [Semantic Versioning](https://semver.org/).
   wall-clock bound, so a hung daemon fails fast (and setup/launch falls through)
   instead of blocking forever on the first probe. Tune with
   `CLAUDE_GUARD_DOCKER_PROBE_TIMEOUT` (default 10s).
+- The statusline's repo/branch segment no longer collapses to `/?` inside a
+  linked worktree whose git CLI can't resolve the repository (parent repo absent
+  in an ephemeral sandbox, or a dubious-ownership refusal). It now falls back to
+  parsing the worktree's own `.git` pointer file for the repo name, branch, and
+  worktree name, and appends the worktree name as a third segment
+  (`repo/branch/worktree`) when running inside a linked worktree.
 - The status line now shows the monitor's running spend (`mon $spent/$cap`) in
   the default sandboxed mode, not only in host mode. The per-session total was
   written to the monitor process's isolated filesystem, so the app container that
@@ -279,6 +285,16 @@ adhere to [Semantic Versioning](https://semver.org/).
   real read/write access (`host_supports_kata`), not bare device existence. A host
   where `/dev/kvm` exists but the user isn't in the `kvm` group no longer reads as
   a false-green while a Kata launch would hang.
+- Secret redaction no longer misses a named-field value (`token`, `password`,
+  `api_key`, …) whose closing quote is absent or mismatched. The generic
+  field-value redactor required a symmetric closing quote, so a quoted secret in
+  truncated/streamed tool output (`"token": "<secret>` with the close on an unseen
+  next line) slipped through unredacted. The closing quote is now an optional
+  backreference, so the value redacts whether or not it is properly closed.
+- `valid_domain_name` (firewall/allowlist admission) now rejects a raw IPv4
+  literal, honoring its documented contract. A dotted-decimal address could
+  previously be admitted as a "domain" and seed a junk dnsmasq/squid entry; bare
+  IPs are no longer accepted on the per-project allowlist or `MONITOR_NTFY_HOST`.
 
 ### Added
 
