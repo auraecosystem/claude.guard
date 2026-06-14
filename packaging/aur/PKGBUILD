@@ -53,10 +53,7 @@ package() {
   # only dev/CI artifacts the runtime never reads (mirrors the Homebrew formula's
   # prune list); the launcher reads bin/, .devcontainer/, and .claude/ at runtime.
   local prune=(tests research metrics .git .github node_modules .venv uv.lock)
-  local entry
-  for entry in "${prune[@]}"; do
-    rm -rf "./$entry"
-  done
+  rm -rf -- "${prune[@]}"
 
   install -d "$libdir"
   cp -a . "$libdir/"
