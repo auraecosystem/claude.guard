@@ -39,6 +39,7 @@
   "htmlReporter": { "fileName": "reports/mutation/mutation.html" },
   "concurrency": 2,
   "timeoutMS": 10000,
-  "allowEmpty": true,
+  "incremental": true,
+  "incrementalFile": "reports/stryker-incremental.json",
   "thresholds": { "high": 90, "low": 82, "break": 80 }
 }
