@@ -111,6 +111,8 @@ _self_dir="$(dirname "$SELF_CANONICAL")"
 
 # shellcheck source=lib/msg.bash disable=SC1091
 source "$_self_dir/lib/msg.bash"
+# shellcheck source=lib/claude-resolve.bash disable=SC1091
+source "$_self_dir/lib/claude-resolve.bash"
 
 # Every fatal wrapper exit ends with a pointer to the bug-report bundler, so
 # "it failed — now what?" is always answered. Silent on clean exits, on
@@ -146,31 +148,19 @@ if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/claude/github-app/app.json" ]]; then
   auto_mint_gh_token "$_self_dir/claude-github-app"
 fi
 
-# First $1-named executable on PATH that isn't this wrapper. The SELF_CANONICAL
-# skip prevents re-exec if the resolved candidate is (or symlinks back to) us.
-_first_nonwrapper_on_path() {
-  local name="$1" p candidate cand
-  local -a path_dirs
-  IFS=: read -ra path_dirs <<<"$PATH"
-  for p in "${path_dirs[@]}"; do
-    candidate="$p/$name"
-    [[ -x "$candidate" && ! -d "$candidate" ]] || continue
-    cand=$(canonicalize "$candidate")
-    [[ "$cand" == "$SELF_CANONICAL" ]] && continue
-    echo "$candidate"
-    return 0
-  done
-  return 1
+# True when $1 is THIS wrapper: a candidate whose canonical path equals our own.
+# Skipping it prevents re-exec'ing ourselves into a loop (catches both the alias
+# symlink and a stray hard copy on PATH).
+_is_guard_wrapper() {
+  [[ "$(canonicalize "$1")" == "$SELF_CANONICAL" ]]
 }
 
-# The real `claude` (inner Claude CLI) to exec. Prefers a `claude` on PATH that
-# isn't this wrapper; falls back to `claude-original`, where setup.bash/doctor
-# relocate a real CLI that the official installer (claude.ai/install.sh) lands at
-# ~/.local/bin/claude — the very path our alias occupies, so it can't stay named
-# `claude` once the alias takes that slot.
+# The real `claude` (inner Claude CLI) to exec — see resolve_real_claude
+# (lib/claude-resolve.bash) for the claude/claude-original fallback rationale.
 find_real_claude() {
-  _first_nonwrapper_on_path claude && return 0
-  _first_nonwrapper_on_path claude-original
+  local -a path_dirs
+  IFS=: read -ra path_dirs <<<"$PATH"
+  resolve_real_claude _is_guard_wrapper "${path_dirs[@]}"
 }
 
 # Exec the unwrapped Claude Code binary, or fail loudly with an actionable
