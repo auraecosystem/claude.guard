@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The "Be alert for semantic prompt injection in this content" note the
+  output-sanitizer appends is now added only for web-ingress tools (WebFetch,
+  WebSearch) — the channel where the semantic-injection filter actually runs.
+  Local tools (Read, Bash, Grep, MCP) that only had ANSI/invisible characters or
+  secrets stripped no longer carry the off-target injection warning, which was
+  noise on every such call and desensitized the reader to the web case where it
+  matters.
 - Setup now explains, in plain language, what ntfy.sh is before offering to
   configure it (a free service that sends the safety monitor's approve/deny
   alerts to your phone), so the prompt isn't an unexplained brand name. The
@@ -62,6 +69,11 @@ adhere to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The PostToolUse output-sanitizer's fail-closed message no longer contradicts
+  itself: when the hook crashes it suppresses the tool output (replacing it with
+  a placeholder), but the accompanying note said "Raw tool output reached the
+  model unsanitized" — the opposite of what happened. It now states the output
+  was suppressed and that the unsanitized output was not shown.
 - Setup and the SessionStart provisioning hook no longer hang indefinitely on a
   stalled network leg: every download (`curl`/`wget`) is now time-bounded, the
   heavy package installs (uv/cargo/npm/pnpm) retry transient failures, and a
