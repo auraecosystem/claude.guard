@@ -1,0 +1,1 @@
+- Launch summary box: compressed to one short `Label  value` row each (Protection / Network / Monitor / Session) so the security posture reads at a glance, and degraded rows are now tinted — red for an unrestricted-network firewall bypass, yellow for a non-fatal degradation (host mode, no monitor key, disabled monitor).

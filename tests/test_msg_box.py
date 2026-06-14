@@ -9,22 +9,27 @@ not just today's Protection line.
 
 import os
 import pty
+import re
 import subprocess
 from pathlib import Path
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 MSG = Path(__file__).resolve().parent.parent / "bin" / "lib" / "msg.bash"
 
-# A realistic over-wide row plus two shorter ones, mirroring the launch summary.
-# The em-dashes exercise multibyte width counting, which only lines up under a
-# UTF-8 locale — the environment a real terminal runs in.
+# A synthetic over-wide row plus two compact launch-summary rows. The wrap test is
+# width-general (no rendered row may exceed the terminal), so LONG_ROW need not be
+# a current box line — it just has to be over-wide. The em-dash and middle-dot
+# exercise multibyte width counting, which only lines up under a UTF-8 locale — the
+# environment a real terminal runs in.
 LONG_ROW = (
     "Protection  sandboxed — runc inside the Docker Linux VM — your Mac stays "
     "behind the VM boundary; containers share the VM's kernel; firewall on"
 )
 ROWS = [
     LONG_ROW,
-    "Monitor     AUTO — reviews only classifier-denied calls",
-    "Session     throwaway config/history volumes, deleted on exit",
+    "Monitor     AUTO · only classifier-denied calls",
+    "Session     ephemeral · config/history wiped on exit, workspace kept",
 ]
 
 
@@ -91,6 +96,83 @@ def test_box_keeps_full_width_when_piped():
     set here too, proving the tty gate (not just an unset width) is what holds."""
     rows = _render("80", tty=False)
     assert any(LONG_ROW in row for row in rows), "piped output should not wrap"
+
+
+def _render_colored(cols: str, colors: list[str], rows: list[str]) -> list[str]:
+    """Render a box with CG_BOX_COLORS set and color ENABLED (pty stderr, no
+    NO_COLOR), returning the raw rows including ANSI escapes."""
+    color_args = " ".join(f'"{c}"' for c in colors)
+    row_args = " ".join(f'"{r}"' for r in rows)
+    env = {"LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin", "TERM": "xterm"}
+    if cols is not None:
+        env["COLUMNS"] = cols
+    script = f'source "{MSG}"; CG_BOX_COLORS=({color_args}); cg_box "" {row_args}'
+    primary, secondary = pty.openpty()
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=secondary,
+        env=env,
+    )
+    os.close(secondary)
+    chunks = []
+    while True:
+        try:
+            data = os.read(primary, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        chunks.append(data)
+    os.close(primary)
+    assert proc.returncode == 0
+    return b"".join(chunks).decode("utf-8").splitlines()
+
+
+def test_box_tints_rows_without_breaking_alignment():
+    """CG_BOX_COLORS tints whole rows (red for a degraded row, green for a healthy
+    one) AFTER padding, so the escape bytes never enter the width math: stripping
+    the ANSI back out, every content row has identical visible width — the right
+    border stays aligned, which is exactly what embedding color naively would
+    break."""
+    rows = [
+        "Network     firewall OFF · UNRESTRICTED network access",
+        "Monitor     AUTO · only classifier-denied calls",
+    ]
+    rendered = [r.rstrip("\r") for r in _render_colored("80", ["red", "green"], rows)]
+    joined = "\n".join(rendered)
+    assert "\x1b[31m" in joined, "degraded row should be red"
+    assert "\x1b[32m" in joined, "healthy row should be green"
+    # The middle dot and the words survive once color is stripped.
+    plain = ANSI_RE.sub("", joined)
+    assert "firewall OFF · UNRESTRICTED network access" in plain
+    # Every bordered content row is the same visible width — alignment held.
+    plain_rows = [ANSI_RE.sub("", r) for r in rendered]
+    content_widths = {len(r) for r in plain_rows if r.startswith("│")}
+    assert len(content_widths) == 1, f"right border misaligned: {content_widths}"
+
+
+def test_box_uncolored_entry_renders_plain():
+    """An empty CG_BOX_COLORS slot leaves that row untinted while its neighbours are
+    colored — mixed colored/plain rows are supported."""
+    rows = ["Session     ephemeral", "Network     firewall OFF"]
+    rendered = "\n".join(_render_colored("80", ["", "red"], rows))
+    # Only one color run (the red Network row); the Session row carries no SGR.
+    assert rendered.count("\x1b[31m") == 1
+
+
+def test_cg_paint_is_plain_when_color_off():
+    """cg_paint centralizes the severity→color choice and honors NO_COLOR: with
+    color disabled it returns the text untouched, no escape bytes."""
+    r = subprocess.run(
+        ["bash", "-c", f'source "{MSG}"; cg_paint red "danger"'],
+        capture_output=True,
+        text=True,
+        env={"NO_COLOR": "1", "PATH": "/usr/bin:/bin", "TERM": "dumb"},
+        check=True,
+    )
+    assert r.stdout == "danger"
 
 
 def test_box_with_empty_title_draws_plain_top_rule():
