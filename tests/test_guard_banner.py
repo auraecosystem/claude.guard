@@ -15,8 +15,8 @@ import pytest
 from rich.console import Group
 
 
-def _fake_console(is_terminal: bool):
-    return types.SimpleNamespace(is_terminal=is_terminal)
+def _fake_console(is_terminal: bool, width: int = 100):
+    return types.SimpleNamespace(is_terminal=is_terminal, width=width)
 
 
 SRC = Path(__file__).resolve().parent.parent / "bin" / "claude-guard-banner"
@@ -38,6 +38,28 @@ def test_banner_lines_are_nonempty_art():
     lines = banner.banner_lines()
     assert lines, "expected rendered ASCII rows"
     assert all(line.strip() for line in lines), "blank rows should be dropped"
+
+
+def test_banner_lines_stay_single_when_terminal_is_wide():
+    single = banner.banner_lines()
+    wide = max(len(line) for line in single)
+    # A terminal at least as wide as the art keeps the one-line layout.
+    assert banner.banner_lines(width=wide) == single
+    assert banner.banner_lines(width=wide + 50) == single
+
+
+def test_banner_lines_wrap_to_two_blocks_when_narrow():
+    single = banner.banner_lines()
+    wide = max(len(line) for line in single)
+    wrapped = banner.banner_lines(width=wide - 1)
+    # Stacking 'CLAUDE' over 'GUARD' is strictly taller and strictly narrower than
+    # the single-line art, and it fits the cramped terminal.
+    assert len(wrapped) > len(single)
+    wrapped_width = max(len(line) for line in wrapped)
+    assert wrapped_width < wide
+    assert wrapped_width <= wide - 1
+    # The two glyph blocks are separated by exactly one blank gap row.
+    assert wrapped.count("") == 1
 
 
 def test_solid_banner_paints_every_row_one_color():

@@ -50,20 +50,31 @@ BAR_EMPTY = "░"  # light shade
 _freeze_requested = False
 
 
-def banner_lines() -> list[str]:
-    """The rendered ASCII art as a list of non-empty rows."""
-    rendered = figlet_format(TEXT, font=FONT)
+def _figlet_rows(text: str) -> list[str]:
+    """`text` rendered to ASCII-art rows, with blank rows dropped."""
+    rendered = figlet_format(text, font=FONT)
     return [line for line in rendered.splitlines() if line.strip()]
 
 
-def solid_banner() -> Text:
-    """The banner painted bright red."""
-    return Text("\n".join(banner_lines()), style="bright_red")
+def banner_lines(width: int | None = None) -> list[str]:
+    """The CLAUDE GUARD ASCII art as a list of rows. On a terminal too narrow for
+    the single-line art, stack `CLAUDE` over `GUARD` (with a blank gap between) so
+    the masthead still fits instead of wrapping mid-glyph. `width` is the available
+    column count; None (no terminal to measure) keeps the single-line art."""
+    single = _figlet_rows(TEXT)
+    if width is None or max(len(line) for line in single) <= width:
+        return single
+    return _figlet_rows("CLAUDE") + [""] + _figlet_rows("GUARD")
 
 
-def rainbow_banner() -> Text:
-    """The banner with a per-column rainbow gradient."""
-    lines = banner_lines()
+def solid_banner(width: int | None = None) -> Text:
+    """The banner painted bright red, laid out for a `width`-column terminal."""
+    return Text("\n".join(banner_lines(width)), style="bright_red")
+
+
+def rainbow_banner(width: int | None = None) -> Text:
+    """The banner with a per-column rainbow gradient, laid out for `width` columns."""
+    lines = banner_lines(width)
     width = max(len(line) for line in lines)
     hues = [_hue_to_rgb(column / width) for column in range(width)]
 
@@ -131,7 +142,7 @@ def pulse(
     terminal. The per-frame rendering it delegates to lives in pulse_frame,
     which the suite covers directly.
     """
-    art = "\n".join(banner_lines())
+    art = "\n".join(banner_lines(console.width))
     frame_delay = 1 / fps
     progress_path = os.environ.get(PROGRESS_ENV)
     # Capture the launcher's PID so the splash self-reaps if the launcher exits
@@ -213,10 +224,13 @@ def main() -> None:
         # SIGTERM (the launcher's "load done") froze the splash: leave a solid
         # banner as the session masthead. A Ctrl-C/SIGINT abort leaves nothing.
         if _freeze_requested:
-            _print_framed(console, solid_banner())
+            _print_framed(console, solid_banner(console.width))
         return
     _print_framed(
-        console, rainbow_banner() if args.mode == "rainbow" else solid_banner()
+        console,
+        rainbow_banner(console.width)
+        if args.mode == "rainbow"
+        else solid_banner(console.width),
     )
 
 
