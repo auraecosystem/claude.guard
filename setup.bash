@@ -1211,6 +1211,12 @@ fi
 # is read-only and exits non-zero when DEGRADED/UNPROTECTED, so never let its
 # status abort setup.
 echo ""
+# Ensure the doctor's Python deps (rich, detect-secrets) are present. uv sync is
+# a no-op when the venv is already up to date, so this is fast on re-runs.
+if command_exists uv && [[ -f "$SCRIPT_DIR/uv.lock" ]]; then
+  run_quiet "Installing Python runtime deps for claude-guard doctor..." \
+    uv sync --quiet --project "$SCRIPT_DIR" || true
+fi
 status "Verifying your protection state with claude-guard doctor..."
 "$SCRIPT_DIR/bin/claude-guard-doctor" || true
 print_shell_activation_hint
