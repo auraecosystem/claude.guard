@@ -18,6 +18,7 @@ import {
   applyToMan,
   sqEsc,
   zshDescEsc,
+  fishDescEsc,
 } from "./gen-cli-docs.mjs";
 import { subcommands, flags, privacyTiers } from "./cli-spec.mjs";
 
@@ -100,9 +101,20 @@ test("zshDescEsc escapes single quotes, backslashes, and closing brackets", () =
   assert.equal(zshDescEsc("close]bracket"), "close\\]bracket");
   assert.equal(zshDescEsc("both'and]"), "both'\\''and\\]");
   assert.equal(zshDescEsc("]"), "\\]");
-  // backslash must be doubled before ] is escaped, so \] → \\] not \\\]
+  // \ and ] are escaped in one pass, so the inserted backslashes are never
+  // re-escaped: a lone \ becomes \\, and \] becomes \\\] (\\ then \]).
   assert.equal(zshDescEsc("\\"), "\\\\");
   assert.equal(zshDescEsc("\\]"), "\\\\\\]");
+});
+
+test("fishDescEsc backslash-escapes backslashes and single quotes", () => {
+  assert.equal(fishDescEsc(""), "");
+  assert.equal(fishDescEsc("safe string"), "safe string");
+  assert.equal(fishDescEsc("it's fine"), "it\\'s fine");
+  assert.equal(fishDescEsc("a'b'c"), "a\\'b\\'c");
+  assert.equal(fishDescEsc("back\\slash"), "back\\\\slash");
+  // a trailing backslash is doubled, so it can't escape the closing quote.
+  assert.equal(fishDescEsc("\\"), "\\\\");
 });
 
 // ── splice + write helpers ─────────────────────────────────────────────────────

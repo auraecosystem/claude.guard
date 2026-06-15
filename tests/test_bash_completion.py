@@ -32,7 +32,7 @@ def _load_completion_surface() -> tuple[list[str], list[str], list[str]]:
     script = (
         f"import({json.dumps(spec_uri)}).then(m=>"
         "process.stdout.write(JSON.stringify({"
-        "flags:m.flags.map(f=>({name:f.name,category:f.category})),"
+        "flags:m.flags.map(f=>f.name),"
         "subcommands:[...m.subcommands.map(s=>s.name),'help'],"
         "privacyTiers:m.privacyTiers})));"
     )
@@ -43,15 +43,11 @@ def _load_completion_surface() -> tuple[list[str], list[str], list[str]]:
         check=True,
     ).stdout
     spec = json.loads(out)
-    # Mirror completionFlagNames() from gen-cli-docs.mjs: --help, normals,
-    # --privacy, experimentals, weakenings.
-    flag_names = (
-        ["--help"]
-        + [f["name"] for f in spec["flags"] if f["category"] == "normal"]
-        + ["--privacy"]
-        + [f["name"] for f in spec["flags"] if f["category"] == "experimental"]
-        + [f["name"] for f in spec["flags"] if f["category"] == "weakening"]
-    )
+    # The completion offers every flag plus the two value-less synthetics --help
+    # and --privacy. The checks below only test set membership and prefixes, so
+    # ordering is irrelevant — keep this a flat set, not the category-ordered
+    # list the generator emits.
+    flag_names = ["--help", "--privacy", *spec["flags"]]
     return flag_names, spec["subcommands"], spec["privacyTiers"]
 
 

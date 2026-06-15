@@ -9,7 +9,6 @@
 //   man/claude-guard.1  the SYNOPSIS subcommand list and the COMMANDS..SEE ALSO body
 
 import { writeFileSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -29,18 +28,31 @@ const byCat = (cat) => flags.filter((flag) => flag.category === cat);
 /** @param {{name: string}[]} items @returns {string[]} */
 const names = (items) => items.map((item) => item.name);
 
-/** Escape a description for embedding inside a shell single-quoted string.
- * Single quotes can't be escaped inside '…' — the idiomatic substitute is
- * to close the quote, add a backslash-quoted ' (or use $'…'), then reopen.
+// Each completion dialect quotes descriptions differently. The escapers below
+// each make a SINGLE pass over a character class so a backslash inserted for one
+// metacharacter is never re-escaped by a later pass (the subtle ordering bug
+// CodeQL's "incomplete string escaping" rule flags). The descriptions are
+// authored in cli-spec.mjs, so these are belt-and-braces for a future edit that
+// adds a quote/bracket/backslash — the per-shell parse-checks in
+// tests/test_bash_completion.py are the backstop.
+
+/** Escape for inside a POSIX/zsh single-quoted '…' literal. A single quote can't
+ * appear inside '…'; the idiom closes the quote, adds a backslash-escaped ', and
+ * reopens. Backslash is literal inside '…', so only ' needs handling.
  * @param {string} str @returns {string} */
 export const sqEsc = (str) => str.replace(/'/g, "'\\''");
 
-/** Additional escape needed inside a zsh option-spec description bracket [desc]:
- * a literal ] would close the bracket early; a literal \ must be doubled in the
- * original input before sqEsc runs, so that sqEsc's own \' sequences are not
- * re-doubled. @param {string} str @returns {string} */
-export const zshDescEsc = (str) =>
-  sqEsc(str.replace(/\\/g, "\\\\")).replace(/\]/g, "\\]");
+/** Escape for inside a zsh _arguments action bracket [desc], then for the outer
+ * single-quoted spec. Inside the bracket both \ (the escape char) and ] (which
+ * closes the bracket) are backslash-escaped in one pass; sqEsc then handles the
+ * surrounding '…'. Bracket-escaping runs first so sqEsc's own backslashes are
+ * left untouched. @param {string} str @returns {string} */
+export const zshDescEsc = (str) => sqEsc(str.replace(/[\]\\]/g, "\\$&"));
+
+/** Escape for inside a fish single-quoted '…' literal. Unlike POSIX, fish
+ * interprets \\ and \' inside '…', so both backslash and quote are
+ * backslash-escaped in one pass. @param {string} str @returns {string} */
+export const fishDescEsc = (str) => str.replace(/[\\']/g, "\\$&");
 
 // ── --help (bin/claude-guard) ────────────────────────────────────────────────
 
@@ -307,7 +319,7 @@ fi
 export function renderFishCompletion() {
   /** @param {Subcommand} sub */
   const subLine = (sub) =>
-    `    complete -c $cmd -n __claude_guard_needs_subcommand -a ${sub.name} -d '${sqEsc(sub.completion)}'`;
+    `    complete -c $cmd -n __claude_guard_needs_subcommand -a ${sub.name} -d '${fishDescEsc(sub.completion)}'`;
   const subLines = subcommands
     .map(subLine)
     .concat(
@@ -316,7 +328,7 @@ export function renderFishCompletion() {
     .join("\n");
   /** @param {Flag} flag */
   const flagLine = (flag) =>
-    `    complete -c $cmd -l ${flag.name.replace(/^--/, "")} -d '${sqEsc(flag.completion)}'`;
+    `    complete -c $cmd -l ${flag.name.replace(/^--/, "")} -d '${fishDescEsc(flag.completion)}'`;
   const flagLines = [
     "    complete -c $cmd -l help -d 'show the wrapper usage'",
     ...byCat("normal").map(flagLine),
@@ -430,20 +442,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const wrapper = join(root, "bin/claude-guard");
   const man = join(root, "man/claude-guard.1");
-  /** @type {string[]} */
-  const changed = [];
-  const write = (/** @type {string} */ path, /** @type {string} */ content) => {
-    if (writeIfChanged(path, content)) changed.push(path);
-  };
-  write(wrapper, applyToWrapper(readFileSync(wrapper, "utf8")));
-  write(man, applyToMan(readFileSync(man, "utf8")));
-  write(join(root, "completions/claude-guard.bash"), renderBashCompletion());
-  write(join(root, "completions/claude-guard.zsh"), renderZshCompletion());
-  write(join(root, "completions/claude-guard.fish"), renderFishCompletion());
-  // When invoked by the pre-commit hook, stage only the files the generator
-  // actually wrote — never git-add files the generator didn't touch, since
-  // that would accidentally stage unstaged hand-written section edits.
-  if (process.env.GEN_CLI_DOCS_GIT_ADD === "1" && changed.length > 0)
-    execFileSync("git", ["add", "--", ...changed], { stdio: "inherit" });
+  writeIfChanged(wrapper, applyToWrapper(readFileSync(wrapper, "utf8")));
+  writeIfChanged(man, applyToMan(readFileSync(man, "utf8")));
+  writeIfChanged(
+    join(root, "completions/claude-guard.bash"),
+    renderBashCompletion(),
+  );
+  writeIfChanged(
+    join(root, "completions/claude-guard.zsh"),
+    renderZshCompletion(),
+  );
+  writeIfChanged(
+    join(root, "completions/claude-guard.fish"),
+    renderFishCompletion(),
+  );
 }
 /* c8 ignore stop */
