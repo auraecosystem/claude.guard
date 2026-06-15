@@ -19,8 +19,6 @@ input=$(cat)
   IFS= read -r duration
   IFS= read -r subscription
   IFS= read -r session_id
-  IFS= read -r pr_number
-  IFS= read -r pr_state
 } < <(echo "$input" | jq -r '
   .model.display_name // .model.id // "?",
   .context_window.total_input_tokens // 0,
@@ -28,9 +26,7 @@ input=$(cat)
   .cost.total_cost_usd // 0,
   .cost.total_duration_ms // 0,
   .rate_limits.five_hour.resets_at // "",
-  .session_id // "",
-  (.pr.number | if . then tostring else "" end),
-  .pr.review_state // ""
+  .session_id // ""
 ')
 
 model="${model#venice,}"
@@ -188,23 +184,9 @@ elif [[ "$pct" -lt 85 ]]; then
   c="${ESC}[33m"
 else c="${ESC}[31m"; fi
 
-# PR badge: show number and review state when an open PR exists for the branch.
-pr_badge=""
-if [[ -n "$pr_number" ]]; then
-  case "$pr_state" in
-  approved) pr_color="${ESC}[32m" ;;
-  changes_requested) pr_color="${ESC}[31m" ;;
-  draft) pr_color="${ESC}[90m" ;;
-  *) pr_color="${ESC}[36m" ;;
-  esac
-  pr_label="#${pr_number}"
-  [[ -n "$pr_state" ]] && pr_label+=" (${pr_state})"
-  pr_badge=" ${pr_color}${pr_label}${RESET}"
-fi
-
 # Static format strings; every value (including the color escapes and the badge)
 # is a %s argument, so none of them is interpreted as a printf directive.
-printf '%s%s | %s/%s%s%s | %dm%ds%s\n' "$tier_badge" "$model" "$repo" "$branch" "$git_status" "$pr_badge" "$mins" "$secs" "$mon_spend"
+printf '%s%s | %s/%s%s | %dm%ds%s\n' "$tier_badge" "$model" "$repo" "$branch" "$git_status" "$mins" "$secs" "$mon_spend"
 if [[ -n "$subscription" ]]; then
   printf '%sctx %dk/%dk (%d%%)%s\n' "$c" "$ctx_k" "$max_k" "$pct" "$RESET"
 else
