@@ -149,6 +149,8 @@ t_start=$(now_ms)
 # multi-rep run measures the warm-start path a steady-state launch actually
 # takes; rep 1 covers the cold path only on a fresh host (or an expired TTL).
 docker volume create claude-gh-meta-cache >/dev/null
+# Same story for the shared MCP-decision store (also external: true).
+docker volume create claude-mcp-decisions >/dev/null
 
 # One real `up`, backgrounded so we can timestamp milestones as docker brings
 # the stack up in dependency order (a foreground `up -d` blocks until every

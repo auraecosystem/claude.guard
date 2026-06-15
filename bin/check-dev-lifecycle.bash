@@ -67,8 +67,8 @@ hook_crashed() {
 cleanup() {
   echo "==> Tearing down..."
   "${DC[@]}" down -v --timeout 10 2>/dev/null || true
-  # `down -v` never removes an external volume, so drop the shared cache explicitly.
-  docker volume rm -f claude-gh-meta-cache 2>/dev/null || true
+  # `down -v` never removes an external volume, so drop the shared ones explicitly.
+  docker volume rm -f claude-gh-meta-cache claude-mcp-decisions 2>/dev/null || true
   rm -f "$HOOK_ERRFILE"
 }
 trap cleanup EXIT
@@ -82,12 +82,14 @@ ck_build() {
 }
 
 ck_up() {
-  # gh-meta-cache is external: true in the compose; external means compose errors
-  # if it is absent, so create the shared cache first — as bin/claude-guard does.
-  docker volume create claude-gh-meta-cache >/dev/null || {
-    echo "could not create shared gh-meta cache volume"
+  # gh-meta-cache and mcp-decisions are external: true in the compose; external
+  # means compose errors if either is absent, so create both first — as
+  # bin/claude-guard does.
+  if ! docker volume create claude-gh-meta-cache >/dev/null ||
+    ! docker volume create claude-mcp-decisions >/dev/null; then
+    echo "could not create shared external volumes"
     return 1
-  }
+  fi
   # depends_on: hardener (service_completed_successfully) gates the app on the hardener
   # exiting 0, so a dev-mode entrypoint that fails the live install aborts THIS bring-up.
   "${DC[@]}" up -d || {

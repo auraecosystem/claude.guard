@@ -24,6 +24,12 @@ import {
   missingFilesystemRoots,
   buildPathWarning,
   FINGERPRINTS_PATH,
+  readProjectDecisions,
+  captureDecisions,
+  rehydrateDecisions,
+  persistDecisions,
+  buildRestoredMessage,
+  DECISIONS_PATH,
 } from "./mcp-tripwire.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -489,20 +495,259 @@ describe("mcp-tripwire: buildPathWarning", () => {
   });
 });
 
+describe("mcp-tripwire: readProjectDecisions", () => {
+  const names = ["a", "b", "c"];
+
+  it("classifies enabled as approved and disabled as denied; undecided omitted", () => {
+    const config = {
+      projects: {
+        "/p": { enabledMcpjsonServers: ["a"], disabledMcpjsonServers: ["b"] },
+      },
+    };
+    const { approved, denied } = readProjectDecisions(config, "/p", names);
+    assert.deepEqual([...approved], ["a"]);
+    assert.deepEqual([...denied], ["b"]);
+  });
+
+  it("treats a global or per-project bulk grant as approving every defined server", () => {
+    for (const config of [
+      { enableAllProjectMcpServers: true },
+      { projects: { "/p": { enableAllProjectMcpServers: true } } },
+    ]) {
+      const { approved, denied } = readProjectDecisions(config, "/p", names);
+      assert.deepEqual([...approved].sort(), ["a", "b", "c"]);
+      assert.deepEqual([...denied], []);
+    }
+  });
+
+  it("lets an explicit rejection win over a bulk grant", () => {
+    const config = {
+      enableAllProjectMcpServers: true,
+      projects: { "/p": { disabledMcpjsonServers: ["b"] } },
+    };
+    const { approved, denied } = readProjectDecisions(config, "/p", names);
+    assert.deepEqual([...denied], ["b"]);
+    assert.deepEqual([...approved].sort(), ["a", "c"]);
+  });
+
+  it("degrades a missing project and non-array fields to no decisions", () => {
+    assert.deepEqual([...readProjectDecisions({}, "/p", names).approved], []);
+    const bad = {
+      projects: {
+        "/p": { enabledMcpjsonServers: "nope", disabledMcpjsonServers: 7 },
+      },
+    };
+    const { approved, denied } = readProjectDecisions(bad, "/p", names);
+    assert.deepEqual([...approved], []);
+    assert.deepEqual([...denied], []);
+  });
+});
+
+describe("mcp-tripwire: captureDecisions", () => {
+  const servers = {
+    a: STDIO_DEF,
+    b: { command: "ls" },
+    c: { url: "https://x" },
+  };
+
+  it("records approved and denied with the current fingerprint, omits undecided", () => {
+    const config = {
+      projects: {
+        "/p": { enabledMcpjsonServers: ["a"], disabledMcpjsonServers: ["b"] },
+      },
+    };
+    assert.deepEqual(captureDecisions(config, servers, "/p"), {
+      a: { decision: "approved", fingerprint: serverFingerprint(STDIO_DEF) },
+      b: {
+        decision: "denied",
+        fingerprint: serverFingerprint({ command: "ls" }),
+      },
+    });
+  });
+
+  it("is empty when nothing is decided", () => {
+    assert.deepEqual(captureDecisions({}, servers, "/p"), {});
+  });
+});
+
+describe("mcp-tripwire: rehydrateDecisions", () => {
+  let dir;
+  let claudeJson;
+  const servers = { a: STDIO_DEF, b: { command: "ls" } };
+  const fpA = serverFingerprint(STDIO_DEF);
+  const fpB = serverFingerprint({ command: "ls" });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mcp-rehy-"));
+    claudeJson = join(dir, ".claude.json");
+  });
+
+  it("returns empty and never creates the file for an empty record", () => {
+    assert.deepEqual(rehydrateDecisions(claudeJson, "/p", servers, {}), {
+      approved: [],
+      denied: [],
+      stale: [],
+    });
+    assert.ok(!existsSync(claudeJson));
+  });
+
+  it("skips a server no longer defined, a null entry, and an unknown decision value", () => {
+    const record = {
+      gone: { decision: "approved", fingerprint: "x" },
+      // A hand-corrupted store may hold a null entry; it must be skipped, not throw.
+      a: null,
+      b: { decision: "weird", fingerprint: fpB },
+    };
+    assert.deepEqual(rehydrateDecisions(claudeJson, "/p", servers, record), {
+      approved: [],
+      denied: [],
+      stale: [],
+    });
+    assert.ok(!existsSync(claudeJson));
+  });
+
+  it("reports a changed definition as stale without restoring or writing it", () => {
+    const record = { a: { decision: "approved", fingerprint: "stale-fp" } };
+    assert.deepEqual(rehydrateDecisions(claudeJson, "/p", servers, record), {
+      approved: [],
+      denied: [],
+      stale: ["a"],
+    });
+    assert.ok(!existsSync(claudeJson));
+  });
+
+  it("restores an approved decision into a fresh config (out of disabled)", () => {
+    const record = { a: { decision: "approved", fingerprint: fpA } };
+    assert.deepEqual(rehydrateDecisions(claudeJson, "/p", servers, record), {
+      approved: ["a"],
+      denied: [],
+      stale: [],
+    });
+    const cfg = JSON.parse(readFileSync(claudeJson, "utf-8"));
+    assert.deepEqual(cfg.projects["/p"].enabledMcpjsonServers, ["a"]);
+    assert.deepEqual(cfg.projects["/p"].disabledMcpjsonServers, []);
+  });
+
+  it("restores a denied decision, merging into existing arrays without clobbering", () => {
+    writeFileSync(
+      claudeJson,
+      JSON.stringify({
+        projects: {
+          "/p": {
+            enabledMcpjsonServers: ["b"],
+            disabledMcpjsonServers: ["keep"],
+          },
+        },
+        other: 1,
+      }),
+    );
+    const record = { b: { decision: "denied", fingerprint: fpB } };
+    assert.deepEqual(
+      rehydrateDecisions(claudeJson, "/p", servers, record).denied,
+      ["b"],
+    );
+    const cfg = JSON.parse(readFileSync(claudeJson, "utf-8"));
+    assert.deepEqual(cfg.projects["/p"].disabledMcpjsonServers.sort(), [
+      "b",
+      "keep",
+    ]);
+    assert.deepEqual(cfg.projects["/p"].enabledMcpjsonServers, []);
+    assert.equal(cfg.other, 1);
+  });
+
+  it("tolerates non-array existing enabled/disabled fields", () => {
+    writeFileSync(
+      claudeJson,
+      JSON.stringify({ projects: { "/p": { enabledMcpjsonServers: "nope" } } }),
+    );
+    const record = { a: { decision: "approved", fingerprint: fpA } };
+    rehydrateDecisions(claudeJson, "/p", servers, record);
+    const cfg = JSON.parse(readFileSync(claudeJson, "utf-8"));
+    assert.deepEqual(cfg.projects["/p"].enabledMcpjsonServers, ["a"]);
+  });
+});
+
+describe("mcp-tripwire: persistDecisions", () => {
+  let dir;
+  let store;
+  const rec = { a: { decision: "approved", fingerprint: "fp" } };
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mcp-persist-"));
+    store = join(dir, "decisions.json");
+  });
+
+  it("writes a new project record and reports a change", () => {
+    const all = {};
+    assert.equal(persistDecisions(store, all, "/p", rec), true);
+    assert.deepEqual(JSON.parse(readFileSync(store, "utf-8")), { "/p": rec });
+  });
+
+  it("does not rewrite (or even create the file) when the record is unchanged", () => {
+    const all = { "/p": rec };
+    assert.equal(persistDecisions(store, all, "/p", { ...rec }), false);
+    assert.ok(!existsSync(store));
+  });
+
+  it("drops the project entry for an empty record and reports the change", () => {
+    const all = { "/p": rec, "/q": {} };
+    assert.equal(persistDecisions(store, all, "/p", {}), true);
+    assert.deepEqual(JSON.parse(readFileSync(store, "utf-8")), { "/q": {} });
+  });
+
+  it("is a no-op for an empty record when the project was already absent", () => {
+    const all = {};
+    assert.equal(persistDecisions(store, all, "/p", {}), false);
+    assert.ok(!existsSync(store));
+  });
+});
+
+describe("mcp-tripwire: buildRestoredMessage", () => {
+  it("is empty when nothing was restored", () => {
+    assert.equal(buildRestoredMessage({ approved: [], denied: [] }), "");
+  });
+
+  it("states restored approvals", () => {
+    assert.match(
+      buildRestoredMessage({ approved: ["a", "b"], denied: [] }),
+      /Restored your earlier approval of MCP server\(s\): a, b/,
+    );
+  });
+
+  it("states kept rejections, comma-joining multiple names", () => {
+    assert.match(
+      buildRestoredMessage({ approved: [], denied: ["y", "z"] }),
+      /Kept your earlier rejection of MCP server\(s\): y, z/,
+    );
+  });
+
+  it("states both on separate lines, approvals first", () => {
+    const msg = buildRestoredMessage({ approved: ["a"], denied: ["z"] });
+    assert.ok(msg.indexOf("Restored") < msg.indexOf("Kept"));
+    // The two notices are newline-separated, not run together.
+    assert.deepEqual(msg.split("\n").length, 2);
+    assert.match(
+      msg,
+      /approve them in a fresh prompt\.\nRestored|prompting\.\nKept/,
+    );
+  });
+});
+
 describe("mcp-tripwire: CLI end-to-end", () => {
   let home;
   let project;
   let fingerprints;
+  let decisions;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mcp-tripwire-home-"));
     project = join(home, "repo");
     mkdirSync(project);
     fingerprints = join(home, "fingerprints.json");
+    decisions = join(home, "decisions.json");
   });
 
   const env = (extra = {}) => ({
     HOME: home,
     CLAUDE_GUARD_MCP_FINGERPRINTS: fingerprints,
+    CLAUDE_GUARD_MCP_DECISIONS: decisions,
     ...extra,
   });
   const writeMcp = (servers) =>
@@ -649,6 +894,137 @@ describe("mcp-tripwire: CLI end-to-end", () => {
     );
     assert.equal(stored[project].srv, serverFingerprint(STDIO_DEF));
   });
+  it("defaults the decision store to ~/.claude when no override is set", async () => {
+    writeMcp({ srv: STDIO_DEF });
+    writeFileSync(
+      join(home, ".claude.json"),
+      JSON.stringify({
+        projects: { [project]: { enabledMcpjsonServers: ["srv"] } },
+      }),
+    );
+    await runTripwire({ env: { ...env(), CLAUDE_GUARD_MCP_DECISIONS: "" } });
+    const stored = JSON.parse(
+      readFileSync(
+        join(home, ".claude", "claude-guard-mcp-decisions.json"),
+        "utf-8",
+      ),
+    );
+    assert.equal(stored[project].srv.decision, "approved");
+  });
+
+  it("captures the session's MCP decisions at SessionEnd, emitting no output", async () => {
+    writeMcp({ srv: STDIO_DEF });
+    writeFileSync(
+      join(home, ".claude.json"),
+      JSON.stringify({
+        projects: { [project]: { enabledMcpjsonServers: ["srv"] } },
+      }),
+    );
+    const result = await runHook(
+      HOOK,
+      { cwd: project, hook_event_name: "SessionEnd" },
+      { env: env() },
+    );
+    assert.equal(result, null);
+    const stored = JSON.parse(readFileSync(decisions, "utf-8"));
+    assert.deepEqual(stored[project].srv, {
+      decision: "approved",
+      fingerprint: serverFingerprint(STDIO_DEF),
+    });
+  });
+
+  it("stays silent and writes no decisions at SessionEnd on a malformed .mcp.json", async () => {
+    writeFileSync(join(project, ".mcp.json"), "{broken");
+    const result = await runHook(
+      HOOK,
+      { cwd: project, hook_event_name: "SessionEnd" },
+      { env: env() },
+    );
+    assert.equal(result, null);
+    assert.ok(!existsSync(decisions));
+  });
+
+  it("restores a remembered approval at SessionStart without re-flagging it as new", async () => {
+    writeMcp({ srv: STDIO_DEF });
+    // The fingerprint cache persisted alongside the decision (both live on the same
+    // durable volume), so the server is NOT re-bannered as first-seen.
+    writeFileSync(
+      fingerprints,
+      JSON.stringify({ [project]: fingerprintServers({ srv: STDIO_DEF }) }),
+    );
+    writeFileSync(
+      decisions,
+      JSON.stringify({
+        [project]: {
+          srv: {
+            decision: "approved",
+            fingerprint: serverFingerprint(STDIO_DEF),
+          },
+        },
+      }),
+    );
+    const result = await runTripwire({ env: env() });
+    assert.match(
+      result.systemMessage,
+      /Restored your earlier approval of MCP server\(s\): srv/,
+    );
+    assert.doesNotMatch(result.systemMessage, /asks to run MCP servers/);
+    const cfg = JSON.parse(readFileSync(join(home, ".claude.json"), "utf-8"));
+    assert.deepEqual(cfg.projects[project].enabledMcpjsonServers, ["srv"]);
+  });
+
+  it("keeps a remembered rejection blocked at SessionStart", async () => {
+    writeMcp({ srv: STDIO_DEF });
+    writeFileSync(
+      fingerprints,
+      JSON.stringify({ [project]: fingerprintServers({ srv: STDIO_DEF }) }),
+    );
+    writeFileSync(
+      decisions,
+      JSON.stringify({
+        [project]: {
+          srv: {
+            decision: "denied",
+            fingerprint: serverFingerprint(STDIO_DEF),
+          },
+        },
+      }),
+    );
+    const result = await runTripwire({ env: env() });
+    assert.match(
+      result.systemMessage,
+      /Kept your earlier rejection of MCP server\(s\): srv/,
+    );
+    const cfg = JSON.parse(readFileSync(join(home, ".claude.json"), "utf-8"));
+    assert.deepEqual(cfg.projects[project].disabledMcpjsonServers, ["srv"]);
+  });
+
+  it("does not restore a remembered decision when the definition changed", async () => {
+    writeMcp({ srv: { command: "node", args: ["new.js"] } });
+    writeFileSync(
+      decisions,
+      JSON.stringify({
+        [project]: {
+          srv: {
+            decision: "approved",
+            fingerprint: serverFingerprint(STDIO_DEF),
+          },
+        },
+      }),
+    );
+    const result = await runTripwire({ env: env() });
+    assert.doesNotMatch(result.systemMessage, /Restored your earlier approval/);
+    // The stale definition is left to re-prompt: srv is not silently re-approved
+    // (nothing was written to ~/.claude.json), and the now-invalid decision is
+    // dropped from the durable store.
+    const cfgPath = join(home, ".claude.json");
+    const enabled = existsSync(cfgPath)
+      ? (JSON.parse(readFileSync(cfgPath, "utf-8")).projects?.[project]
+          ?.enabledMcpjsonServers ?? [])
+      : [];
+    assert.ok(!enabled.includes("srv"));
+    assert.deepEqual(JSON.parse(readFileSync(decisions, "utf-8")), {});
+  });
 });
 
 describe("mcp-tripwire: FINGERPRINTS_PATH", () => {
@@ -657,5 +1033,11 @@ describe("mcp-tripwire: FINGERPRINTS_PATH", () => {
       FINGERPRINTS_PATH,
       /\.claude\/claude-guard-mcp-fingerprints\.json$/,
     );
+  });
+});
+
+describe("mcp-tripwire: DECISIONS_PATH", () => {
+  it("lives under the harness's own state directory", () => {
+    assert.match(DECISIONS_PATH, /\.claude\/claude-guard-mcp-decisions\.json$/);
   });
 });

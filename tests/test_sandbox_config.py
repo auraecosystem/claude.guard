@@ -460,6 +460,56 @@ def test_monitor_spend_shared_writable_in_monitor_readonly_in_app(
     assert compose["services"]["app"]["environment"]["MONITOR_SPEND_DIR"] == mount
 
 
+def _external_volume_names(compose: dict) -> set:
+    """Docker volume names compose declares ``external: true`` — each must be
+    pre-created before ``up`` or compose aborts with 'external volume ... not found'."""
+    return {
+        spec["name"]
+        for spec in compose["volumes"].values()
+        if isinstance(spec, dict) and spec.get("external")
+    }
+
+
+def test_mcp_decisions_volume_persisted_and_redirected(compose: dict) -> None:
+    """The MCP approve/reject store must (a) live on an external (teardown-surviving)
+    volume the app can write, (b) be mounted into the root hardener so it can chown
+    it before the agent runs, and (c) have the hook's decision + fingerprint paths
+    redirected onto it — else the tmpfs $HOME / per-session config volume wipes every
+    MCP approval on each ephemeral launch."""
+    mount = "/var/cache/claude-mcp"
+    app = compose["services"]["app"]
+    assert f"mcp-decisions:{mount}" in app["volumes"]
+    assert f"mcp-decisions:{mount}" in compose["services"]["hardener"]["volumes"]
+    # Both hook state paths sit inside the mount, off the per-session config volume.
+    env = app["environment"]
+    assert env["CLAUDE_GUARD_MCP_DECISIONS"].startswith(mount + "/")
+    assert env["CLAUDE_GUARD_MCP_FINGERPRINTS"].startswith(mount + "/")
+    # External (survives ephemeral teardown) and non-keyed (shared across projects).
+    assert "claude-mcp-decisions" in _external_volume_names(compose)
+
+
+def test_external_volumes_are_precreated_before_compose_up(compose: dict) -> None:
+    """Every ``external: true`` volume must be ``docker volume create``d by the
+    launcher AND by each smoke/lifecycle script that runs ``compose up`` directly —
+    else a fresh host aborts at ``up`` with 'external volume ... not found'. A drift
+    guard so a NEW external volume can't be added without wiring all its creators."""
+    names = _external_volume_names(compose)
+    assert len(names) >= 2  # at least the gh-meta cache and the MCP-decision store
+    creators = (
+        CLAUDE_WRAPPER,
+        REPO_ROOT / "bin" / "check-compose-lifecycle.bash",
+        REPO_ROOT / "bin" / "check-dev-lifecycle.bash",
+        REPO_ROOT / "bin" / "check-foreign-repo.bash",
+        REPO_ROOT / "bin" / "bench-launch.bash",
+    )
+    for creator in creators:
+        text = creator.read_text()
+        for name in names:
+            assert f"docker volume create {name}" in text, (
+                f"{creator.name} runs compose up but never creates external volume {name}"
+            )
+
+
 def test_egress_log_only_in_firewall(compose: dict) -> None:
     """The squid egress log must be mounted only in the firewall, never the
     app — otherwise the agent could read or tamper with the record of what

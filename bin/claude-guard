@@ -1517,6 +1517,15 @@ if [[ -z "$container_id" ]]; then
     exit 1
   fi
 
+  # claude-mcp-decisions is the shared, cross-project store of the user's MCP
+  # approve/reject decisions, declared external for the same reason as the gh-meta
+  # cache (and likewise excluded from ephemeral teardown). Create it (idempotent)
+  # before `up`, since external means compose errors if it is absent.
+  if ! docker volume create claude-mcp-decisions >/dev/null; then
+    cg_error "could not create the shared MCP-decision volume (claude-mcp-decisions)."
+    exit 1
+  fi
+
   # A warm prebuilt pull finishes in seconds; a cold LOCAL build (base image +
   # dependency install) routinely runs minutes. resolve_prebuilt_image exports
   # CLAUDE_GUARD_PULL_POLICY only when it pulled a verified prebuilt, so its absence
@@ -1646,7 +1655,7 @@ if [[ -z "$container_id" ]]; then
     local err=""
     [[ -n "$dc_err" && -s "$dc_err" ]] && err="$(cat "$dc_err")"
     grep -qiE 'Pool overlaps' <<<"$err" && cg_error "likely cause — a leftover Docker network holds the sandbox subnet; run: docker network prune"
-    grep -qiE 'external volume .*not found' <<<"$err" && cg_error "likely cause — the shared cache volume is missing; run: docker volume create claude-gh-meta-cache"
+    grep -qiE 'external volume .*not found' <<<"$err" && cg_error "likely cause — a shared external volume is missing; run: docker volume create claude-gh-meta-cache && docker volume create claude-mcp-decisions"
     grep -qiE 'unknown or invalid runtime|invalid runtime name' <<<"$err" && cg_error "likely cause — the configured container runtime is not registered with Docker; run: claude-guard doctor"
     grep -qiE 'address already in use' <<<"$err" && cg_error "likely cause — a leftover container holds the sandbox address; run claude-panic (or docker compose down), then retry"
     grep -qiE 'no space left on device' <<<"$err" && cg_error "likely cause — the Docker disk is full; run: docker system prune, then retry"

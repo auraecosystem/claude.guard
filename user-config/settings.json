@@ -183,6 +183,17 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -d \"${CLAUDE_GUARD_DIR:-}\" ]; then node \"$CLAUDE_GUARD_DIR\"/.claude/hooks/mcp-tripwire.mjs; fi"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "",

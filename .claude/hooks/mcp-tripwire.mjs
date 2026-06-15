@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * SessionStart: surface every MCP server the project's .mcp.json defines and
- * drop stale approvals when a server's definition changed.
+ * SessionStart: surface every MCP server the project's .mcp.json defines, drop
+ * stale approvals when a server's definition changed, and restore the user's
+ * remembered approve/reject decisions. SessionEnd: capture the session's final
+ * decisions for next time.
  *
  * Approving a project MCP server is a one-keypress, sticky grant: a command
  * server's program runs at every session start with no per-call review event
@@ -11,6 +13,14 @@
  * server first appears or changes, and (b) fingerprints each definition so a
  * changed server's approval is removed from ~/.claude.json, forcing a fresh
  * prompt instead of silently running the new command under the old approval.
+ *
+ * Ephemeral sessions wipe ~/.claude.json (tmpfs $HOME), so the harness's record
+ * of which servers the user approved/rejected vanishes every launch. To stop the
+ * re-prompt-every-time churn this hook also mirrors that approve/reject state to a
+ * durable store: captureDecisions records it at SessionEnd (decisions are made
+ * mid-session, after SessionStart has run), and rehydrateDecisions re-applies it at
+ * the next SessionStart — fingerprint-gated, so a CHANGED definition still
+ * re-prompts and is never silently re-approved under a stale grant.
  */
 import {
   existsSync,
@@ -80,6 +90,21 @@ function objectKeys(value) {
   return value && typeof value === "object" && !Array.isArray(value)
     ? Object.keys(value)
     : [];
+}
+
+/**
+ * `value` if it is an array, else `[]` — for reading the harness's
+ * enabled/disabled lists, which a partially written ~/.claude.json may carry as a
+ * non-array. Callers only test membership against known server names, so the
+ * fallback's contents never matter, only that it is an empty iterable.
+ * @param {unknown} value
+ * @returns {unknown[]}
+ */
+function asArray(value) {
+  // Stryker disable next-line ArrayDeclaration: the fallback's contents are never
+  // read (only membership against known names is), so a non-empty sentinel array
+  // behaves identically — an equivalent mutant.
+  return Array.isArray(value) ? value : [];
 }
 
 /**
@@ -206,6 +231,149 @@ export function hasBlanketApproval(claudeJsonPath, projectDir) {
     config?.enableAllProjectMcpServers === true ||
     config?.projects?.[projectDir]?.enableAllProjectMcpServers === true
   );
+}
+
+/**
+ * The set of server names this project approved and the set it rejected, read from
+ * a PARSED ~/.claude.json. `enableAllProjectMcpServers` (global or per-project) is a
+ * bulk approval folded into `approved`. An explicit rejection wins over the bulk
+ * grant: a server the user singled out to reject stays denied even under "approve
+ * all", which is the security-conservative reading when the two conflict. Non-array
+ * fields degrade to empty so a partially written config never crashes capture. Only
+ * names in `definedNames` (the servers .mcp.json currently declares) are classified.
+ * @param {Record<string, unknown>} config parsed ~/.claude.json
+ * @param {string} projectDir
+ * @param {string[]} definedNames
+ * @returns {{ approved: Set<string>, denied: Set<string> }}
+ */
+export function readProjectDecisions(config, projectDir, definedNames) {
+  const project = /** @type {Record<string, unknown>} */ (
+    config?.projects?.[projectDir] ?? {}
+  );
+  const blanket =
+    config?.enableAllProjectMcpServers === true ||
+    project.enableAllProjectMcpServers === true;
+  const enabled = new Set(asArray(project.enabledMcpjsonServers));
+  const disabled = new Set(asArray(project.disabledMcpjsonServers));
+  const approved = new Set();
+  const denied = new Set();
+  for (const name of definedNames) {
+    if (disabled.has(name)) denied.add(name);
+    else if (blanket || enabled.has(name)) approved.add(name);
+  }
+  return { approved, denied };
+}
+
+/**
+ * The durable decision record for one project, built from the harness's live
+ * approve/reject state in a parsed ~/.claude.json. Each currently-defined server the
+ * user decided about is stored with the fingerprint of WHAT they decided, so a later
+ * session can distinguish an unchanged definition (restore the decision) from a
+ * changed one (re-prompt). Undecided servers and servers no longer in .mcp.json are
+ * omitted — the record holds only live decisions about current definitions.
+ * @param {Record<string, unknown>} config parsed ~/.claude.json
+ * @param {Record<string, Record<string, unknown>>} servers
+ * @param {string} projectDir
+ * @returns {Record<string, { decision: "approved" | "denied", fingerprint: string }>}
+ */
+export function captureDecisions(config, servers, projectDir) {
+  const names = Object.keys(servers);
+  const { approved, denied } = readProjectDecisions(config, projectDir, names);
+  const record = {};
+  for (const name of names) {
+    if (approved.has(name))
+      record[name] = {
+        decision: "approved",
+        fingerprint: serverFingerprint(servers[name]),
+      };
+    else if (denied.has(name))
+      record[name] = {
+        decision: "denied",
+        fingerprint: serverFingerprint(servers[name]),
+      };
+  }
+  return record;
+}
+
+/**
+ * Re-apply a project's remembered MCP decisions to ~/.claude.json so an ephemeral
+ * session whose tmpfs $HOME wiped the harness's own approve/reject state restarts
+ * with the user's prior choices instead of re-prompting. Only decisions whose stored
+ * fingerprint matches the CURRENT .mcp.json definition are restored — a changed
+ * definition is deliberately left to re-prompt, its name returned under `stale` so
+ * the caller can explain why. Approved names go into `enabledMcpjsonServers` (and out
+ * of disabled); denied names into `disabledMcpjsonServers` (and out of enabled). The
+ * file is rewritten only when there is at least one matching decision to apply, so an
+ * all-stale (or empty) record never touches the harness's config. Returns what it did.
+ * @param {string} claudeJsonPath
+ * @param {string} projectDir
+ * @param {Record<string, Record<string, unknown>>} servers
+ * @param {Record<string, { decision: string, fingerprint: string }>} record
+ * @returns {{ approved: string[], denied: string[], stale: string[] }}
+ */
+export function rehydrateDecisions(
+  claudeJsonPath,
+  projectDir,
+  servers,
+  record,
+) {
+  const restored = { approved: [], denied: [], stale: [] };
+  for (const [name, rec] of Object.entries(record)) {
+    if (!(name in servers)) continue;
+    if (rec?.decision !== "approved" && rec?.decision !== "denied") continue;
+    if (rec.fingerprint !== serverFingerprint(servers[name])) {
+      restored.stale.push(name);
+      continue;
+    }
+    (rec.decision === "approved" ? restored.approved : restored.denied).push(
+      name,
+    );
+  }
+  if (restored.approved.length === 0 && restored.denied.length === 0)
+    return restored;
+  const config = existsSync(claudeJsonPath)
+    ? // Stryker disable next-line StringLiteral: readFileSync("") returns a Buffer and JSON.parse coerces it via toString — a byte-identical parse, so the mutant is equivalent.
+      JSON.parse(readFileSync(claudeJsonPath, "utf-8"))
+    : {};
+  config.projects ??= {};
+  config.projects[projectDir] ??= {};
+  const project = config.projects[projectDir];
+  const enabled = new Set(asArray(project.enabledMcpjsonServers));
+  const disabled = new Set(asArray(project.disabledMcpjsonServers));
+  for (const name of restored.approved) {
+    enabled.add(name);
+    disabled.delete(name);
+  }
+  for (const name of restored.denied) {
+    disabled.add(name);
+    enabled.delete(name);
+  }
+  project.enabledMcpjsonServers = [...enabled];
+  project.disabledMcpjsonServers = [...disabled];
+  writeJsonAtomic(claudeJsonPath, config);
+  return restored;
+}
+
+/**
+ * Merge one project's freshly captured decision `record` into the durable
+ * cross-session store and write it back — but only when it actually differs from
+ * what is on disk, so a session that changed no decision never rewrites the file. An
+ * empty record drops the project's entry entirely (every prior decision was reset or
+ * its server removed). Returns true when the store was rewritten.
+ * @param {string} decisionsPath
+ * @param {Record<string, Record<string, unknown>>} all whole store, mutated in place
+ * @param {string} projectDir
+ * @param {Record<string, unknown>} record
+ * @returns {boolean}
+ */
+export function persistDecisions(decisionsPath, all, projectDir, record) {
+  const before = JSON.stringify(all[projectDir]);
+  if (Object.keys(record).length === 0) delete all[projectDir];
+  else all[projectDir] = record;
+  if (JSON.stringify(all[projectDir]) === before) return false;
+  mkdirSync(dirname(decisionsPath), { recursive: true });
+  writeJsonAtomic(decisionsPath, all);
+  return true;
 }
 
 /**
@@ -345,10 +513,45 @@ export function buildMessage(
   return lines.join("\n");
 }
 
+/**
+ * The note shown when SessionStart restored remembered decisions to a wiped
+ * ~/.claude.json. Approvals are stated so the user knows a server ran without a
+ * fresh prompt because THEY approved it before (not silently); rejections are
+ * stated so a still-blocked server isn't mistaken for breakage. Empty when nothing
+ * was restored, so a session with no remembered decisions adds no noise. Changed
+ * definitions are not mentioned here — the CHANGED banner already covers them.
+ * @param {{ approved: string[], denied: string[] }} restored
+ * @returns {string}
+ */
+export function buildRestoredMessage({ approved, denied }) {
+  const lines = [];
+  if (approved.length > 0)
+    lines.push(
+      `Restored your earlier approval of MCP server(s): ${approved.join(", ")} — unchanged since you approved them, so they run without re-prompting.`,
+    );
+  if (denied.length > 0)
+    lines.push(
+      `Kept your earlier rejection of MCP server(s): ${denied.join(", ")} — they stay blocked until you remove them from .mcp.json or approve them in a fresh prompt.`,
+    );
+  return lines.join("\n");
+}
+
 export const FINGERPRINTS_PATH = join(
   homedir(),
   ".claude",
   "claude-guard-mcp-fingerprints.json",
+);
+
+/**
+ * Durable, cross-session, cross-project store of the user's MCP approve/reject
+ * decisions. Lives beside the fingerprint cache; in the sandbox both are redirected
+ * (CLAUDE_GUARD_MCP_DECISIONS / _FINGERPRINTS) onto a persistent volume so an
+ * ephemeral session whose tmpfs $HOME is wiped can still restore them.
+ */
+export const DECISIONS_PATH = join(
+  homedir(),
+  ".claude",
+  "claude-guard-mcp-decisions.json",
 );
 
 // CLI entry (skipped when imported for testing). The logic above is exercised
@@ -364,6 +567,9 @@ const isDirectRun = isMain(import.meta.url);
 if (isDirectRun) {
   const input = await readStdinJson();
   const projectDir = input.cwd || process.cwd();
+  // SessionEnd fires when the session closes: persist the final decisions and exit
+  // silent (no user to message). Any other event is treated as SessionStart.
+  const isSessionEnd = input.hook_event_name === "SessionEnd";
   const mcpPath = join(projectDir, ".mcp.json");
   if (existsSync(mcpPath)) {
     let servers;
@@ -372,17 +578,51 @@ if (isDirectRun) {
     } catch (err) {
       // Surface, don't crash: a malformed .mcp.json the harness may still
       // partially honor must reach the user as a warning, and a hook failure
-      // here would abort session start over a file the repo controls.
-      process.stdout.write(
-        JSON.stringify({
-          systemMessage: `This repo ships a malformed .mcp.json (${errMessage(err)}). Review it before approving any MCP server it defines.`,
-        }),
-      );
+      // here would abort session start over a file the repo controls. At
+      // SessionEnd there is no one to warn, so just exit.
+      if (!isSessionEnd)
+        process.stdout.write(
+          JSON.stringify({
+            systemMessage: `This repo ships a malformed .mcp.json (${errMessage(err)}). Review it before approving any MCP server it defines.`,
+          }),
+        );
       process.exit(0);
     }
+    const claudeJsonPath = join(homedir(), ".claude.json");
+    const decisionsPath =
+      process.env.CLAUDE_GUARD_MCP_DECISIONS || DECISIONS_PATH;
+    // readFingerprints is the generic "parse this JSON file, degrade to {}" reader;
+    // the decision store has the same shape contract.
+    const decisions = readFingerprints(decisionsPath);
+    const readClaudeJson = () =>
+      existsSync(claudeJsonPath)
+        ? JSON.parse(readFileSync(claudeJsonPath, "utf-8"))
+        : {};
+    const capture = () =>
+      persistDecisions(
+        decisionsPath,
+        decisions,
+        projectDir,
+        captureDecisions(readClaudeJson(), servers, projectDir),
+      );
+
+    if (isSessionEnd) {
+      capture();
+      process.exit(0);
+    }
+
+    // SessionStart: restore remembered decisions BEFORE the harness reads its
+    // config, so an ephemeral session that wiped ~/.claude.json starts with the
+    // user's prior approvals/rejections re-applied instead of re-prompting.
+    const restored = rehydrateDecisions(
+      claudeJsonPath,
+      projectDir,
+      servers,
+      decisions[projectDir] ?? {},
+    );
+
     const fingerprintsPath =
       process.env.CLAUDE_GUARD_MCP_FINGERPRINTS || FINGERPRINTS_PATH;
-    const claudeJsonPath = join(homedir(), ".claude.json");
     const all = readFingerprints(fingerprintsPath);
     const diff = diffServers(servers, all[projectDir] ?? {});
     const staleNames = [...diff.changed, ...diff.deleted];
@@ -396,6 +636,9 @@ if (isDirectRun) {
     all[projectDir] = fingerprintServers(servers);
     mkdirSync(dirname(fingerprintsPath), { recursive: true });
     writeJsonAtomic(fingerprintsPath, all);
+    // Capture now too: under CLAUDE_PERSIST the harness's config survived and may
+    // hold decisions the store lacks; idempotent for the values just rehydrated.
+    capture();
     const message = buildMessage(servers, {
       ...diff,
       revoked,
@@ -404,7 +647,9 @@ if (isDirectRun) {
     const pathWarning = buildPathWarning(
       missingFilesystemRoots(servers, existsSync, projectDir),
     );
-    const systemMessage = [message, pathWarning].filter(Boolean).join("\n\n");
+    const systemMessage = [buildRestoredMessage(restored), message, pathWarning]
+      .filter(Boolean)
+      .join("\n\n");
     if (systemMessage) {
       process.stdout.write(
         JSON.stringify({

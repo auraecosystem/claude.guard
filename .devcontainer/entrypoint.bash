@@ -194,6 +194,28 @@ else
   exit 1
 fi
 
+# === Persistent MCP-decision store ownership ===
+# The agent (uid 1000) writes the MCP approve/reject decision store here at
+# SessionStart/SessionEnd (mcp-tripwire); a fresh Docker volume mounts root-owned,
+# so chown it to the node user first. Unlike monitor-spend the node user is the only
+# writer, so plain 1000:1000 mode 0700 (no setgid) is enough. The benign "already
+# provisioned, not writable" case is the app-container smoke re-run against a mount
+# the real hardener already chowned — detected by the dir already carrying the
+# wanted owner+mode (same pattern as the spend dir above).
+MCP_DIR="/var/cache/claude-mcp"
+MCP_OWNER="1000:1000"
+MCP_MODE="700"
+if mkdir -p "$MCP_DIR" 2>/dev/null &&
+  chown "$MCP_OWNER" "$MCP_DIR" 2>/dev/null &&
+  chmod "$MCP_MODE" "$MCP_DIR" 2>/dev/null; then
+  echo "Provisioned persistent MCP-decision dir $MCP_DIR ($MCP_OWNER $MCP_MODE)."
+elif [[ "$(stat -c '%u:%g %a' "$MCP_DIR" 2>/dev/null)" == "$MCP_OWNER $MCP_MODE" ]]; then
+  echo "WARN: $MCP_DIR already provisioned — expected only on the app-container re-run against an already-chowned mount." >&2
+else
+  echo "FATAL: could not provision persistent MCP-decision dir $MCP_DIR to $MCP_OWNER $MCP_MODE — refusing to exit 0, as the agent could not then persist MCP approval decisions. Check the mcp-decisions mount." >&2
+  exit 1
+fi
+
 # === Completion sentinel ===
 # Signal completion via the shared /run/hardening volume (writable here, read-only
 # in the app); the dispatcher and lib-checks gate on it. (Compose gates the app on
