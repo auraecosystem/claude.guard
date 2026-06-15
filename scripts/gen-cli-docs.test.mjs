@@ -93,13 +93,16 @@ test("sqEsc leaves safe strings unchanged and escapes single quotes", () => {
   assert.equal(sqEsc("''"), "'\\'''\\''");
 });
 
-test("zshDescEsc escapes single quotes and closing brackets", () => {
+test("zshDescEsc escapes single quotes, backslashes, and closing brackets", () => {
   assert.equal(zshDescEsc(""), "");
   assert.equal(zshDescEsc("safe string"), "safe string");
   assert.equal(zshDescEsc("it's fine"), "it'\\''s fine");
   assert.equal(zshDescEsc("close]bracket"), "close\\]bracket");
   assert.equal(zshDescEsc("both'and]"), "both'\\''and\\]");
   assert.equal(zshDescEsc("]"), "\\]");
+  // backslash must be doubled before ] is escaped, so \] → \\] not \\\]
+  assert.equal(zshDescEsc("\\"), "\\\\");
+  assert.equal(zshDescEsc("\\]"), "\\\\\\]");
 });
 
 // ── splice + write helpers ─────────────────────────────────────────────────────

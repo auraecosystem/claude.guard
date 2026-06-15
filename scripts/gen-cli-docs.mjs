@@ -36,8 +36,11 @@ const names = (items) => items.map((item) => item.name);
 export const sqEsc = (str) => str.replace(/'/g, "'\\''");
 
 /** Additional escape needed inside a zsh option-spec description bracket [desc]:
- * a literal ] would close the bracket early. @param {string} str @returns {string} */
-export const zshDescEsc = (str) => sqEsc(str).replace(/\]/g, "\\]");
+ * a literal ] would close the bracket early; a literal \ must be doubled in the
+ * original input before sqEsc runs, so that sqEsc's own \' sequences are not
+ * re-doubled. @param {string} str @returns {string} */
+export const zshDescEsc = (str) =>
+  sqEsc(str.replace(/\\/g, "\\\\")).replace(/\]/g, "\\]");
 
 // ── --help (bin/claude-guard) ────────────────────────────────────────────────
 
@@ -427,8 +430,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const wrapper = join(root, "bin/claude-guard");
   const man = join(root, "man/claude-guard.1");
+  /** @type {string[]} */
   const changed = [];
-  const write = (path, content) => {
+  const write = (/** @type {string} */ path, /** @type {string} */ content) => {
     if (writeIfChanged(path, content)) changed.push(path);
   };
   write(wrapper, applyToWrapper(readFileSync(wrapper, "utf8")));
