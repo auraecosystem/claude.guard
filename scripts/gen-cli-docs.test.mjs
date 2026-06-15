@@ -86,36 +86,42 @@ test("each shell completion offers the tiers, every flag, and every subcommand",
 
 // ── escape helpers ────────────────────────────────────────────────────────────
 
-test("sqEsc leaves safe strings unchanged and escapes single quotes", () => {
-  assert.equal(sqEsc(""), "");
-  assert.equal(sqEsc("safe string"), "safe string");
-  assert.equal(sqEsc("it's fine"), "it'\\''s fine");
-  assert.equal(sqEsc("a'b'c"), "a'\\''b'\\''c");
-  assert.equal(sqEsc("''"), "'\\'''\\''");
-});
-
-test("zshDescEsc escapes single quotes, backslashes, and closing brackets", () => {
-  assert.equal(zshDescEsc(""), "");
-  assert.equal(zshDescEsc("safe string"), "safe string");
-  assert.equal(zshDescEsc("it's fine"), "it'\\''s fine");
-  assert.equal(zshDescEsc("close]bracket"), "close\\]bracket");
-  assert.equal(zshDescEsc("both'and]"), "both'\\''and\\]");
-  assert.equal(zshDescEsc("]"), "\\]");
-  // \ and ] are escaped in one pass, so the inserted backslashes are never
-  // re-escaped: a lone \ becomes \\, and \] becomes \\\] (\\ then \]).
-  assert.equal(zshDescEsc("\\"), "\\\\");
-  assert.equal(zshDescEsc("\\]"), "\\\\\\]");
-});
-
-test("fishDescEsc backslash-escapes backslashes and single quotes", () => {
-  assert.equal(fishDescEsc(""), "");
-  assert.equal(fishDescEsc("safe string"), "safe string");
-  assert.equal(fishDescEsc("it's fine"), "it\\'s fine");
-  assert.equal(fishDescEsc("a'b'c"), "a\\'b\\'c");
-  assert.equal(fishDescEsc("back\\slash"), "back\\\\slash");
-  // a trailing backslash is doubled, so it can't escape the closing quote.
-  assert.equal(fishDescEsc("\\"), "\\\\");
-});
+// Each escaper, with [input, expected] cases. Empty + safe strings pass
+// through; metacharacters are escaped in a single pass so an inserted backslash
+// is never re-escaped (e.g. zsh \] is \\\], fish trailing \ is \\).
+const escaperCases = {
+  sqEsc: [
+    ["", ""],
+    ["safe string", "safe string"],
+    ["it's fine", "it'\\''s fine"],
+    ["a'b'c", "a'\\''b'\\''c"],
+    ["''", "'\\'''\\''"],
+  ],
+  zshDescEsc: [
+    ["", ""],
+    ["safe string", "safe string"],
+    ["it's fine", "it'\\''s fine"],
+    ["close]bracket", "close\\]bracket"],
+    ["both'and]", "both'\\''and\\]"],
+    ["]", "\\]"],
+    ["\\", "\\\\"],
+    ["\\]", "\\\\\\]"],
+  ],
+  fishDescEsc: [
+    ["", ""],
+    ["safe string", "safe string"],
+    ["it's fine", "it\\'s fine"],
+    ["a'b'c", "a\\'b\\'c"],
+    ["back\\slash", "back\\\\slash"],
+    ["\\", "\\\\"],
+  ],
+};
+const escapers = { sqEsc, zshDescEsc, fishDescEsc };
+for (const [name, cases] of Object.entries(escaperCases))
+  test(`${name} escapes shell metacharacters in a single pass`, () => {
+    for (const [input, expected] of cases)
+      assert.equal(escapers[name](input), expected, JSON.stringify(input));
+  });
 
 // ── splice + write helpers ─────────────────────────────────────────────────────
 

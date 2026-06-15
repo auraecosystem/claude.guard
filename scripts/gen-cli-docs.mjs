@@ -189,8 +189,9 @@ export function renderManSynopsis() {
 // ── shell completions ────────────────────────────────────────────────────────
 
 /** Flag names offered by completion: normal, --privacy, experimental, weakening,
- * plus --help. @returns {string[]} */
-const completionFlagNames = () => [
+ * plus --help. Exported so tests assert against the exact list the completions
+ * emit rather than reconstructing the ordering. @returns {string[]} */
+export const completionFlagNames = () => [
   "--help",
   ...names(byCat("normal")),
   "--privacy",

@@ -29,12 +29,16 @@ COMPLETIONS = REPO_ROOT / "completions"
 # adding a flag/subcommand to the spec automatically extends these checks.
 def _load_completion_surface() -> tuple[list[str], list[str], list[str]]:
     spec_uri = (REPO_ROOT / "scripts" / "cli-spec.mjs").as_uri()
+    gen_uri = (REPO_ROOT / "scripts" / "gen-cli-docs.mjs").as_uri()
+    # SSOT: the flag list comes straight from completionFlagNames() — the same
+    # function the generated completions are built from — so the checks assert
+    # against exactly what the scripts offer instead of reconstructing it.
     script = (
-        f"import({json.dumps(spec_uri)}).then(m=>"
-        "process.stdout.write(JSON.stringify({"
-        "flags:m.flags.map(f=>f.name),"
-        "subcommands:[...m.subcommands.map(s=>s.name),'help'],"
-        "privacyTiers:m.privacyTiers})));"
+        f"Promise.all([import({json.dumps(gen_uri)}),import({json.dumps(spec_uri)})])"
+        ".then(([g,s])=>process.stdout.write(JSON.stringify({"
+        "flags:g.completionFlagNames(),"
+        "subcommands:[...s.subcommands.map(x=>x.name),'help'],"
+        "privacyTiers:s.privacyTiers})));"
     )
     out = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -43,12 +47,7 @@ def _load_completion_surface() -> tuple[list[str], list[str], list[str]]:
         check=True,
     ).stdout
     spec = json.loads(out)
-    # The completion offers every flag plus the two value-less synthetics --help
-    # and --privacy. The checks below only test set membership and prefixes, so
-    # ordering is irrelevant — keep this a flat set, not the category-ordered
-    # list the generator emits.
-    flag_names = ["--help", "--privacy", *spec["flags"]]
-    return flag_names, spec["subcommands"], spec["privacyTiers"]
+    return spec["flags"], spec["subcommands"], spec["privacyTiers"]
 
 
 FLAGS, SUBCOMMANDS, PRIVACY_TIERS = _load_completion_surface()
