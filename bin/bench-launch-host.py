@@ -63,6 +63,14 @@ LAUNCH_TIMEOUT_S = 360.0
 # emit must stay a subset of what the analyzer knows here — test_bench_launch_host.py scans
 # the producer call sites and asserts exactly that (the one cross-language link bash and
 # Python can't share a constant for).
+#
+# FUTURE — we still need a real SSOT here. The mark names are duplicated across the bash
+# producers (bin/claude-guard, the in-container scripts) and these Python constants, bridged
+# only by a contract test — a DRIFT GUARD, which CLAUDE.md flags as a symptom that the
+# duplication hasn't actually been fixed. The true fix is a generator: define the names once
+# (e.g. a shared JSON/`config/launch-marks.json`) and derive both a sourced bash file and
+# these constants from it, so the literals exist in exactly one place. Until then the contract
+# tests below are the stopgap, not the destination.
 START = "start"
 HANDOVER = "handover"
 GC_START = "gc_start"
@@ -78,14 +86,37 @@ GUARDRAILS_VERIFIED = "guardrails_verified"
 FW_PREFIX = "fw_"
 HARDENER_PREFIX = "hard_"
 APP_PREFIX = "app_"
+# host_* is the host-side counterpart: SEQUENTIAL sub-legs (not a parallel subsystem) that
+# subdivide the otherwise-opaque host spans (start->gc_start, gc_done->compose_up_start) so a
+# launch-perf run shows where the ~1 s host side actually goes. All bucket into `host`.
+# Unlike the open-ended fw_/hard_/app_ families, the host_ members are a fixed, named set
+# (these five), so they get constants — the SSOT the producer (bin/claude-guard) is pinned to
+# by the contract test and the synthetic-trace fixtures build from. HOST_PREFIX still drives
+# classification, so a future host_ mark needs no classifier edit.
+HOST_PREFIX = "host_"
+HOST_STARTUP_DONE = "host_startup_done"
+HOST_CFG_RENDERED = "host_cfg_rendered"
+HOST_RESOLVE_START = "host_resolve_start"
+HOST_COMPOSE_STRIPPED = "host_compose_stripped"
+HOST_GHMETA_VOL_READY = "host_ghmeta_vol_ready"
+# The canonical host_ set, pinned to what bin/claude-guard stamps by a contract test, so a
+# wrapper-side rename/addition can't drift from this SSOT unnoticed.
+HOST_SUBMARKS = (
+    HOST_STARTUP_DONE,
+    HOST_CFG_RENDERED,
+    HOST_RESOLVE_START,
+    HOST_COMPOSE_STRIPPED,
+    HOST_GHMETA_VOL_READY,
+)
 
 
 def known_mark(name: str) -> bool:
     """True if `name` is a milestone the analyzer recognizes — a named constant above or a
-    member of a parallel-subsystem prefix family. The producer-contract test uses this to
-    prove every stamped mark is classifiable (none silently bucketed as `other`)."""
+    member of a prefix family (the parallel subsystems, or the sequential host_* sub-legs).
+    The producer-contract test uses this to prove every stamped mark is classifiable (none
+    silently bucketed as `other`)."""
     return name in _KNOWN_MILESTONES or name.startswith(
-        (FW_PREFIX, HARDENER_PREFIX, APP_PREFIX)
+        (FW_PREFIX, HARDENER_PREFIX, APP_PREFIX, HOST_PREFIX)
     )
 
 
@@ -264,7 +295,17 @@ def _leg_section(frm: str, to: str) -> str:
     miscredited to the subsystem it merely precedes (compose_up_start->hard_start would
     otherwise look like a hardener leg). The leg INTO app_boot_start is the app container's
     gVisor boot — the launch's long pole once it overlaps the hardener — so it lands in its
-    own `app` section instead of being buried in the inferred hard_done->containers_ready gap."""
+    own `app` section instead of being buried in the inferred hard_done->containers_ready gap.
+
+    The host_* sub-legs (finer host-side instrumentation) bucket into `host`, INCLUDING the
+    final host_*->compose_up_start leg — everything up to compose_up_start (stamped just
+    before `devcontainer up`) is host-side prep, and crediting it to `host` keeps the
+    `create` section to the true container-create + gVisor-boot cost. Checked before the
+    _CONTAINER_CREATE_FROM rule so an image_resolved->host_* sub-leg isn't miscredited to
+    `create`; the unsubdivided image_resolved->compose_up_start leg (no host_* marks) still
+    falls through to `create` via _CONTAINER_CREATE_FROM, so older traces are unchanged."""
+    if to.startswith("host_") or (frm.startswith("host_") and to == COMPOSE_UP_START):
+        return "host"
     if frm in _CONTAINER_CREATE_FROM:
         return "create"
     if to.startswith("fw_"):

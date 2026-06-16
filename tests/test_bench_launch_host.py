@@ -168,6 +168,51 @@ def test_legs_split_the_container_creation_leg(bench) -> None:
     assert bench.total_ms(bench.parse_trace(_WITH_CREATE_SPLIT)) == 2900
 
 
+# The host_* sub-marks (bin/claude-guard) subdivide the otherwise-opaque host spans so a
+# launch-perf run shows where the ~1 s host side goes: the config render, the prebuilt
+# resolve, and the `docker volume create` round-trip each become their own leg.
+_WITH_HOST_SPLIT = (
+    f"{_MOD.START}\t1000\n"
+    f"{_MOD.HOST_STARTUP_DONE}\t1100\n"  # all pre-container startup
+    f"{_MOD.HOST_CFG_RENDERED}\t1130\n"  # the per-workspace config render (30 ms)
+    f"{_MOD.GC_START}\t1150\n"
+    f"{_MOD.GC_DONE}\t1160\n"
+    f"{_MOD.HOST_RESOLVE_START}\t1200\n"  # cold-branch prep before resolve
+    f"{_MOD.IMAGE_RESOLVED}\t1600\n"  # the prebuilt resolve itself (400 ms)
+    f"{_MOD.HOST_COMPOSE_STRIPPED}\t1650\n"  # runtime gates + post-resolve render
+    f"{_MOD.HOST_GHMETA_VOL_READY}\t1700\n"  # the docker volume create round-trip (50 ms)
+    f"{_MOD.COMPOSE_UP_START}\t1720\n"
+    f"{_MOD.ENTRYPOINT_STARTED}\t3000\n"
+    f"{_MOD.CONTAINERS_READY}\t3200\n"
+    f"{_MOD.HANDOVER}\t3400\n"
+)
+
+
+def test_host_sub_marks_subdivide_the_host_spans(bench) -> None:
+    legs = bench.legs(bench.parse_trace(_WITH_HOST_SPLIT))
+    # The render, the resolve, and the volume-create round-trip are now distinct deltas.
+    assert (bench.START, bench.HOST_STARTUP_DONE, 100) in legs
+    assert (bench.HOST_STARTUP_DONE, bench.HOST_CFG_RENDERED, 30) in legs
+    assert (bench.HOST_RESOLVE_START, bench.IMAGE_RESOLVED, 400) in legs
+    assert (bench.HOST_COMPOSE_STRIPPED, bench.HOST_GHMETA_VOL_READY, 50) in legs
+    assert (bench.HOST_GHMETA_VOL_READY, bench.COMPOSE_UP_START, 20) in legs
+    # Every host_* sub-leg (including the final one into compose_up_start) lands in `host`;
+    # only the true infra create remains under `create`.
+    for frm, to, _ in legs:
+        if frm.startswith(bench.HOST_PREFIX) or to.startswith(bench.HOST_PREFIX):
+            assert bench._leg_section(frm, to) == "host", (frm, to)
+    assert (
+        bench._leg_section(bench.COMPOSE_UP_START, bench.ENTRYPOINT_STARTED) == "create"
+    )
+    # The sub-marks render under the Host-preflight heading, and subdividing leaves the
+    # total unchanged.
+    out = bench.format_human(bench.summarize([bench.parse_trace(_WITH_HOST_SPLIT)]))
+    assert "Host preflight" in out
+    assert f"{bench.HOST_STARTUP_DONE} -> {bench.HOST_CFG_RENDERED}" in out
+    assert f"{bench.HOST_RESOLVE_START} -> {bench.IMAGE_RESOLVED}" in out
+    assert bench.total_ms(bench.parse_trace(_WITH_HOST_SPLIT)) == 2400
+
+
 # The scripts that stamp marks via launch_trace_mark, scanned by the contract test below.
 _PRODUCER_FILES = (
     "bin/claude-guard",
@@ -194,6 +239,17 @@ def test_every_produced_mark_is_known_to_the_analyzer(bench) -> None:
     assert produced, "no launch_trace_mark calls found — the producer scan is broken"
     unknown = {m for m in produced if not bench.known_mark(m)}
     assert not unknown, f"marks not classified by the analyzer: {sorted(unknown)}"
+
+
+def test_host_submarks_match_the_producer(bench) -> None:
+    """The host_ marks bin/claude-guard actually stamps are EXACTLY the analyzer's named
+    HOST_SUBMARKS set — making those constants the load-bearing SSOT the fixtures build from,
+    so a wrapper-side rename/addition fails here rather than silently drifting (the prefix
+    family alone would let an unnamed host_ mark slip past the contract test above)."""
+    repo = Path(__file__).resolve().parent.parent
+    text = (repo / "bin" / "claude-guard").read_text()
+    emitted = {m for m in _MARK_CALL.findall(text) if m.startswith(bench.HOST_PREFIX)}
+    assert emitted == set(bench.HOST_SUBMARKS)
 
 
 # The app container runs its own keep-alive command (docker-compose.yml, overrideCommand
@@ -371,6 +427,22 @@ def test_leg_section_classifies_by_milestone(bench) -> None:
     assert bench._leg_section("hard_done", "containers_ready") == "ready"
     assert bench._leg_section("containers_ready", "guardrails_verified") == "handover"
     assert bench._leg_section("foo", "bar") == "other"
+    # host_* sub-legs bucket into `host`, including the final host_*->compose_up_start leg
+    # (everything up to compose_up_start is host-side prep). Checked before _CONTAINER_CREATE_FROM
+    # so an image_resolved->host_* sub-leg is `host`, not miscredited to `create`; the
+    # unsubdivided image_resolved->compose_up_start leg (asserted above) still falls to `create`.
+    assert (
+        bench._leg_section(bench.HOST_STARTUP_DONE, bench.HOST_CFG_RENDERED) == "host"
+    )
+    assert (
+        bench._leg_section(bench.IMAGE_RESOLVED, bench.HOST_COMPOSE_STRIPPED) == "host"
+    )
+    assert (
+        bench._leg_section(bench.HOST_GHMETA_VOL_READY, bench.COMPOSE_UP_START)
+        == "host"
+    )
+    # A non-host `from` into compose_up_start is still `create` (the unsubdivided path).
+    assert bench._leg_section(bench.IMAGE_RESOLVED, bench.COMPOSE_UP_START) == "create"
 
 
 def test_format_human_reports_missing_handover(bench) -> None:
