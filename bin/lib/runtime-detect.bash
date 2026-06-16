@@ -45,6 +45,37 @@ docker_has_kata_runtime() { docker_has_runtime 'kata-fc'; }
 # execute-probe is the loud backstop for that deliberate case.
 host_has_kvm() { [[ -e "${KVM_DEVICE:-/dev/kvm}" ]]; }
 
+# host_kvm_usable — true when /dev/kvm exists AND is readable+writable by this
+# user, the real precondition for a Kata/Firecracker microVM to boot. Distinct
+# from host_has_kvm (existence only, which gates auto-selection with the wrapper's
+# execute-probe as the loud backstop): this reports whether Kata would actually
+# work, so setup.bash's WSL2 note and claude-guard-doctor agree instead of one
+# claiming "Kata available" for a present-but-inaccessible device (user not in the
+# 'kvm' group). Honors KVM_DEVICE for tests.
+host_kvm_usable() {
+  local dev="${KVM_DEVICE:-/dev/kvm}"
+  [[ -r "$dev" && -w "$dev" ]]
+}
+
+# wsl_nested_virt_hint — the canonical one-line fix for getting /dev/kvm (hence
+# Kata) on WSL2: enable nested virtualization in the Windows-side .wslconfig.
+# Single source of truth shared by setup.bash's install-time note and the doctor
+# runtime note (which reads it from the runtime probe), so the file path and the
+# key can't drift between them.
+wsl_nested_virt_hint() {
+  printf '%s\n' "add [wsl2] nestedVirtualization=true to %USERPROFILE%\\.wslconfig and run 'wsl --shutdown'"
+}
+
+# json_string — minimal JSON string encoder: escape backslash and double-quote
+# (the runtime facts carry neither control chars nor newlines, so those two are
+# the only sequences that would break a JSON literal). Lets the doctor probe emit
+# one structured object the Python side reads by name, instead of stdout lines
+# parsed by position. Standalone (no jq) so doctor still works on a host missing it.
+json_string() {
+  local s=${1//\\/\\\\}
+  printf '"%s"' "${s//\"/\\\"}"
+}
+
 # Poll until $1 is a registered Docker runtime, up to ${2:-30} one-second tries.
 # Returns 0 as soon as it appears, 1 if it never does. Used right after a daemon
 # restart that registers a new runtime, where the runtime is not visible the

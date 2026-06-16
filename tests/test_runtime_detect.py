@@ -6,6 +6,8 @@ Docker Desktop + runsc case) is what makes `docker-compose up` hang. Detection
 must therefore be driven by what Docker actually reports as registered.
 """
 
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -564,6 +566,89 @@ def test_auto_runsc_with_kvm_flags_downgrade() -> None:
 def test_auto_runsc_without_kvm_no_downgrade() -> None:
     _, downgrade = _isolation_summary("runsc", auto="true")
     assert downgrade == ""
+
+
+# ── host_kvm_usable / wsl_nested_virt_hint ──────────────────────────────────
+# host_kvm_usable is the rw probe both setup.bash and doctor key off (vs
+# host_has_kvm's existence-only auto-select gate). KVM_DEVICE makes it testable
+# without a real /dev/kvm; the rw-vs-absent split is what stops a present-but-
+# inaccessible device from being mislabeled "Kata available".
+def _eval_kvm_usable(kvm_dev: Path) -> str:
+    r = run_capture(
+        ["bash", "-c", f'source "{LIB}"; host_kvm_usable && echo yes || echo no'],
+        env={"PATH": "/usr/bin:/bin", "KVM_DEVICE": str(kvm_dev)},
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_host_kvm_usable_true_for_readable_writable_device(tmp_path: Path) -> None:
+    dev = tmp_path / "kvm"
+    dev.write_text("")  # owner gets rw by default
+    assert _eval_kvm_usable(dev) == "yes"
+
+
+def test_host_kvm_usable_false_when_device_absent(tmp_path: Path) -> None:
+    assert _eval_kvm_usable(tmp_path / "kvm") == "no"  # never created
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="root bypasses DAC, so a chmod-000 device still reads rw"
+)
+def test_host_kvm_present_but_not_usable_is_the_divergence_the_fix_closes(
+    tmp_path: Path,
+) -> None:
+    """A device that exists but the user can't rw (not in 'kvm' group) is the exact
+    false-green case: host_has_kvm true, host_kvm_usable false. Drives both real
+    functions against one device so their divergence — not just each in isolation —
+    is asserted. Root ignores file perms, hence the non-root guard."""
+    dev = tmp_path / "kvm"
+    dev.write_text("")
+    dev.chmod(0o000)
+    r = run_capture(
+        [
+            "bash",
+            "-c",
+            f'source "{LIB}"; host_has_kvm && echo has || echo missing; '
+            "host_kvm_usable && echo usable || echo unusable",
+        ],
+        env={"PATH": "/usr/bin:/bin", "KVM_DEVICE": str(dev)},
+    )
+    assert r.stdout.split() == ["has", "unusable"], r.stdout
+
+
+def test_json_string_encodes_a_parseable_json_document() -> None:
+    """json_string must escape the backslash in the .wslconfig path (and quotes) so
+    the doctor probe's object parses — an unescaped `\\.` is the invalid escape that
+    would make json.loads choke. Round-trips the real hint through a JSON object."""
+    r = run_capture(
+        [
+            "bash",
+            "-c",
+            f'source "{LIB}"; '
+            'printf \'{"hint":%s}\' "$(json_string "$(wsl_nested_virt_hint)")"',
+        ],
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {
+        "hint": "add [wsl2] nestedVirtualization=true to "
+        "%USERPROFILE%\\.wslconfig and run 'wsl --shutdown'"
+    }
+
+
+def test_wsl_nested_virt_hint_names_the_full_wslconfig_recipe() -> None:
+    """The canonical fix is the single source of truth for both setup.bash and the
+    doctor note, so it must carry every part a user needs to paste and apply."""
+    r = run_capture(
+        ["bash", "-c", f'source "{LIB}"; wsl_nested_virt_hint'],
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    out = r.stdout
+    assert "[wsl2]" in out
+    assert "nestedVirtualization=true" in out
+    assert ".wslconfig" in out
+    assert "wsl --shutdown" in out
 
 
 def _orbstack_stub(context: str, endpoint: str, os_name: str) -> str:
