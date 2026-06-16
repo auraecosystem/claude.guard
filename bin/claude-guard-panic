@@ -131,6 +131,7 @@ step() {
 
 mkdir -p "$snapshot_dir" 2>/dev/null || {
   echo "claude-panic: cannot create snapshot dir $snapshot_dir" >&2
+  echo "claude-panic: check directory permissions and free space, then retry (set CLAUDE_PANIC_DIR to use another location)." >&2
   exit 1
 }
 echo "claude-panic: workspace $workspace_folder" >&2
