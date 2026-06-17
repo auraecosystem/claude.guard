@@ -147,8 +147,21 @@ def _claim_stub(tmp_path: Path) -> tuple[Path, Path, dict]:
         {
             "FAKE_DOCKER_LOG": str(log),
             "PREWARM_CLAIM_DIR": str(tmp_path / "claims"),
+            # The guardrail-stamp store (the host-side "spare finished baking" signal
+            # adoption now requires) is keyed off XDG_CACHE_HOME; pin it per-test so the
+            # check is hermetic and a stamp can be seeded without touching the real cache.
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
         },
     )
+
+
+def _seed_baked_stamp(tmp_path: Path, cid: str = "sparecid") -> None:
+    """Mark `cid` as a FULLY-baked spare by planting its guardrail stamp under the
+    per-test XDG_CACHE_HOME — the same file a real `prewarm` writes only once its gates
+    pass. prewarm_baked is existence-only, so the body is unimportant."""
+    stamp = tmp_path / "cache" / "claude-monitor" / "guardrail-verified" / cid
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text("spec=x\nws=1\n")
 
 
 def test_try_adopt_claims_and_reports_spare(tmp_path: Path) -> None:
@@ -156,6 +169,7 @@ def test_try_adopt_claims_and_reports_spare(tmp_path: Path) -> None:
     project + volume id are read back from the immutable labels, so the adopter can
     retarget teardown at the spare's own stack."""
     stub, _, env = _claim_stub(tmp_path)
+    _seed_baked_stamp(tmp_path)
     r = _run_lib(
         "prewarm_try_adopt /ws spec123 && "
         'printf "%s|%s|%s\\n" "$_PREWARM_ADOPTED_CID" '
@@ -187,10 +201,27 @@ def test_try_adopt_lost_claim_returns_nonzero(tmp_path: Path) -> None:
     already exists), adoption reports failure so the launch falls through to cold —
     exactly one launch can win a given spare."""
     stub, _, env = _claim_stub(tmp_path)
+    _seed_baked_stamp(
+        tmp_path
+    )  # baked, so it is the LOST CLAIM (not the bake gate) that rejects it
     # Pre-create the claim dir: a concurrent adopter already won it.
     (Path(env["PREWARM_CLAIM_DIR"]) / SPARE_PROJECT).mkdir(parents=True)
     r = _run_lib("prewarm_try_adopt /ws spec123", stub, **env)
     assert r.returncode != 0
+
+
+def test_try_adopt_skips_unbaked_spare(tmp_path: Path) -> None:
+    """The invariant: a discoverable spare whose prewarm has NOT finished — no guardrail
+    stamp on the host — is NEVER adopted, even though its `prewarm=ready` label (set at
+    container creation, before its gates) makes it discoverable. Adoption reports failure so
+    the launch falls to cold (or another, fully-baked spare) instead of inheriting the
+    spare's remaining hardening/firewall wait. No stamp is seeded here."""
+    stub, _, env = _claim_stub(tmp_path)
+    r = _run_lib("prewarm_try_adopt /ws spec123", stub, **env)
+    assert r.returncode != 0
+    # And it was not claimed — a skipped spare must stay free for a later launch to adopt
+    # once it finishes baking.
+    assert not (Path(env["PREWARM_CLAIM_DIR"]) / SPARE_PROJECT).exists()
 
 
 def test_ready_spare_exists_ignores_claimed(tmp_path: Path) -> None:
@@ -797,6 +828,21 @@ def _prewarm_env(tmp_path: Path, **overrides: str):
     env["PREWARM_CLAIM_DIR"] = str(tmp_path / "claims")
     env["MONITOR_API_KEY"] = "x"
     env.update(overrides)
+    # A discoverable spare (FAKE_SPARE=1) models a FULLY-baked one: plant the guardrail
+    # stamp adoption now requires (prewarm_baked), keyed by the fake's container id
+    # `sparecid`, under the launch's cache (HOME/.cache). Without it, every adoption path
+    # below would (correctly) skip the spare as still-baking and fall to cold. Tests that
+    # want the un-baked case (the new fall-through) override FAKE_SPARE_UNBAKED=1.
+    if env.get("FAKE_SPARE") == "1" and env.get("FAKE_SPARE_UNBAKED") != "1":
+        stamp = (
+            Path(env["HOME"])
+            / ".cache"
+            / "claude-monitor"
+            / "guardrail-verified"
+            / "sparecid"
+        )
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("spec=x\nws=1\n")
     return stub, log, env
 
 
@@ -933,6 +979,27 @@ def test_lost_claim_falls_through_to_cold(tmp_path: Path) -> None:
     claim = Path(env["PREWARM_CLAIM_DIR"]) / _SPARE_PROJECT
     claim.mkdir(parents=True)
     (claim / "pid").write_text(str(os.getpid()))
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "adopting a pre-warmed sandbox" not in r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    assert "compose_up_start" in _trace_stages(trace)  # cold path ran
+
+
+def test_unbaked_spare_is_not_adopted_falls_through_to_cold(tmp_path: Path) -> None:
+    """End-to-end invariant: a spare that is discoverable (its `prewarm=ready` label is set
+    at container creation) but whose prewarm has NOT finished — no host guardrail stamp — is
+    NOT adopted. The launch does not pay the spare's remaining bake time; it falls through to
+    a normal cold build and still launches. This is the fix for a 'warm' adoption silently
+    inheriting a half-baked spare's hardening/firewall wait."""
+    _init_repo(tmp_path)
+    trace = tmp_path / "trace.tsv"
+    _, _, env = _prewarm_env(
+        tmp_path,
+        FAKE_SPARE="1",
+        FAKE_SPARE_UNBAKED="1",  # discoverable, but no stamp seeded
+        CLAUDE_GUARD_LAUNCH_TRACE=str(trace),
+    )
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
     assert "adopting a pre-warmed sandbox" not in r.stderr
