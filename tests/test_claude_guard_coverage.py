@@ -105,10 +105,28 @@ printf 'CLAUDE_CODE_VERSION=%s\n' "${CLAUDE_CODE_VERSION:-}" >> "$FAKE_DOCKER_LO
 marker="$FAKE_STATE/up-done"
 case "$1" in
 ps)
-  # Bare `docker ps` is the daemon-reachability probe. FAKE_PS_FAIL makes it
-  # unreachable — but an `orb start` (the macOS auto-start path) that touches
-  # $FAKE_STATE/orb-up "fixes" it, so the wrapper can recover instead of bailing.
-  [ "$#" -eq 1 ] && { { [ -n "${FAKE_PS_FAIL:-}" ] && [ ! -f "$FAKE_STATE/orb-up" ]; } && exit 1; exit 0; }
+  # Bare `docker ps` is the daemon-reachability probe the wait loop
+  # (wait_for_docker_daemon_up) now polls. Knobs model the daemon's state:
+  #   FAKE_PS_DENIED   socket up but this shell lacks group access (permission denied
+  #                    on stderr, exit 1) — the wait treats it as UP, then
+  #                    docker_daemon_reachable's `docker info` re-probe decides.
+  #   FAKE_PS_FAIL     unreachable until an `orb start` (the macOS auto-start path)
+  #                    touches $FAKE_STATE/orb-up, "fixing" it so the wrapper recovers.
+  #   FAKE_PS_FAIL_N=n the first n probes fail with a connection error, then succeed
+  #                    (the daemon-still-coming-up path); counted in a state file.
+  if [ "$#" -eq 1 ]; then
+    if [ -n "${FAKE_PS_DENIED:-}" ]; then
+      echo "permission denied while trying to connect to the Docker daemon socket" >&2
+      exit 1
+    fi
+    { [ -n "${FAKE_PS_FAIL:-}" ] && [ ! -f "$FAKE_STATE/orb-up" ]; } && exit 1
+    if [ -n "${FAKE_PS_FAIL_N:-}" ]; then
+      cnt=$(cat "$FAKE_STATE/pscnt" 2>/dev/null || echo 0)
+      cnt=$((cnt + 1)); echo "$cnt" > "$FAKE_STATE/pscnt"
+      [ "$cnt" -le "$FAKE_PS_FAIL_N" ] && exit 1
+    fi
+    exit 0
+  fi
   # FAKE_GC_BLOCK_UNTIL_UP blocks the orphan-reap query (its `--format` template is
   # the unique '{{.Label "com.docker.compose.project"}}' form — distinct from the
   # session-discovery `--filter label=...project=...` probe) until the devcontainer
@@ -146,18 +164,11 @@ ps)
   done
   exit 0 ;;
 info)
-  # The first-launch daemon-race wait polls bare `docker info`. FAKE_INFO_FAIL=<n>
-  # makes the first n `info` calls fail (socket still coming up), then succeed —
-  # the daemon-comes-up-after-waiting path. FAKE_INFO_FAIL=inf never succeeds (the
-  # timeout path). Both count calls in a state file so the loop's retries advance it.
-  if [ -n "${FAKE_INFO_FAIL:-}" ] && [ "$#" -eq 1 ]; then
-    cnt=$(cat "$FAKE_STATE/infocnt" 2>/dev/null || echo 0)
-    cnt=$((cnt + 1)); echo "$cnt" > "$FAKE_STATE/infocnt"
-    { [ "$FAKE_INFO_FAIL" = inf ] || [ "$cnt" -le "$FAKE_INFO_FAIL" ]; } && exit 1
-  fi
-  # FAKE_INFO_DENIED makes bare `docker info` print the socket permission error
-  # and fail: the daemon is UP but this shell isn't in the docker group (the
-  # fresh-Linux-user case the launch gate classifies separately).
+  # docker_daemon_reachable re-probes with bare `docker info` after the wait loop
+  # returns (only when the wait didn't prime the success cache — the permission-denied
+  # case). FAKE_INFO_DENIED makes that probe print the socket permission error and
+  # fail: the daemon is UP but this shell isn't in the docker group (the fresh-Linux-
+  # user case the launch gate classifies separately).
   if [ -n "${FAKE_INFO_DENIED:-}" ] && [ "$#" -eq 1 ]; then
     echo "permission denied while trying to connect to the Docker daemon socket" >&2
     exit 1
@@ -227,6 +238,17 @@ exec)
   # root-owned host dir); FAKE_GUARD_UNVERIFIABLE makes the exec itself fail to run
   # (exit 125) so the protection cannot be verified.
   case "$*" in
+    *"test -d"*hardening/complete*)
+      # The combined pre-handover probe (preflight_gates_satisfied): one exec proving the
+      # worktree cwd is present AND the hardening sentinel exists. Model the cwd half with
+      # the same FAKE_TESTDIR_FAILS counter the standalone -d probe uses, so a not-yet-synced
+      # worktree fails the fast path and routes to the wait loops; the sentinel half always
+      # holds here (hardening-failure paths are covered in test_hardening_gate/test_prewarm).
+      n="${FAKE_TESTDIR_FAILS:-0}"
+      cnt=$(cat "$FAKE_STATE/testdir" 2>/dev/null || echo 0)
+      cnt=$((cnt + 1)); echo "$cnt" > "$FAKE_STATE/testdir"
+      [ "$cnt" -le "$n" ] && exit 1
+      exit 0 ;;
     *sccd_wcheck*)
       [ -n "${FAKE_GUARD_UNVERIFIABLE:-}" ] && exit 125
       wv=WRITABLE; [ -n "${FAKE_WORKSPACE_UNWRITABLE:-}" ] && wv=UNWRITABLE
@@ -1172,13 +1194,12 @@ def test_cwd_outside_workspace_warns_in_container_mode(tmp_path: Path) -> None:
 
 def test_daemon_unreachable_aborts(tmp_path: Path) -> None:
     """A reachable docker CLI but a daemon that never answers within the bounded
-    wait (`docker info` fails every poll) aborts with the start-the-daemon guidance."""
+    wait (`docker ps` fails every poll) aborts with the start-the-daemon guidance."""
     _init_repo(tmp_path)
-    # FAKE_INFO_FAIL=inf never lets `docker info` succeed; cap the wait at 2 tries
-    # so the timeout path is exercised in ~2s instead of the 45s production default.
-    _, _, env = _container_env(
-        tmp_path, FAKE_INFO_FAIL="inf", CLAUDE_GUARD_DOCKER_WAIT="2"
-    )
+    # FAKE_PS_FAIL never lets bare `docker ps` succeed (no orb start on Linux touches
+    # the orb-up marker), so every wait poll fails with a connection error; cap the
+    # wait at 2 tries so the timeout path runs in ~2s instead of the 45s default.
+    _, _, env = _container_env(tmp_path, FAKE_PS_FAIL="1", CLAUDE_GUARD_DOCKER_WAIT="2")
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
     assert "Docker daemon not reachable" in r.stderr
@@ -1208,14 +1229,14 @@ def test_macos_auto_starts_orbstack_when_daemon_down(tmp_path: Path) -> None:
 
 
 def test_daemon_comes_up_after_waiting(tmp_path: Path) -> None:
-    """A daemon whose socket is still coming up (first `docker info` polls fail)
+    """A daemon whose socket is still coming up (first `docker ps` polls fail)
     is waited out: once it answers, the launch proceeds past the reachability gate
     rather than hard-failing on the first probe (the OrbStack/Colima boot race)."""
     _init_repo(tmp_path)
-    # Fail the first two `info` polls, succeed on the third; a generous bound so the
+    # Fail the first two `ps` polls, succeed on the third; a generous bound so the
     # wait outlasts the transient failures.
     _, _, env = _container_env(
-        tmp_path, FAKE_INFO_FAIL="2", CLAUDE_GUARD_DOCKER_WAIT="20"
+        tmp_path, FAKE_PS_FAIL_N="2", CLAUDE_GUARD_DOCKER_WAIT="20"
     )
     r = _run_container(tmp_path, env)
     assert "Docker daemon not reachable" not in r.stderr
@@ -1229,8 +1250,14 @@ def test_daemon_permission_denied_reports_docker_group(tmp_path: Path) -> None:
     wrong 'start the daemon' advice. The generous wait proves it returns
     immediately (permission-denied counts as 'up')."""
     _init_repo(tmp_path)
+    # The wait loop probes `docker ps` (FAKE_PS_DENIED -> permission denied -> treated
+    # as UP, returns at once); docker_daemon_reachable then re-probes `docker info`
+    # (FAKE_INFO_DENIED -> still denied) and classifies it as the group problem.
     _, _, env = _container_env(
-        tmp_path, FAKE_INFO_DENIED="1", CLAUDE_GUARD_DOCKER_WAIT="45"
+        tmp_path,
+        FAKE_PS_DENIED="1",
+        FAKE_INFO_DENIED="1",
+        CLAUDE_GUARD_DOCKER_WAIT="45",
     )
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
@@ -1780,6 +1807,52 @@ def test_worktree_sync_times_out(tmp_path: Path) -> None:
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
     assert "timed out" in r.stderr and "waiting for" in r.stderr
+
+
+def test_daemon_gate_runs_before_worktree_query(tmp_path: Path) -> None:
+    """The daemon gate must run BEFORE offer_worktree_for_concurrent_session's docker query.
+    With a neighbor present both calls execute; the bare 'docker ps' (daemon probe) must
+    appear earlier in the docker log than the 'devcontainer.local_folder --format' call."""
+    _init_repo(tmp_path)
+    _, log, env = _container_env(tmp_path, FAKE_NEIGHBOR=str(tmp_path.resolve()))
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    log_text = log.read_text()
+    # Strip the CLAUDE_CODE_VERSION= companion lines to get only the docker arg lines.
+    arg_lines = [
+        ln for ln in log_text.splitlines() if not ln.startswith("CLAUDE_CODE_VERSION=")
+    ]
+    # Daemon probe: wait_for_docker_daemon_up → docker_ps_bounded → bare `docker ps`.
+    daemon_idx = next((i for i, ln in enumerate(arg_lines) if ln == "ps"), None)
+    # Worktree query: offer_worktree's --filter + --format call.
+    wt_idx = next(
+        (
+            i
+            for i, ln in enumerate(arg_lines)
+            if "devcontainer.local_folder" in ln and "--format" in ln
+        ),
+        None,
+    )
+    assert daemon_idx is not None, f"daemon probe (bare 'ps') not in log:\n{log_text}"
+    assert wt_idx is not None, f"worktree query not in log:\n{log_text}"
+    assert daemon_idx < wt_idx, (
+        f"daemon probe (idx {daemon_idx}) must precede worktree query (idx {wt_idx})"
+    )
+
+
+def test_preflight_fast_path_skips_wait_loops(tmp_path: Path) -> None:
+    """When preflight_gates_satisfied passes, the two slow-path wait loops are skipped —
+    the launch proceeds without the 'waiting for worktree files to sync' message, proving
+    the if-condition is the right polarity and a passing probe genuinely short-circuits."""
+    _init_repo(tmp_path)
+    # CLAUDE_WORKTREE=1 makes container_cwd a worktree path (≠ /workspace), so
+    # wait_for_worktree_sync would NOT early-return if it ran — making the assertion
+    # meaningful. FAKE_TESTDIR_FAILS unset (default 0) → combined probe succeeds immediately.
+    _, _, env = _container_env(tmp_path, CLAUDE_WORKTREE="1")
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "waiting for worktree files to sync" not in r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
 
 
 # ---------------------------------------------------------------------------

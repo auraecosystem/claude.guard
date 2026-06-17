@@ -11,9 +11,7 @@ name: Image size
 #   - push to main: append the run to the history so the baseline tracks reality.
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  pull_request: # not-required-check
     paths:
       - .devcontainer/Dockerfile
       - .devcontainer/Dockerfile.monitor
@@ -28,20 +26,48 @@ on:
       - bin/lib/chart_publish.py
       - bin/persist-perf-history.sh
       - .github/workflows/image-size.yaml
+  push:
+    branches: [main]
+    paths:
+      - .devcontainer/Dockerfile
+      - .devcontainer/Dockerfile.monitor
+      - .devcontainer/Dockerfile.ccr
+      - .devcontainer/docker-compose.yml
+      - bin/check-image-size.py
+      - bin/lib/component_perf.py
+      - bin/lib/perf_history.py
+      - bin/lib/perf_report.py
+      # chart_image/chart_publish/quickchart are NOT here: a renderer change
+      # republishes this chart via chart-refresh.yaml (same data, no build).
+      - bin/persist-perf-history.sh
+      - .github/workflows/image-size.yaml
 
 permissions:
   contents: read
 
+concurrency:
+  # One in-flight run per workflow per branch; a new commit (or merge that
+  # deletes the branch) cancels the superseded run so it stops holding
+  # runners. Gated to pull_request so post-merge/cron/release runs — which
+  # append history or publish — are never cancelled mid-flight.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # Gate at the job level, not the pull_request trigger: a workflow-level paths
-  # filter never reports on an unrelated PR and hangs the required check, while a
-  # skipped job reports success. See decide-reusable.yaml.
+  # Gate at both levels: the pull_request trigger's paths: above pre-filters
+  # unrelated PRs without starting a runner; the decide job below is a
+  # second-level gate on push runs (no PR to diff) and keeps the work job's
+  # condition uniform across events.
   decide:
     name: Decide (image size)
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/decide-reusable.yaml
     with:
-      paths-regex: '^(\.devcontainer/(Dockerfile(\.(monitor|ccr))?|docker-compose\.yml)|bin/check-image-size\.py|bin/lib/(component_perf|perf_history|perf_report|quickchart|chart_image|chart_publish)\.py|bin/persist-perf-history\.sh|\.github/workflows/image-size\.yaml)'
+      # chart_image/chart_publish/quickchart are deliberately absent: they only
+      # shape the chart picture (quickchart is the Series/make_band data model the
+      # renderer consumes), never an image size, so a change to them skips this heavy
+      # build+measure — chart-refresh.yaml re-renders the chart from history.
+      paths-regex: '^(\.devcontainer/(Dockerfile(\.(monitor|ccr))?|docker-compose\.yml)|bin/check-image-size\.py|bin/lib/(component_perf|perf_history|perf_report)\.py|bin/persist-perf-history\.sh|\.github/workflows/image-size\.yaml)'
 
   report:
     name: Image size (gate)

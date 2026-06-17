@@ -6,9 +6,7 @@ name: Container RAM
 # See bin/check-container-ram.py for the measurement + gate.
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  pull_request: # not-required-check
     paths:
       - .devcontainer/docker-compose.yml
       - .devcontainer/Dockerfile
@@ -25,9 +23,34 @@ on:
       - .github/actions/up-sandbox-stack/action.yaml
       - .github/workflows/metric-sample-reusable.yaml
       - .github/workflows/container-ram.yaml
+  push:
+    branches: [main]
+    paths:
+      - .devcontainer/docker-compose.yml
+      - .devcontainer/Dockerfile
+      - .devcontainer/Dockerfile.monitor
+      - .devcontainer/Dockerfile.ccr
+      - bin/check-container-ram.py
+      - bin/lib/component_perf.py
+      - bin/lib/perf_history.py
+      - bin/lib/perf_report.py
+      # chart_image/chart_publish/quickchart are NOT here: a renderer change
+      # republishes this chart via chart-refresh.yaml (same data, no bring-up).
+      - bin/persist-perf-history.sh
+      - .github/actions/up-sandbox-stack/action.yaml
+      - .github/workflows/metric-sample-reusable.yaml
+      - .github/workflows/container-ram.yaml
 
 permissions:
   contents: read
+
+concurrency:
+  # One in-flight run per workflow per branch; a new commit (or merge that
+  # deletes the branch) cancels the superseded run so it stops holding
+  # runners. Gated to pull_request so post-merge/cron/release runs — which
+  # append history or publish — are never cancelled mid-flight.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Gate at the job level, not the pull_request trigger: a workflow-level paths
