@@ -185,6 +185,8 @@ Charts re-render on every merge to `main` and update in place.
 
 ![Hook latency chart](https://assets.turntrout.com/static/charts/claude-guard/hook-latency.svg)
 
+![Firewall proxy added-latency chart](https://assets.turntrout.com/static/charts/claude-guard/proxy-latency.svg)
+
 ### Monitor
 
 ![Monitor performance chart](https://assets.turntrout.com/static/charts/claude-guard/monitor-latency.svg)
