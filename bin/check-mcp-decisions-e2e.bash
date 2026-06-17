@@ -62,6 +62,15 @@ WORKSPACE="$(realpath "$(mktemp -d /tmp/claude-mcp-e2e.XXXXXX)")"
 git -C "$WORKSPACE" init -q
 printf '{"mcpServers":{"%s":{"command":"true"}}}\n' "$PROBE_SERVER" \
   >"$WORKSPACE/.mcp.json"
+# The in-container 'node' user is a different uid than the runner that created
+# this dir, and mktemp's 0700 denies it even read/traverse access — so the
+# SessionStart hook could not read .mcp.json, recorded no servers, and never
+# wrote the fingerprint cache (the boot wait timed out waiting for it). Open the
+# throwaway workspace so node can read AND write it, mirroring a real user who
+# launches from a checkout they own; the launcher deliberately won't chown the
+# mount, so the test must make the host dir accessible itself.
+chmod 0777 "$WORKSPACE"
+chmod 0644 "$WORKSPACE/.mcp.json"
 
 # The app container carries the devcontainer CLI's local_folder label plus
 # compose's per-service label — the same discovery the launcher itself uses.
