@@ -77,10 +77,23 @@ chmod 0644 "$WORKSPACE/.mcp.json"
 
 # The app container carries the devcontainer CLI's local_folder label plus
 # compose's per-service label — the same discovery the launcher itself uses.
+# The default-on pre-warm pool is disabled for this check (CLAUDE_GUARD_NO_PREWARM
+# below), so exactly ONE app stack ever carries this workspace label: assert that,
+# rather than head -1'ing a nondeterministic pick. A second match means a spare
+# leaked back in (or a launch spawned one), which would also let the spare's
+# harness write the SHARED decision volume this check asserts against — fail loud
+# instead of exec'ing into the wrong, un-adopted container and timing out opaquely.
 find_app() {
-  docker ps -q \
+  local ids
+  ids="$(docker ps -q \
     --filter "label=devcontainer.local_folder=$WORKSPACE" \
-    --filter "label=com.docker.compose.service=app" | head -1
+    --filter "label=com.docker.compose.service=app")"
+  if [[ "$(printf '%s\n' "$ids" | grep -c .)" -gt 1 ]]; then
+    cg_error "FAIL: more than one app container carries label devcontainer.local_folder=$WORKSPACE — a pre-warmed spare was not suppressed, so discovery is ambiguous and the shared decision volume could be written by the wrong session:"
+    printf '%s\n' "$ids" >&2
+    exit 1
+  fi
+  printf '%s\n' "$ids" | head -1
 }
 
 launch_pid=""
@@ -138,6 +151,15 @@ trap cleanup EXIT
 
 # Suppress host-onboarding prompts that would block the pty; none is under test.
 export CLAUDE_GUARD_ASSUME_YES=1
+# Disable the default-on pre-warm pool: a normal ephemeral launch also forks a
+# background `claude-guard prewarm <workspace>` that boots a SECOND app stack
+# carrying this same workspace label (prewarm_replenish). That breaks this check
+# two ways — find_app could discover the un-adopted spare instead of the real
+# session (timing out waiting for a fingerprint write its harness never makes),
+# and the spare's own SessionStart/SessionEnd hooks would write the SHARED
+# claude-mcp-decisions volume this check reads back. This check launches exactly
+# one deterministic session; the pre-warm pool is out of its scope.
+export CLAUDE_GUARD_NO_PREWARM=1
 [[ -f "${CLAUDE_GUARD_MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}" ]] || {
   export CLAUDE_GUARD_MANAGED_SETTINGS="$WORKSPACE/.managed-settings-placeholder.json"
   echo '{}' >"$CLAUDE_GUARD_MANAGED_SETTINGS"
