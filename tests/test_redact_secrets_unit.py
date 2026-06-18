@@ -534,14 +534,30 @@ def test_placeholder_skip_does_not_suppress_other_detections_on_line(mod, monkey
     assert '"changeme"' in result["text"]
 
 
-# ─── Shell var refs & code delimiters not redacted ───────────────────────────
+# ─── Env-var / config references & code delimiters not redacted ──────────────
 
 
 @pytest.mark.parametrize(
     "label, value, expected",
     [
+        # Unforgeable roots (shell $VAR, env-object access) — skipped everywhere.
         ("bare $VAR", "$ANTHROPIC_AUTH_TOKEN", True),
         ("underscore-led $_VAR", "$_INTERNAL_TOKEN_VALUE", True),
+        ("node process.env", "process.env.MY_API_KEY_NAME", True),
+        ("vite import.meta.env", "import.meta.env.VITE_SECRET_KEY", True),
+        ("python os.environ bracket", 'os.environ["DATABASE_URL_VAR"]', True),
+        ("deno env", "Deno.env.MY_TOKEN_NAME", True),
+        ("jq $ENV", "$ENV.SEED_TOKEN_VALUE", True),
+        # Forgeable bare-word roots (settings./config./environ./self) — the
+        # config-read idiom; skipped under the common-mistakes model.
+        ("django settings", "settings.SECRET_KEY_NAME", True),
+        ("config chain", "config.auth.accessTokenField", True),
+        ("environ attr", "environ.DATABASE_PASSWORD_VAR", True),
+        ("self attr", "self.api_token_attribute", True),
+        # Anchored: a real token that merely BEGINS with a root word but carries
+        # trailing key bytes (no ".attr"/"[idx]") is not wholly a reference.
+        ("config-prefixed token", "configBcd3Fg7Hj9Kl2Mn4Pq6Rs", False),
+        ("processenv-prefixed", "processXenvY1234567890ZabcD", False),
         # crypt/shadow hashes embed "$" separators, so they are not *wholly* a
         # shell identifier -> not a var ref -> still redact. Covers digit-led
         # schemes ($2b bcrypt, $6 sha512crypt) and letter-led ones ($apr1 Apache
@@ -553,10 +569,34 @@ def test_placeholder_skip_does_not_suppress_other_detections_on_line(mod, monkey
         ("ordinary secret", "SuperSecretP4ssword123456", False),
     ],
 )
-def test_is_shell_var_ref(mod, label, value, expected):
-    m = mod.FIELD_VALUE_RE.search(f"token={value}")
-    assert m is not None, label
-    assert mod._is_shell_var_ref(m) is expected, label
+def test_is_env_reference(mod, label, value, expected):
+    assert mod._is_env_reference(value) is expected, label
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("node process.env", "apiKey: process.env.MY_API_KEY_NAME"),
+        ("vite import.meta.env", "secret_key: import.meta.env.VITE_SECRET_KEY"),
+        ("jq $ENV", "accessToken:$ENV.SEED_TOKEN_VALUE"),
+        ("django settings", "secret_key = settings.SECRET_KEY_ATTR_NAME"),
+        ("config chain", "authToken: config.auth.accessTokenField"),
+    ],
+)
+def test_env_reference_field_value_not_redacted(mod, monkeypatch, label, text):
+    """A field whose value is wholly an env/config reference is the secret's NAME,
+    not the secret — left intact (the noisy false positive this skip removes)."""
+    assert run_main(mod, text, monkeypatch) is None, label
+
+
+def test_env_reference_keyword_match_skipped(mod):
+    """An env-reference value reaching the KeywordDetector path (not just the
+    field regex) is a value-shape skip, so it is benign regardless of web ingress."""
+    fake = types.SimpleNamespace(
+        type="Secret Keyword", secret_value="process.env.SOME_SECRET_VAR"
+    )
+    assert mod._is_benign_keyword_match(fake, "k = process.env.SOME_SECRET_VAR", False)
+    assert mod._is_benign_keyword_match(fake, "k = process.env.SOME_SECRET_VAR", True)
 
 
 @pytest.mark.parametrize(

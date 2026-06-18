@@ -382,19 +382,48 @@ def _is_markdown_code_prose(value: str) -> bool:
     return "`" in value and any(ch.isspace() for ch in value)
 
 
-# A value that is *wholly* a shell variable reference ($API_KEY, $AUTH_TOKEN) is
-# the variable's name, not its value — redacting it corrupts shell/config source
-# for no security gain. Require the entire value to be "$" + a shell identifier
-# and nothing more, so crypt/shadow hashes that open with a letter scheme id and
-# embed further "$" separators ($apr1$… Apache, $y$… yescrypt) are NOT mistaken
-# for a variable reference and still redact. (Digit-led schemes like $6$/$2b$
-# already fail the leading [A-Za-z_] check.)
-_SHELL_VAR_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
+# A value that is *wholly* an environment-variable reference names a secret
+# without holding it, so redacting it corrupts config/source for no security
+# gain. Two families, both anchored (\Z) so the WHOLE value must be the
+# reference — a real token that merely begins with one of these words still
+# redacts, since its trailing key bytes are neither a ".attr" nor a "[index]"
+# and so break the anchor:
+#
+#   • Shell expansion ($API_KEY, $AUTH_TOKEN) and env-object access whose ROOT
+#     is unforgeable — process.env.X, import.meta.env.X, os.environ["X"],
+#     Deno.env…, $ENV.X (jq). A writer cannot relabel a literal credential into
+#     one of these idioms without changing the value's bytes.
+#   • A bare attribute chain rooted at settings./config./environ./self — the
+#     Django/Flask/Pydantic idiom for pulling a secret out of config. This root
+#     IS forgeable (output could wrap a real key as `config.<key>` to dodge the
+#     skip), but this layer targets common incidental exposure, not a motivated
+#     attacker re-encoding a value — so it is accepted everywhere; the firewall
+#     and the prefix detectors (AWS/Stripe/JWT/…, which run first) remain the
+#     floor.
+#
+# Crypt/shadow hashes that open with a letter scheme id and embed further "$"
+# separators ($apr1$… Apache, $y$… yescrypt) are NOT wholly a reference (the
+# interior "$" is neither "." nor "["), so they fail the anchor and still
+# redact; digit-led schemes ($6$/$2b$) already fail the leading [A-Za-z_] check.
+#
+# The attribute/index chain uses a POSSESSIVE quantifier (`*+`): the segments are
+# unambiguously `.`-delimited so a correct match never needs to give one back, but
+# without `*+` the trailing \Z makes Python's backtracking engine O(n^2) on a long
+# near-match (it retries every shorter chain when the anchor fails). Possessive
+# matching forbids that backtracking, so the pattern is linear by construction
+# (recheck cannot model possessive quantifiers, so it is allowlisted in
+# tests/test_regex_redos.py as undecidable-but-safe rather than proven "safe").
+_ENV_REFERENCE_RE = re.compile(
+    r"(?:\$[A-Za-z_]\w*"
+    r"|(?:process\.env|import\.meta\.env|os\.environ|Deno\.env"
+    r"|settings|config|environ|self))"
+    r"(?:\.[A-Za-z_]\w*|\[[^\[\]]*\])*+\Z"
+)
 
 
-def _is_shell_var_ref(m: re.Match[str]) -> bool:
-    """True when the value is wholly a shell variable reference, not a secret."""
-    return _SHELL_VAR_RE.fullmatch(m.group("secret_value")) is not None
+def _is_env_reference(value: str) -> bool:
+    """True when the value is wholly an env-var / config reference, not a secret."""
+    return _ENV_REFERENCE_RE.fullmatch(value) is not None
 
 
 # A value rooted at a conventional system/mount directory — optionally with a
@@ -532,15 +561,19 @@ def _redact_cross_line(
 def _is_benign_keyword_match(
     secret: PotentialSecret, line: str, web_ingress: bool
 ) -> bool:
-    """True when a ``Secret Keyword`` detection is documentation, not a credential:
-    a placeholder value, or — for local output, where the field NAME is trustworthy —
-    a metadata field or markdown code prose. Prefix/format detectors are never benign
-    (their match shape IS the credential), so only ``Secret Keyword`` can skip."""
+    """True when a ``Secret Keyword`` detection is not a credential: a value-shape
+    skip (a documentation placeholder or an env-var/config reference, trustworthy
+    regardless of source), or — for local output, where the field NAME is
+    trustworthy — a metadata field or markdown code prose. Prefix/format detectors
+    are never benign (their match shape IS the credential), so only ``Secret
+    Keyword`` can skip."""
     if secret.type != "Secret Keyword":
         return False
     if not secret.secret_value:
         return False
-    if _is_placeholder_value(secret.secret_value):
+    if _is_placeholder_value(secret.secret_value) or _is_env_reference(
+        secret.secret_value
+    ):
         return True
     if web_ingress:
         return False
@@ -620,14 +653,11 @@ def _redact(
 
     def _replace_field(m: re.Match[str]) -> str:
         # Name-based skips (cursor / path) are attacker-relabelable on web ingress,
-        # so they only apply to local tool output; shell-var and placeholder skips
-        # are value-shape, trustworthy regardless of source.
+        # so they only apply to local tool output; env-reference and placeholder
+        # skips are value-shape, trustworthy regardless of source.
         name_skip = not web_ingress and (_is_benign_cursor(m) or _is_filesystem_path(m))
-        if (
-            name_skip
-            or _is_shell_var_ref(m)
-            or _is_placeholder_value(m.group("secret_value"))
-        ):
+        value = m.group("secret_value")
+        if name_skip or _is_env_reference(value) or _is_placeholder_value(value):
             return m.group(0)
         found.append("named secret field")
         # Re-emit the opening quote and whatever actually closed the value
@@ -636,7 +666,7 @@ def _redact(
         return (
             m.group("field_prefix")
             + m.group("quote")
-            + _mark(entries, "[REDACTED]", m.group("secret_value"))
+            + _mark(entries, "[REDACTED]", value)
             + m.group("closequote")
         )
 
