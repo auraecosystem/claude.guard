@@ -106,12 +106,19 @@ def _place_end_labels(
     ends.sort()  # by y, so the de-collision pass only ever pushes labels up
     lo, hi = ax.get_ylim()
     # In log scale, express the gap as a fraction of the log span so nearby labels
-    # (e.g. 120 ms and 300 ms) don't collapse into each other; in linear scale the
-    # usual 5% of the full range keeps labels visually distinct.
+    # (e.g. 120 ms and 300 ms) don't collapse into each other; in linear scale, take
+    # the larger of 5% of the range and one physical text line (fontsize 9pt at the
+    # figure's dpi, with 20% leading) so labels never physically overlap regardless
+    # of how many series share a narrow band of y-values.
     if log_scale and 0 < lo < hi:
         gap = lo * (10 ** ((math.log10(hi) - math.log10(lo)) * 0.05) - 1)
     else:
-        gap = (hi - lo) * 0.05
+        data_range = hi - lo if hi > lo else 1.0
+        fig = ax.get_figure()
+        plot_h_px = ax.get_position().height * fig.get_size_inches()[1] * fig.dpi
+        line_px = 9.0 / 72.0 * fig.dpi * 1.2  # 9pt font + 20% leading in pixels
+        min_gap = line_px / (plot_h_px / data_range) if plot_h_px > 0 else 0.0
+        gap = max(data_range * 0.05, min_gap)
     label_y = -float("inf")
     for y, label, color, xi in ends:
         label_y = max(y, label_y + gap)
@@ -342,13 +349,19 @@ def render_chart(
         hline=hline,
     )
 
+    # Settle the subplot geometry before placing inline labels: tight_layout
+    # updates ax.get_position() so the font-height gap estimate in _place_end_labels
+    # uses the actual axes pixel height rather than matplotlib's default guess.
+    fig.tight_layout()
+
     if inline_labels:
         _draw_inline_labels(ax, series, x, y_tick_label, log_scale=log_scale)
     elif sum(1 for s in series if s.label) > 1:
         ax.legend([s.label for s in series], loc="best", fontsize=8, frameon=False)
 
-    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, facecolor="white")
+    # bbox_inches="tight" expands the saved bbox to include annotation text that
+    # overflows the axes box, so end-of-line labels on the right are never cropped.
+    fig.savefig(out_path, facecolor="white", bbox_inches="tight")
     plt.close(fig)
     return out_path
