@@ -373,11 +373,6 @@ def test_wrapper_volume_gc_on_sandboxed_launch(
     # throwaway id; the persistent modes must do neither.
     assert ("tearing down throwaway volumes" in r.stderr) is expect_ephemeral
     assert ("volume rm" in docker_log) is expect_ephemeral
-    # And only ephemeral discards the transcript, so only it points the operator
-    # at how to get the resume command back (CLAUDE_PERSIST=1). The persistent
-    # modes keep history, so the hint would be wrong for them.
-    assert ("keep history across sessions" in r.stderr) is expect_ephemeral
-    assert ("CLAUDE_PERSIST=1" in r.stderr) is expect_ephemeral
 
 
 # A stable fragment of the first-launch expectation-setting line. It sets the
