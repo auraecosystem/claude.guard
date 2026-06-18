@@ -455,6 +455,72 @@ def _redact_pem_blocks(
     return PEM_BLOCK_RE.sub(_repl, text)
 
 
+def _redact_cross_line(
+    text: str, found: list[str], entries: list[tuple[str, str]] | None = None
+) -> str:
+    """Redact a structural secret or configured key value split across a newline.
+
+    The per-line ``scan_line`` pass and the newline-intolerant env match both
+    miss a token whose head is on one line and its tail on the next, so a
+    consumer that unwraps the line break reassembles the full secret. Scan a
+    newline-free view of ``text`` (with an offset map back to the original) and
+    redact only matches whose ORIGINAL span actually straddles a newline; a
+    within-line match is left for the per-line pass, so nothing redacts twice.
+    ``Secret Keyword`` detections are excluded — the KeywordDetector keys off a
+    field name and would over-capture once the prose between lines collapses
+    away; only the high-entropy prefix/format detectors (which cannot match
+    benign wrapped prose) and the exact env-key values are eligible.
+
+    Must run inside the same ``transient_settings`` block as the per-line scan
+    so ``scan_line`` sees the custom plugins.
+    """
+    if "\n" not in text:
+        return text
+    offsets = [i for i, ch in enumerate(text) if ch != "\n"]
+    collapsed = text.replace("\n", "")
+
+    # (collapsed_start, collapsed_end, placeholder, found_type)
+    spans: list[tuple[int, int, str, str]] = []
+    for secret in scan_line(collapsed):
+        value = secret.secret_value
+        if secret.type == "Secret Keyword" or not value:
+            continue
+        start = collapsed.find(value)
+        while start != -1:
+            spans.append(
+                (start, start + len(value), f"[REDACTED: {secret.type}]", secret.type)
+            )
+            start = collapsed.find(value, start + len(value))
+    for name in ENV_BOUND_SECRET_VARS:
+        value = os.environ.get(name)
+        if not value or len(value) < _MIN_ENV_SECRET_LEN:
+            continue
+        for m in _env_value_re(value).finditer(collapsed):
+            spans.append((m.start(), m.end(), f"[REDACTED: {name}]", name))
+
+    # Keep only newline-straddling spans, greedily dropping overlaps (collapsed
+    # order matches original order, so sorting by collapsed start sorts by
+    # original start; widest-first at a tie). Then splice descending so the
+    # original offsets of earlier spans stay valid.
+    accepted: list[tuple[int, int, str, str]] = []
+    prev_end = -1
+    for cs, ce, placeholder, found_type in sorted(spans, key=lambda s: (s[0], -s[1])):
+        orig_start, orig_end = offsets[cs], offsets[ce - 1] + 1
+        if "\n" not in text[orig_start:orig_end] or orig_start < prev_end:
+            continue
+        accepted.append((orig_start, orig_end, placeholder, found_type))
+        prev_end = orig_end
+    if not accepted:
+        return text
+
+    out = text
+    for orig_start, orig_end, placeholder, _ in reversed(accepted):
+        replacement = _mark(entries, placeholder, text[orig_start:orig_end])
+        out = out[:orig_start] + replacement + out[orig_end:]
+    found.extend(found_type for *_, found_type in accepted)
+    return out
+
+
 def _is_benign_keyword_match(
     secret: PotentialSecret, line: str, web_ingress: bool
 ) -> bool:
@@ -518,7 +584,7 @@ def _redact(
     # Redact configured inference-key values first, then collapse PEM blocks so
     # the line scan never sees the base64 key body.
     working = _redact_env_bound(text, found, entries)
-    lines = _redact_pem_blocks(working, found, entries).split("\n")
+    working = _redact_pem_blocks(working, found, entries)
 
     with transient_settings({"plugins_used": PLUGINS + CUSTOM_PLUGINS}):
         # detect-secrets caches the secret_type->class mapping in a process-global
@@ -532,7 +598,13 @@ def _redact(
         # doesn't leak into a later caller's default-plugin scan.
         get_mapping_from_secret_type_to_class.cache_clear()
         try:
-            lines = [_redact_line(line, web_ingress, entries, found) for line in lines]
+            # Catch newline-split tokens first (collapse to a single mark), then
+            # scan what remains line by line.
+            working = _redact_cross_line(working, found, entries)
+            lines = [
+                _redact_line(line, web_ingress, entries, found)
+                for line in working.split("\n")
+            ]
         finally:
             get_mapping_from_secret_type_to_class.cache_clear()
 
