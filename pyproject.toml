@@ -102,7 +102,7 @@ testpaths = ["tests"]
 # --dist=worksteal starts like loadscope (each module's tests land on one worker so
 # module-scoped fixtures are safe) then steals remaining tests cross-module once a
 # worker is free — beating plain loadscope by ~2× on the subprocess-heavy suites.
-addopts = "-n 8 --dist=worksteal"
+addopts = "-n 8 --dist=worksteal -p tests.skip_census_plugin"
 # Silence deprecations from third-party eval deps (only present when the eval
 # extra is installed); they are upstream's to fix, not ours, and otherwise
 # noise up the monitor-eval job. Scoped to the exact messages so our own
