@@ -233,6 +233,23 @@ def test_try_adopt_discovery_filters_on_workspace_and_spec(tmp_path: Path) -> No
     assert "label=claude-guard.prewarm.spec=abc987" in ps_line
 
 
+def test_try_adopt_seed_mode_drops_folder_filter(tmp_path: Path) -> None:
+    """In worktree-seed mode the spare is generic (booted in another workspace), so
+    discovery must NOT filter on devcontainer.local_folder — the spec hash (which now
+    carries seed_mode + the allowlist) is the sole key. The ready + spec filters stay,
+    the folder filter is gone, and a spare booted in a different folder is still adopted."""
+    stub, log, env = _claim_stub(tmp_path)
+    _seed_baked_stamp(tmp_path)
+    r = _run_lib(
+        "prewarm_try_adopt /my/ws abc987", stub, CLAUDE_GUARD_WORKTREE_SEED="1", **env
+    )
+    assert r.returncode == 0, r.stderr  # generic spare adopted despite the folder
+    ps_line = next(ln for ln in log.read_text().splitlines() if ln.startswith("ps "))
+    assert "label=claude-guard.prewarm=ready" in ps_line
+    assert "label=claude-guard.prewarm.spec=abc987" in ps_line
+    assert "devcontainer.local_folder" not in ps_line
+
+
 def test_try_adopt_lost_claim_returns_nonzero(tmp_path: Path) -> None:
     """When the atomic claim is lost to a concurrent launch (the project's claim dir
     already exists), adoption reports failure so the launch falls through to cold —
@@ -284,6 +301,22 @@ def test_ready_spare_exists_ignores_blank_project_label(tmp_path: Path) -> None:
         "prewarm_ready_spare_exists /ws s", stub, PREWARM_CLAIM_DIR=str(tmp_path / "c")
     )
     assert r.returncode != 0  # blank label -> no ready spare -> replenish proceeds
+
+
+def test_ready_spare_exists_seed_mode_drops_folder_filter(tmp_path: Path) -> None:
+    """ready_spare_exists drops the folder filter in seed mode too, so the replenisher
+    sees the one generic spare (booted in any workspace) and doesn't pile a second on."""
+    stub, log, env = _claim_stub(tmp_path)
+    r = _run_lib(
+        "prewarm_ready_spare_exists /my/ws s",
+        stub,
+        CLAUDE_GUARD_WORKTREE_SEED="1",
+        **env,
+    )
+    assert r.returncode == 0, r.stderr  # the generic spare is seen despite the folder
+    ps_line = next(ln for ln in log.read_text().splitlines() if ln.startswith("ps "))
+    assert "label=claude-guard.prewarm=ready" in ps_line
+    assert "devcontainer.local_folder" not in ps_line
 
 
 # ---------------------------------------------------------------------------

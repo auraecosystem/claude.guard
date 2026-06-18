@@ -212,6 +212,22 @@ prewarm_baked() {
   [[ -f "$(guardrail_stamp_path "$1")" ]]
 }
 
+# _prewarm_set_folder_filter <workspace> — populate the global _PREWARM_FOLDER_FILTER
+# array with the per-workspace discovery filter, or leave it EMPTY in worktree-seed mode.
+# A bind-mode spare is pinned to its workspace (the bind mount is fixed at create), so
+# discovery filters on devcontainer.local_folder to never touch another workspace's spare.
+# A seed-mode spare is GENERIC — booted in some other workspace and seeded only at
+# adoption — so it must be discoverable regardless of folder; there the spec hash (which
+# now carries seed_mode + the firewall allowlist) is the sole adoption key, and it already
+# rejects a wrong-policy or wrong-mode spare. Centralizes the seed/bind rule so every
+# discovery query shares one source of truth. The array is consumed with the
+# bash-3.2-safe "${arr[@]+"${arr[@]}"}" guard (an empty array under set -u errors there).
+_prewarm_set_folder_filter() {
+  _PREWARM_FOLDER_FILTER=()
+  [[ "${CLAUDE_GUARD_WORKTREE_SEED:-}" == "1" ]] && return 0
+  _PREWARM_FOLDER_FILTER=(--filter "label=devcontainer.local_folder=$1")
+}
+
 # prewarm_try_adopt <workspace> <spec> — discover a ready spare for this exact workspace +
 # spec and CLAIM it atomically. On success sets the globals the launcher reads
 # (_PREWARM_ADOPTED_CID / _PREWARM_ADOPTED_PROJECT / _PREWARM_ADOPTED_VID) and returns 0;
@@ -226,6 +242,8 @@ prewarm_baked() {
 prewarm_try_adopt() {
   local ws="$1" spec="$2" cid proj vid
   command -v docker >/dev/null 2>&1 || return 1
+  local -a _PREWARM_FOLDER_FILTER
+  _prewarm_set_folder_filter "$ws"
   # The project + vid labels come back inline with the discovery listing
   # (`--format`), so adoption is a single `docker ps` instead of `ps` + two
   # `docker inspect` round-trips per candidate.
@@ -239,7 +257,7 @@ prewarm_try_adopt() {
     return 0
   done < <(docker ps \
     --filter "label=$PREWARM_LABEL_READY=ready" \
-    --filter "label=devcontainer.local_folder=$ws" \
+    "${_PREWARM_FOLDER_FILTER[@]+"${_PREWARM_FOLDER_FILTER[@]}"}" \
     --filter "label=$PREWARM_LABEL_SPEC=$spec" \
     --format "{{.ID}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"$PREWARM_LABEL_VID\"}}" 2>/dev/null)
   return 1
@@ -253,6 +271,8 @@ prewarm_try_adopt() {
 # clears the loser).
 prewarm_ready_spare_exists() {
   local ws="$1" spec="$2" proj
+  local -a _PREWARM_FOLDER_FILTER
+  _prewarm_set_folder_filter "$ws"
   # The project label comes back inline with the listing (`--format`), dropping a
   # `docker inspect` per candidate.
   while IFS= read -r proj; do
@@ -263,7 +283,7 @@ prewarm_ready_spare_exists() {
     return 0
   done < <(docker ps \
     --filter "label=$PREWARM_LABEL_READY=ready" \
-    --filter "label=devcontainer.local_folder=$ws" \
+    "${_PREWARM_FOLDER_FILTER[@]+"${_PREWARM_FOLDER_FILTER[@]}"}" \
     --filter "label=$PREWARM_LABEL_SPEC=$spec" \
     --format "{{.Label \"com.docker.compose.project\"}}" 2>/dev/null)
   return 1
@@ -455,6 +475,14 @@ prewarm_reap_expired() {
 # throwaway volumes go) and emits a user-visible line, which doubles as the diagnostic for
 # "my spare wasn't reused": it names the spec drift out loud. Backgrounded off the launch
 # path; never fails a launch. Shares the reaper opt-out (CLAUDE_NO_PREWARM_REAP=1).
+#
+# Worktree-seed note: this KEEPS the per-workspace folder filter unconditionally, unlike
+# the adopt/exists queries above. It reaps on spec MISMATCH (not match), so dropping the
+# filter in seed mode would let a seed-mode launch tear down another workspace's valid
+# BIND-mode spare (whose spec legitimately differs). With the filter, a seed-mode launch
+# (booted generic, in no fixed folder) simply matches no spare here — a safe no-op — so
+# superseded GENERIC spares are left to the TTL reaper until the cross-mode partition
+# label lands. A seed launch never erroneously reaps a bind spare.
 prewarm_reap_superseded() {
   [[ "${CLAUDE_NO_PREWARM_REAP:-}" == "1" ]] && return 0
   command -v docker >/dev/null 2>&1 || return 0
