@@ -35,9 +35,8 @@ docker ps >/dev/null 2>&1 || exit 0
 
 # One snapshot of every our-labeled container: project|state|ephemeral|vid|id. Both
 # the spare decision and the removal read from this single list, never two queries.
-# mapfile (not a `while read` loop fed by the process substitution) so a failing
-# `docker ps` leaves an empty array rather than tripping `set -e`.
-mapfile -t rows < <(docker ps -a --filter "label=$LABEL" --format '{{.Label "com.docker.compose.project"}}|{{.State}}|{{.Label "claude-guard.session.ephemeral"}}|{{.Label "claude-guard.session.vid"}}|{{.ID}}' 2>/dev/null)
+rows=()
+while IFS= read -r _row; do rows+=("$_row"); done < <(docker ps -a --filter "label=$LABEL" --format '{{.Label "com.docker.compose.project"}}|{{.State}}|{{.Label "claude-guard.session.ephemeral"}}|{{.Label "claude-guard.session.vid"}}|{{.ID}}' 2>/dev/null)
 
 # Pass 1: mark every project that must be SPARED — any container not in a terminal
 # state, or any ephemeral-with-vid stack the orphan reaper owns. A project absent
