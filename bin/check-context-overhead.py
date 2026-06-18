@@ -125,17 +125,15 @@ TRACKED = {
     "sanitize-output": ["tool-output-local", "tool-output-web"],
 }
 
-# Substrings a hook emits in additionalContext when it FAIL-CLOSES (e.g. a broken
-# detect-secrets install makes sanitize-output suppress its output and exit 0). The
-# fail-closed message has a length too, so without this guard a degraded redactor
-# would silently record the wrong figure — and the increase-only gate would never
-# catch the drop. Treat any of these as a broken measurement, not a real count.
-_FAIL_CLOSED_MARKERS = (
-    "SANITIZATION FAILED",
-    "hook failed",
-    "failing closed",
-    "fail-closed",
-)
+# Fragments a measured hook puts in additionalContext when it FAIL-CLOSES — the only
+# field _additional_context_chars reads. Today just sanitize-output's PostToolUse
+# catch does so (a broken detect-secrets install makes it suppress its output and exit
+# 0 with "CRITICAL: ... hook failed; ... output was suppressed ..."). That message has
+# a length too, so without this guard a degraded redactor would silently record the
+# wrong figure — and the gate (which fails only on a RISE past the baseline, or a zero
+# total) would never catch the drop. Two fragments of the one message, so a reworded
+# half still trips. Treat a match as a broken measurement, not a real count.
+_FAIL_CLOSED_MARKERS = ("hook failed", "output was suppressed")
 
 
 def _run_hook(hook: str, payload: str | None) -> subprocess.CompletedProcess:
