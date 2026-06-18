@@ -239,11 +239,11 @@ METRIC = cp.Metric(
     # startup cost), while the per-call interactions recur EVERY turn / tool call — so a
     # small per-call figure can dominate a banner over a long session.
     labels={
-        "firewall-summary": "firewall banner (once/session)",
-        "filesystem-summary": "filesystem banner (once/session)",
-        "sanitizer-summary": "sanitizer banner (once/session)",
-        "user-prompt": "user prompt note (per turn)",
-        "tool-input": "tool input pre (per call)",
+        "firewall-summary": "firewall banner (once)",
+        "filesystem-summary": "filesystem banner (once)",
+        "sanitizer-summary": "sanitizer banner (once)",
+        "user-prompt": "user prompt (per turn)",
+        "tool-input": "tool input (per call)",
         "tool-output-local": "tool output local (per call)",
         "tool-output-web": "tool output web (per call)",
     },
