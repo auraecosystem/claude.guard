@@ -110,6 +110,11 @@ def test_seed_tar_is_tracked_tree_only(tmp_path: Path) -> None:
     (repo / "staged-new.txt").write_text("staged\n")
     _git(repo, "add", "staged-new.txt")
     (repo / "untracked.txt").write_text("nope\n")
+    # A .gitignore'd secret is the real threat (invariant: secrets in .env must not be
+    # seeded into the spare). git ls-files excludes it exactly like an untracked file.
+    (repo / ".gitignore").write_text(".env\n")
+    _git(repo, "add", ".gitignore")
+    (repo / ".env").write_text("ANTHROPIC_API_KEY=q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e\n")
 
     r = _sourced('worktree_seed_tar "$1"', str(repo))
     assert r.returncode == 0, r.stderr
@@ -122,6 +127,7 @@ def test_seed_tar_is_tracked_tree_only(tmp_path: Path) -> None:
     assert (dest / "sub" / "nested.txt").read_text() == "nested\n"
     assert (dest / "staged-new.txt").read_text() == "staged\n"  # staged = tracked
     assert not (dest / "untracked.txt").exists()  # untracked excluded
+    assert not (dest / ".env").exists()  # .gitignore'd secret never seeded
     assert not (dest / ".git").exists()  # history never seeded
 
 
@@ -196,7 +202,9 @@ def test_seed_into_container_contains_traversal(tmp_path: Path) -> None:
 # ── full round-trip: seed -> in-sandbox commits -> extract -> host apply ───────
 
 
-def _seed_and_init(host: Path, ws: Path, stub_env: dict[str, str]) -> None:
+def _seed_and_init(host: Path, ws: Path, stub_env: dict[str, str]) -> str:
+    """Seed the host tree into `ws`, init the in-sandbox repo, and return the WIP root
+    SHA that worktree_container_init_repo prints (the extract's base ref)."""
     seed = _sourced('worktree_seed_tar "$1"', str(host))
     assert seed.returncode == 0, seed.stderr
     r = _sourced(
@@ -213,6 +221,9 @@ def _seed_and_init(host: Path, ws: Path, stub_env: dict[str, str]) -> None:
         env=stub_env,
     )
     assert r.returncode == 0, r.stderr
+    base = r.stdout.decode().strip()
+    assert len(base) == 40, f"expected a 40-char base SHA, got {base!r}"
+    return base
 
 
 def test_roundtrip_reconstructs_agent_branch(tmp_path: Path) -> None:
@@ -245,7 +256,7 @@ def test_roundtrip_reconstructs_agent_branch(tmp_path: Path) -> None:
     wip_file = tmp_path / "wip.patch"
     wip_file.write_bytes(wip.stdout)
 
-    _seed_and_init(host, ws, stub_env)
+    base_ref = _seed_and_init(host, ws, stub_env)
 
     # The "agent" works inside the sandbox repo (ws stands in for /workspace).
     (ws / "f.txt").write_text("v1\nlocal\nagent\n")
@@ -253,7 +264,9 @@ def test_roundtrip_reconstructs_agent_branch(tmp_path: Path) -> None:
     _git(ws, "add", "-A")
     _git(ws, "commit", "-qm", "agent: work")
 
-    extract = _sourced('worktree_container_extract "$1"', "cid", env=stub_env)
+    extract = _sourced(
+        'worktree_container_extract "$1" "$2"', "cid", base_ref, env=stub_env
+    )
     assert extract.returncode == 0, extract.stderr
     mbox = tmp_path / "agent.mbox"
     mbox.write_bytes(extract.stdout)
@@ -299,10 +312,12 @@ def test_roundtrip_empty_agent_preserves_wip(tmp_path: Path) -> None:
     wip = _sourced('worktree_capture_wip_patch "$1"', str(host))
     wip_file = tmp_path / "wip.patch"
     wip_file.write_bytes(wip.stdout)
-    _seed_and_init(host, ws, stub_env)
+    base_ref = _seed_and_init(host, ws, stub_env)
 
     # Agent commits nothing: extract is empty.
-    extract = _sourced('worktree_container_extract "$1"', "cid", env=stub_env)
+    extract = _sourced(
+        'worktree_container_extract "$1" "$2"', "cid", base_ref, env=stub_env
+    )
     assert extract.returncode == 0, extract.stderr
     assert extract.stdout == b""
     mbox = tmp_path / "agent.mbox"

@@ -41,7 +41,11 @@ worktree_seed_tar() {
   local dir="${1:-$PWD}"
   local -a opts=()
   [[ "$(uname)" == Darwin ]] && opts+=(--no-mac-metadata)
-  git -C "$dir" ls-files -z | COPYFILE_DISABLE=1 tar -C "$dir" "${opts[@]}" --null -T - -cf -
+  # "${opts[@]+...}" guard: an empty array under set -u errors on bash 3.2 (macOS). opts is
+  # only ever empty on Linux (modern bash, where it would be fine), but the guard keeps the
+  # idiom uniform with prewarm.bash and safe everywhere.
+  git -C "$dir" ls-files -z |
+    COPYFILE_DISABLE=1 tar -C "$dir" "${opts[@]+"${opts[@]}"}" --null -T - -cf -
 }
 
 # worktree_capture_wip_patch [dir] — write <dir>'s uncommitted tracked delta
@@ -62,7 +66,10 @@ worktree_capture_wip_patch() {
 # (the reason the bind-mount path deliberately avoids chowning /workspace does not apply).
 # The extract carries NO -P, so absolute/.. members are refused — nothing lands outside
 # /workspace. Fail-loud: a chown or extract failure returns non-zero so the launch aborts
-# rather than hand the agent a half-seeded tree.
+# rather than hand the agent a half-seeded tree. The chown is non-recursive: the generic
+# spare's named volume is empty at seed time, so there is nothing under the mountpoint to
+# recurse over, and every file the extract writes is created by node (so already node-owned)
+# — only the mountpoint itself, created root:root by Docker, needs its ownership fixed.
 worktree_seed_into_container() {
   local container_id="$1"
   if ! docker exec -u root "$container_id" chown node:node /workspace; then
@@ -77,46 +84,47 @@ worktree_seed_into_container() {
 }
 
 # worktree_container_init_repo <container_id> <branch> — initialize a throwaway git repo
-# in <container_id>'s seeded /workspace and capture the seeded tree as one WIP root commit
-# on <branch>, so the agent has a repo to commit into and the extract has a stable base.
-# Runs as node (owns /workspace after the seed chown). --no-verify: the in-container WIP
-# commit is launch machinery, not a user commit, and the project's commit hooks aren't
-# provisioned here. --allow-empty fallback keeps a root commit even for an empty tree, so
-# the extract base always exists. Fail-loud.
+# in <container_id>'s seeded /workspace, capture the seeded tree as one WIP root commit on
+# <branch>, and PRINT that commit's SHA on stdout (the extract's base ref — the caller must
+# capture and persist it so teardown can extract exactly the agent's commits). The agent
+# commits on <branch> on top. Runs as node (owns /workspace after the seed chown).
+# --no-verify: the in-container WIP commit is launch machinery, not a user commit, and the
+# project's commit hooks aren't provisioned here. --allow-empty fallback keeps a root commit
+# even for an empty tree, so the extract base always exists. Fail-loud.
 worktree_container_init_repo() {
   local container_id="$1" branch="$2"
   # shellcheck disable=SC2016  # $1/$2 expand inside the container shell, not here.
   if ! docker exec -u node "$container_id" sh -c '
     cd /workspace || exit 1
     git init -q || exit 1
-    git config user.email "agent@claude-guard.local"
-    git config user.name "claude-guard agent"
+    git config user.email "agent@claude-guard.local" || exit 1
+    git config user.name "claude-guard agent" || exit 1
     git checkout -q -b "$1" || exit 1
     git add -A || exit 1
-    git commit -q --no-verify -m "$2" || git commit -q --no-verify --allow-empty -m "$2"
+    git commit -q --no-verify -m "$2" || git commit -q --no-verify --allow-empty -m "$2" || exit 1
+    git rev-parse HEAD
   ' sh "$branch" "chore: seed working tree at session start"; then
     cg_error "worktree seed: could not initialize the in-sandbox git repo in $container_id"
     return 1
   fi
 }
 
-# worktree_container_extract <container_id> — write the agent's commits (the WIP root's
-# children) from <container_id>'s /workspace to stdout as a git patch-series. Computes the
-# root as the parentless commit reachable from HEAD, so format-patch covers exactly the
-# agent's work and never the WIP root (whose content is the user's own pre-session state,
-# already on the host). --binary handles binary files. Empty output ⇒ the agent made no
-# commits, which the host apply treats as "nothing to replay" (no data loss). This is the
-# MANDATORY pre-teardown extract; a non-zero return must abort teardown so the work isn't
-# lost with the volume.
+# worktree_container_extract <container_id> <base_ref> — write the agent's commits
+# (everything reachable from HEAD but not from <base_ref>, the WIP root SHA that
+# worktree_container_init_repo returned) from <container_id>'s /workspace to stdout as a git
+# patch-series. Threading the base SHA — rather than re-deriving the root in-container —
+# keeps the range EXACT even if the agent's history grew extra roots (a merge of unrelated
+# history, an `--amend --root`), where guessing the root could silently emit the wrong
+# series. --binary handles binary files. Empty output ⇒ the agent made no commits, which the
+# host apply treats as "nothing to replay" (no data loss). This is the MANDATORY pre-teardown
+# extract; a non-zero return must abort teardown so the work isn't lost with the volume.
 worktree_container_extract() {
-  local container_id="$1"
-  # shellcheck disable=SC2016  # $root expands inside the container shell, not here.
+  local container_id="$1" base_ref="$2"
+  # shellcheck disable=SC2016  # $1 expands inside the container shell, not here.
   docker exec -u node "$container_id" sh -c '
     cd /workspace || exit 1
-    root="$(git rev-list --max-parents=0 HEAD | tail -n 1)" || exit 1
-    [ -n "$root" ] || exit 1
-    git format-patch -q --stdout --binary "$root"..HEAD
-  '
+    git format-patch -q --stdout --binary "$1"..HEAD
+  ' sh "$base_ref"
 }
 
 # worktree_host_apply <repo_root> <base_commit> <branch> <wt_dir> <wip_patch> <agent_mbox>
@@ -146,7 +154,10 @@ worktree_host_apply() {
   if [[ -s "$agent_mbox" ]]; then
     if ! git -C "$wt_dir" am "$agent_mbox"; then
       git -C "$wt_dir" am --abort 2>/dev/null || true
-      cg_error "worktree extract: could not apply the agent's commits onto $branch"
+      # Keep the worktree (don't remove it): the agent's work is preserved in $agent_mbox,
+      # so the user can finish the reconcile by hand rather than lose it to a cleanup.
+      cg_error "worktree extract: could not apply the agent's commits onto $branch."
+      cg_error "the agent's work is preserved — resolve and re-run: git -C $wt_dir am $agent_mbox"
       return 1
     fi
   fi
