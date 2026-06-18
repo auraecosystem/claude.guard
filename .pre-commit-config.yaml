@@ -123,6 +123,13 @@ repos:
         pass_filenames: false
         files: ^\.github/(workflows|actions)/
 
+      - id: check-workflow-pipefail
+        name: enforce set -o pipefail on piped run/runCmd steps
+        entry: python3 .github/scripts/check-workflow-pipefail.py
+        language: system
+        pass_filenames: false
+        files: ^\.github/(workflows|actions)/
+
       - id: check-pinned-downloads
         name: enforce checksum/signature on downloaded artifacts
         entry: python3 .github/scripts/check-pinned-downloads.py
@@ -192,6 +199,13 @@ repos:
         language: system
         pass_filenames: false
         files: ^(config/launch-marks\.json|scripts/gen-launch-marks\.mjs|bin/lib/launch-marks\.bash|bin/lib/launch_marks\.py)$
+
+      - id: gen-trace-events
+        name: regenerate trace-channel event names from config/trace-events.json
+        entry: "bash -c 'node scripts/gen-trace-events.mjs && git add .claude/hooks/lib-trace-events.mjs .claude/hooks/monitorlib/trace_events.py'"
+        language: system
+        pass_filenames: false
+        files: ^(config/trace-events\.json|scripts/gen-trace-events\.mjs|\.claude/hooks/lib-trace-events\.mjs|\.claude/hooks/monitorlib/trace_events\.py)$
 
       - id: validate-changelog-fragments
         name: validate changelog.d fragment names
