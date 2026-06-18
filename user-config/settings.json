@@ -308,6 +308,7 @@
   },
   "sandbox": {
     "enabled": true,
+    "enableWeakerNestedSandbox": true,
     "network": {},
     "filesystem": {
       "allowWrite": [".", "/tmp", "/var/tmp"],

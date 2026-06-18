@@ -346,12 +346,11 @@ describe("mcp-tripwire: buildMessage", () => {
     assert.equal(
       msg,
       [
-        "This repo's .mcp.json asks to run MCP servers it defines itself:",
+        "This repo's .mcp.json asks to run MCP servers — helper programs Claude can call as tools. Claude Code will ask you to approve each one before it can run:",
         "  - a: runs `node evil.js`",
         "  - b: connects to https://x.example",
-        "Approving a server is a standing grant: a command server's program runs",
-        "automatically at every session start, outside per-command review. Only",
-        "approve programs you would run yourself.",
+        "Approving is a standing grant: the program then starts automatically at the beginning of every session, outside the usual per-command review — so approve only a program you would be willing to run yourself.",
+        "If you are not sure what a server does, decline it for now; you can approve it later.",
       ].join("\n"),
     );
   });
