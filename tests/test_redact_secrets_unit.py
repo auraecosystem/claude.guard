@@ -832,6 +832,24 @@ def test_non_gitleaks_provider_detectors(
         assert not det.denylist[0].search(miss), miss
 
 
+@pytest.mark.parametrize(
+    "cls_name, prefix",
+    [
+        ("GroqApiKeyDetector", "gsk_"),
+        ("XaiApiKeyDetector", "xai-"),
+        ("ReplicateApiTokenDetector", "r8_"),
+    ],
+)
+def test_prefix_detectors_have_length_breathing_room(plugins_mod, cls_name, prefix):
+    """The distinctive prefix is the anchor, so the body floor is a generous
+    ``{20,}``: a 20-char body matches (room for a provider to lengthen its key),
+    while 19 — still below the floor — does not. Guards against a future edit
+    pinning an exact empirical length that a provider change would silently miss."""
+    denylist = getattr(plugins_mod, cls_name).denylist[0]
+    assert denylist.search(prefix + "a" * 20)
+    assert not denylist.search(prefix + "a" * 19)
+
+
 # ─── Env-bound secret redaction (_redact_env_bound) ──────────────────────────
 # Prefix-less inference keys (e.g. Venice) have no safe structural regex, so
 # their literal configured value is redacted by exact match.
@@ -895,6 +913,142 @@ def test_main_redacts_env_bound_value(mod, monkeypatch):
     assert result is not None
     assert "VENICE_INFERENCE_KEY" in result["found"]
     assert _LONG not in result["text"]
+
+
+# ─── Cross-line secret splits (_redact_cross_line) ───────────────────────────
+# A token split across a newline is invisible to the per-line scan; this pass
+# collapses newlines, finds the match, and redacts only spans that straddle a
+# break. The fake-scan_line tests drive each branch deterministically; the
+# redact_text test proves the real Stripe detector catches a true split.
+
+
+def _fake_scan(monkeypatch, mod, *pairs):
+    """Patch ``scan_line`` to return ``SimpleNamespace(type, secret_value)`` fakes
+    whose value occurs in the scanned line — the deterministic stand-in for
+    detect-secrets so each ``_redact_cross_line`` branch can be driven exactly."""
+    fakes = [types.SimpleNamespace(type=t, secret_value=v) for t, v in pairs]
+    monkeypatch.setattr(
+        mod, "scan_line", lambda line: [f for f in fakes if f.secret_value in line]
+    )
+
+
+def test_cross_line_no_newline_is_noop(mod):
+    """No newline -> the collapse machinery never runs and the text is returned
+    verbatim (the early-out guard)."""
+    found: list[str] = []
+    assert mod._redact_cross_line("no newline here", found) == "no newline here"
+    assert found == []
+
+
+def test_cross_line_redacts_split_structural(mod, monkeypatch):
+    """A split token is collapsed to a single placeholder at the exact original
+    span (exact-equality pins both span offsets and the placeholder text)."""
+    head, tail = STRIPE_LIVE[:12], STRIPE_LIVE[12:]
+    _fake_scan(monkeypatch, mod, ("Stripe Access Key", STRIPE_LIVE))
+    found: list[str] = []
+    out = mod._redact_cross_line(f"prefix {head}\n{tail} suffix", found)
+    assert out == "prefix [REDACTED: Stripe Access Key] suffix"
+    assert found == ["Stripe Access Key"]
+
+
+def test_cross_line_redacts_split_at_offset_zero(mod, monkeypatch):
+    """A token starting at index 0 (no leading text) still redacts — pins the
+    overlap sentinel (a positive seed would wrongly drop the first span) and the
+    next-occurrence step (a zero/negative step would re-find index 0 forever)."""
+    _fake_scan(monkeypatch, mod, ("T", "ABCD"))
+    found: list[str] = []
+    assert mod._redact_cross_line("AB\nCD", found) == "[REDACTED: T]"
+    assert found == ["T"]
+
+
+def test_cross_line_redacts_repeated_value_at_two_sites(mod, monkeypatch):
+    """The same value split at two different sites is redacted at BOTH — pins the
+    ``start + len(value)`` advance (a wrong step would miss the second site)."""
+    _fake_scan(monkeypatch, mod, ("T", "WXYZ"))
+    found: list[str] = []
+    out = mod._redact_cross_line("WX\nYZ gap WX\nYZ", found)
+    assert out == "[REDACTED: T] gap [REDACTED: T]"
+    assert found == ["T", "T"]
+
+
+def test_cross_line_leaves_within_line_match(mod, monkeypatch):
+    """A match entirely on one line (newline elsewhere) is left for the per-line
+    scan, so cross-line makes no edit (straddle check false -> no accepted span)."""
+    _fake_scan(monkeypatch, mod, ("Stripe Access Key", STRIPE_LIVE))
+    found: list[str] = []
+    text = f"first line\nprefix {STRIPE_LIVE} end"
+    assert mod._redact_cross_line(text, found) == text
+    assert found == []
+
+
+def test_cross_line_skips_keyword_and_empty(mod, monkeypatch):
+    """A ``Secret Keyword`` detection (over-capturing) and an empty secret value
+    are both skipped even when present and split — neither is redacted."""
+    # "abcd" is present and straddles the newline; were the keyword/empty guard
+    # inverted it WOULD redact, so an unchanged result pins the guard.
+    _fake_scan(monkeypatch, mod, ("Secret Keyword", "abcd"), ("Stripe Access Key", ""))
+    found: list[str] = []
+    assert mod._redact_cross_line("ab\ncd", found) == "ab\ncd"
+    assert found == []
+
+
+def test_cross_line_overlapping_spans_redact_widest_once(mod, monkeypatch):
+    """Two detectors matching overlapping split spans at the same start redact
+    ONCE, keeping the WIDEST (pins both the overlap drop and the widest-first tie
+    break — a narrower-first order would leave the extra bytes exposed)."""
+    _fake_scan(monkeypatch, mod, ("Wide", "ABCDEF"), ("Narrow", "ABC"))
+    found: list[str] = []
+    assert mod._redact_cross_line("A\nBCDEF", found) == "[REDACTED: Wide]"
+    assert found == ["Wide"]
+
+
+def test_cross_line_adjacent_spans_both_kept(mod, monkeypatch):
+    """Two ADJACENT (touching but non-overlapping) split spans are BOTH redacted —
+    pins the strict ``<`` overlap test (``<=`` would drop the second)."""
+    _fake_scan(monkeypatch, mod, ("T1", "AABB"), ("T2", "CCDD"))
+    found: list[str] = []
+    out = mod._redact_cross_line("AA\nBBCC\nDD", found)
+    assert out == "[REDACTED: T1][REDACTED: T2]"
+    assert found == ["T1", "T2"]
+
+
+def test_cross_line_redacts_split_env_value(mod, monkeypatch):
+    """A configured env-key value split across a newline is redacted by exact
+    match; unset vars and a too-short value are both skipped."""
+    for name in mod.ENV_BOUND_SECRET_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VENICE_INFERENCE_KEY", _LONG)
+    monkeypatch.setenv("MONITOR_API_KEY", "short")  # below the floor -> skipped
+    monkeypatch.setattr(mod, "scan_line", lambda line: [])
+    head, tail = _LONG[:16], _LONG[16:]
+    found: list[str] = []
+    out = mod._redact_cross_line(f"key {head}\n{tail} end", found)
+    assert out == "key [REDACTED: VENICE_INFERENCE_KEY] end"
+    assert found == ["VENICE_INFERENCE_KEY"]
+
+
+def test_cross_line_env_value_at_exact_floor_redacts(mod, monkeypatch):
+    """A configured value of length exactly _MIN_ENV_SECRET_LEN is redacted (pins
+    the ``< floor`` boundary: ``<=`` would skip a value sitting on the floor)."""
+    for name in mod.ENV_BOUND_SECRET_VARS:
+        monkeypatch.delenv(name, raising=False)
+    value = "Z" * mod._MIN_ENV_SECRET_LEN
+    monkeypatch.setenv("VENICE_INFERENCE_KEY", value)
+    monkeypatch.setattr(mod, "scan_line", lambda line: [])
+    head, tail = value[:3], value[3:]
+    found: list[str] = []
+    out = mod._redact_cross_line(f"k {head}\n{tail} e", found)
+    assert out == "k [REDACTED: VENICE_INFERENCE_KEY] e"
+    assert found == ["VENICE_INFERENCE_KEY"]
+
+
+def test_redact_text_catches_real_split_stripe(mod):
+    """Faithful integration: the real Stripe detector (via redact_text, no fakes)
+    catches a token split across a newline buried in benign lines."""
+    head, tail = STRIPE_LIVE[:14], STRIPE_LIVE[14:]
+    text = f"log line\nprefix {head}\n{tail} suffix\ntrailer"
+    out, _found = mod.redact_text(text)
+    assert STRIPE_LIVE not in out.replace("\n", "")
 
 
 # Zero-width (U+200B), soft hyphen (U+00AD), bidi isolate (U+2066). Layer 1 strips
