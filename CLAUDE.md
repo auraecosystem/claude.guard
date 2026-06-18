@@ -121,6 +121,8 @@ Before declaring any non-trivial coding task done, **iteratively critique and fi
 
 This is one instance of the general rule: **super-heavy test suites — mutation testing, the full `pytest tests/` sweep, kcov, coverage gates — run on CI, not in this sandbox.** Locally run only the targeted fast tests for the files you touched (see Testing below); let CI own the expensive sweeps.
 
+**cosmic-ray `exec` mutates the source file in place (reverting after each mutant), so never run it in the background against a file you are about to `git add`/commit** — the in-place rewrite races `lint-staged` and the commit, corrupting the staged content and aborting the push (the file lands back clean after the run, but the commit is already mangled). Either let the cosmic-ray run finish before committing, or point it at a throwaway copy of the file. Stryker reads its inputs without rewriting them, so the JS path is race-free.
+
 ## Prebuilt-image supply chain & ephemeral sessions
 
 Design rationale and the full env-var reference for the signed-image pull (`resolve-image.bash`, `cosign`, the digest cache, `CLAUDE_GUARD_COSIGN_*` / `CLAUDE_GUARD_SBOM_DIFF`) and for ephemeral-by-default sessions (throwaway volumes, host-sourced Claude auth, `CLAUDE_PERSIST` / `CLAUDE_SHARED_AUTH` / `CLAUDE_NO_AUDIT_ARCHIVE`) live in [`.claude/dev-notes`](.claude/dev-notes). The load-bearing invariant: both fail closed — a verify failure falls back to a local build with **no bypass**, and session teardown **fails loud** on any volume it can't remove.
