@@ -94,12 +94,14 @@ describe("trace", () => {
     assert.equal(JSON.parse(out).tier, "LOW");
   });
 
-  it("treats an unknown level as info (the ?? fallback)", () => {
+  it("clamps an unknown level to info for gate and recorded field", () => {
     process.env.CLAUDE_GUARD_TRACE = "info";
     const out = captureStderr(() =>
       trace(TraceEvent.HOOK_RAN, {}, /** @type {any} */ ("bogus")),
     );
-    assert.equal(JSON.parse(out).event, "hook_ran");
+    const rec = JSON.parse(out);
+    assert.equal(rec.event, "hook_ran");
+    assert.equal(rec.level, "info"); // never the raw "bogus"
   });
 
   it("defaults fields to {} and level to info", () => {

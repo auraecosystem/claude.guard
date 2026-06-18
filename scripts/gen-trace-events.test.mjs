@@ -21,6 +21,11 @@ test("loadEvents returns the named events from the JSON SSOT", () => {
     assert.equal(typeof evt.required, "boolean");
   }
   const values = events.map((evt) => evt.value);
+  const consts = events.map((evt) => evt.const);
+  // Uniqueness the staleness check can't see: a duplicate value silently maps two
+  // keys to one wire string; a duplicate const clobbers the generated map/module.
+  assert.equal(new Set(values).size, values.length, "duplicate event value");
+  assert.equal(new Set(consts).size, consts.length, "duplicate event const");
   assert.ok(values.includes("managed_settings_installed"));
   // `required` is reserved for startup-deterministic events; the activity-
   // dependent per-call events must not be required (else the self-test flakes).

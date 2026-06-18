@@ -4,8 +4,9 @@
 // and by the gen-trace-events pre-commit hook, so the JS and Python producers can
 // never drift from the single list of event names. Only NAME constants are
 // generated (short, formatter-stable); the manifest fields (layer/level/required)
-// are read straight from the JSON SSOT by the engagement self-test and tests, so no
-// derived copy can go stale. writeIfChanged is shared with gen-launch-marks.mjs.
+// are meant to be read straight from the JSON SSOT by the (planned) engagement
+// self-test and by tests, so no derived copy can go stale. writeIfChanged is
+// shared with gen-launch-marks.mjs.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

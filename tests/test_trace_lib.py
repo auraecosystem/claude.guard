@@ -98,12 +98,14 @@ def test_debug_event_emitted_when_debug_enabled(
     assert json.loads(capsys.readouterr().err)["tier"] == "LOW"
 
 
-def test_unknown_level_treated_as_info(
+def test_unknown_level_clamped_to_info(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("CLAUDE_GUARD_TRACE", "info")
-    trace(trace_events.HOOK_RAN, {}, level="bogus")  # .get fallback to info
-    assert json.loads(capsys.readouterr().err)["event"] == "hook_ran"
+    trace(trace_events.HOOK_RAN, {}, level="bogus")  # clamps to info
+    rec = json.loads(capsys.readouterr().err)
+    assert rec["event"] == "hook_ran"
+    assert rec["level"] == "info"  # never the raw "bogus"
 
 
 def test_appends_to_trace_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

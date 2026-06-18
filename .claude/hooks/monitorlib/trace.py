@@ -40,10 +40,13 @@ def trace(event, fields=None, level="info") -> None:
     ``fields`` is metadata only — never a tool_input body or secret material.
     No-op when the channel is below ``level``; best-effort on write.
     """
-    want = _LEVELS.get(level, _LEVELS["info"])
-    if trace_threshold() < want:
+    # info|debug are the only real levels; anything else (a producer typo) clamps
+    # to info for BOTH the gate and the recorded field, so a line never carries a
+    # level outside {info,debug} for a reader to bucket on.
+    lvl = "debug" if level == "debug" else "info"
+    if trace_threshold() < _LEVELS[lvl]:
         return
-    record = {"ts": int(time.time() * 1000), "level": level, "event": event}
+    record = {"ts": int(time.time() * 1000), "level": lvl, "event": event}
     if fields:
         record.update(fields)
     line = json.dumps(record) + "\n"

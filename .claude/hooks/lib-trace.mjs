@@ -42,10 +42,13 @@ export function traceThreshold(env = process.env) {
  * @returns {void}
  */
 export function trace(event, fields = {}, level = "info") {
-  const want = LEVELS[level] ?? LEVELS.info;
-  if (traceThreshold() < want) return;
+  // info|debug are the only real levels; anything else (a producer typo) clamps
+  // to info for BOTH the gate and the recorded field, so a line never carries a
+  // level outside {info,debug} for a reader to bucket on.
+  const lvl = level === "debug" ? "debug" : "info";
+  if (traceThreshold() < LEVELS[lvl]) return;
   const line =
-    JSON.stringify({ ts: Date.now(), level, event, ...fields }) + "\n";
+    JSON.stringify({ ts: Date.now(), level: lvl, event, ...fields }) + "\n";
   const file = process.env.CLAUDE_GUARD_TRACE_FILE;
   try {
     if (file) appendFileSync(file, line);
