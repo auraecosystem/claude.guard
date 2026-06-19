@@ -2930,6 +2930,9 @@ def _scan_vars(**env: str) -> list[str]:
     return r.stdout.split()
 
 
+@pytest.mark.drift_guard(
+    "the doctor probe and resolve_monitor_key are separate shell functions that must honor MONITOR_PROVIDER identically; there is no shared definition to import"
+)
 @pytest.mark.parametrize(
     "env, expected",
     [
