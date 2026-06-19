@@ -275,9 +275,15 @@ def run_self_test(mode_name: str = "default") -> int:
         with tempfile.TemporaryDirectory(prefix="cg-trace-ws-") as workspace:
             trace_text, returncode = capture_launch_trace(workspace, mode["flags"])
     else:
+        # Nothing is launched: the mode runs on the host with no container, so no
+        # container-side producer exists to fire. The assertion is STRUCTURAL — every
+        # expect_off event is absent because there is no producer, and expect_on is empty
+        # by construction (a non-empty expect_on for a no-container mode is a manifest bug,
+        # caught by trace-mode-manifest.test.mjs, not here). This deliberately does not
+        # probe a real host launch, which would hang on an interactive claude.
         print(
-            f"trace self-test [{mode_name}]: this mode runs on the host and boots no "
-            "container, so no container-side producer can fire — asserting their absence."
+            f"trace self-test [{mode_name}]: runs on the host with no container — "
+            "structurally asserting no container-side event fires (nothing is launched)."
         )
         trace_text, returncode = "", 0
     seen = events_in_trace(trace_text)

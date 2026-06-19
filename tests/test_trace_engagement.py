@@ -389,7 +389,7 @@ def test_run_self_test_host_mode_boots_nothing(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(trace, "capture_launch_trace", explode)
     assert trace.run_self_test("host") == 0
-    assert "boots no container" in capsys.readouterr().out
+    assert "no container" in capsys.readouterr().out
 
 
 def test_capture_launch_trace_forwards_mode_flags(monkeypatch) -> None:
