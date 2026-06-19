@@ -100,14 +100,15 @@ When you type `claude-guard`:
 
 Auto mode and the monitor are **best-effort** filters, not hard boundaries — a model can be talked past. The hard boundaries are the VM and the firewall. See [`SECURITY.md`](SECURITY.md).
 
-Sessions are **ephemeral by default**: throwaway volumes are wiped on exit, so nothing an attacker stages in one session survives into the next. Your workspace is a host directory, so every file and commit the agent makes stays on your local disk. What you'd otherwise lose across sessions, and how it's handled:
+Sessions are **ephemeral by default**: throwaway volumes are wiped on exit, so nothing an attacker stages in one session survives into the next. Your workspace is a host directory, so every file and commit the agent makes stays on your local disk. What you'd otherwise lose across sessions:
 
-- **Claude login** — `claude-guard setup-token` captures your credential on the host; it's re-injected automatically into every session.
-- **GitHub access** — `claude-guard gh-app` installs a GitHub App that mints a short-lived, repo-scoped token per session; your personal token never enters the sandbox.
-- **Conversation continuity** — `--resume` / `--continue` restores the prior transcript only; settings, hooks, and credentials stay throwaway.
-- **Monitor audit history** — archived to the host on teardown; restored read-only on resume so the monitor has a full kill-chain view across sessions.
-- **MCP connector approvals** _(outstanding)_ — re-prompted every session; fix in progress.
-- **Package caches** (npm, pip, etc.) — re-fetched each session; accepted cost, no workaround needed.
+|     |                                                                                                                       |
+| --: | :-------------------------------------------------------------------------------------------------------------------- |
+|   ✓ | **Claude login** — `setup-token` captures your credential on the host; re-injected automatically every session.       |
+|   ✗ | **GitHub access** — `gh-app` mints a short-lived repo-scoped token per session, but requires a one-time App install.  |
+|   ✗ | **Conversation continuity** — `--resume` / `--continue` restores the prior transcript, but requires an explicit flag. |
+|   ◐ | **Monitor audit history** — archived to the host on teardown; restored read-only on resume only.                      |
+|   ✗ | **MCP connector approvals** — re-prompted every session; fix in progress.                                             |
 
 [`docs/configuration.md`](docs/configuration.md) covers persistence options and resume details.
 
