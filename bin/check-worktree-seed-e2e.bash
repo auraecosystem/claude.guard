@@ -38,6 +38,14 @@ done
 # to boot (not build); a generous default still covers a cold runner.
 BOOT_TIMEOUT="${SEED_E2E_BOOT_TIMEOUT:-700}"
 
+# Teardown budget in seconds. The exit trigger (a pty EOF) only takes effect once
+# claude has finished its OWN interactive startup inside the sandbox — under gVisor
+# on a cold runner that heavy Node boot can take minutes, and it sits on the critical
+# path BEFORE the launcher can reach the teardown (the extract under test). So this
+# must cover claude's full boot + exit + teardown, not teardown alone; sizing it for
+# teardown only made the wait a coin-flip against claude's boot latency.
+TEARDOWN_TIMEOUT="${SEED_E2E_TEARDOWN_TIMEOUT:-600}"
+
 # Launch logs live OUTSIDE the per-session scratch dir (which the cleanup trap
 # removes) so a "show logs on failure" workflow step — and the inline dump below —
 # can still read them after teardown. One file per session, tagged by phase.
@@ -212,15 +220,14 @@ assert_runsc() {
 }
 
 # trigger_teardown — drive claude to exit so the launcher proceeds to its ephemeral
-# EXIT-trap teardown (the extract under test). Interactive claude treats one Ctrl-D as
-# the first press of its two-step "Press Ctrl-D again to exit" confirm, so send two
-# Ctrl-D (0x04) bytes through the pty. Do NOT close fd 9 here: closing the fifo makes
-# `script` hang up the pty, which SIGHUPs the launcher MID-teardown (it exits 129 and
-# its container/volume removal is cut short after the extract, leaving the session
-# behind). Leaving the pty open lets the launcher exit cleanly through extract AND
-# teardown; cleanup() releases fd 9 at process exit once the launcher is gone.
+# teardown (the extract under test). Closing fd 9 hangs up the pty, which exits the
+# interactive claude reliably (two Ctrl-D bytes alone don't dismiss its first-run
+# theme picker). The launcher traps SIGHUP and runs its FULL teardown on a hangup, so
+# the extract AND the container/volume removal both complete — closing here no longer
+# races teardown. Send the Ctrl-D bytes first as a graceful nudge, then hang up.
 trigger_teardown() {
   printf '\004\004' >&9 2>/dev/null || true
+  exec 9>&-
 }
 
 # ── Positive path: seed → locks hold → agent commits → extract to host branch ──
@@ -266,8 +273,8 @@ run_positive() {
   echo "==> [positive] signalling claude to exit to trigger teardown + extract..."
   trigger_teardown
   local waited=0
-  while ((waited++ < 240)) && kill -0 "$pid" 2>/dev/null; do sleep 1; done
-  kill -0 "$pid" 2>/dev/null && fail "launcher did not finish teardown within 240s."
+  while ((waited++ < TEARDOWN_TIMEOUT)) && kill -0 "$pid" 2>/dev/null; do sleep 1; done
+  kill -0 "$pid" 2>/dev/null && fail "launcher did not finish teardown within ${TEARDOWN_TIMEOUT}s."
 
   # Matrix: the agent's edit RETURNED on a reviewable claude/seed-* host branch.
   local branch tip_marker
@@ -309,8 +316,8 @@ run_negative() {
   echo "==> [negative] in-sandbox repo removed; signalling claude to exit to trigger teardown..."
   trigger_teardown
   local rc=0 waited=0
-  while ((waited++ < 240)) && kill -0 "$pid" 2>/dev/null; do sleep 1; done
-  kill -0 "$pid" 2>/dev/null && fail "launcher did not finish within 240s."
+  while ((waited++ < TEARDOWN_TIMEOUT)) && kill -0 "$pid" 2>/dev/null; do sleep 1; done
+  kill -0 "$pid" 2>/dev/null && fail "launcher did not finish within ${TEARDOWN_TIMEOUT}s."
   wait "$pid" 2>/dev/null || rc=$?
 
   # Fail-loud: the launcher must exit non-zero AND keep the session's volume so the

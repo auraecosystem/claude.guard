@@ -1702,12 +1702,13 @@ _ephemeral_cleanup() {
   _ephemeral_done=true
   # Kill the opt-in Watcher bridge first (host process; no-op when it never started).
   watcher_bridge_stop
-  # Once we commit to teardown, ignore further INT/TERM until it finishes. A
-  # second Ctrl-C through the slow docker rm/volume rm would otherwise abort the
-  # handler mid-run and leave the session's firewall/monitor containers (and their
-  # volumes) orphaned — silently defeating the throwaway guarantee. This guards
-  # both entry paths (the INT/TERM handler and the normal EXIT trap).
-  trap '' INT TERM
+  # Once we commit to teardown, ignore further INT/TERM/HUP until it finishes. A
+  # second Ctrl-C (or a terminal hangup) through the slow docker rm/volume rm would
+  # otherwise abort the handler mid-run and leave the session's firewall/monitor
+  # containers (and their volumes) orphaned — silently defeating the throwaway
+  # guarantee. This guards both entry paths (the INT/TERM/HUP handler and the normal
+  # EXIT trap).
+  trap '' INT TERM HUP
   # shellcheck source=lib/audit-archive.bash disable=SC1091
   source "$(dirname "$SELF_CANONICAL")/lib/audit-archive.bash"
   # shellcheck source=lib/egress-archive.bash disable=SC1091
@@ -1826,15 +1827,16 @@ show_session_banner() {
   [[ -t 1 ]] || return 0
   "$_self_dir/claude-guard-banner" solid 2>/dev/null || true # kcov-ignore-line  reason: tty-only paint — unreachable under kcov, whose stdout is piped (the [[ -t 1 ]] guard returns first)
 }
-# On Ctrl-C / SIGTERM (e.g. through a multi-minute `devcontainer up` build) run
-# the same teardown, then exit with the conventional 128+signal code — rather
-# than resuming into the "devcontainer up failed" diagnostics below as if the
-# build had errored. _ephemeral_cleanup is a no-op when not ephemeral; the EXIT
-# trap re-entry is absorbed by _ephemeral_done.
+# On Ctrl-C / SIGTERM / SIGHUP (e.g. through a multi-minute `devcontainer up` build,
+# or the controlling terminal hanging up) run the same teardown, then exit with the
+# conventional 128+signal code — rather than resuming into the "devcontainer up
+# failed" diagnostics below as if the build had errored. _ephemeral_cleanup is a
+# no-op when not ephemeral; the EXIT trap re-entry is absorbed by _ephemeral_done.
 _on_interrupt() {
-  # Committed to teardown-and-exit: ignore further INT/TERM so a second Ctrl-C
-  # can't re-enter this handler before _ephemeral_cleanup installs its own guard.
-  trap '' INT TERM
+  # Committed to teardown-and-exit: ignore further INT/TERM/HUP so a second Ctrl-C
+  # (or a delayed terminal hangup) can't re-enter this handler before
+  # _ephemeral_cleanup installs its own guard.
+  trap '' INT TERM HUP
   stop_loading_banner
   stop_build_heartbeat
   # Collect the background cleanup fork before teardown, alongside the other
@@ -1881,6 +1883,12 @@ if "$_ephemeral" && ! "$_prewarming"; then
 fi
 trap '_on_interrupt 130' INT
 trap '_on_interrupt 143' TERM
+# HUP = the controlling terminal hung up (the user closed the window, or an
+# interactive session's pty was torn down). Without this an ephemeral session would
+# die on HUP's default disposition mid-teardown — after the work but before volume
+# removal — leaking the throwaway containers/volumes the session promised to discard.
+# Route it through the same orderly teardown as INT/TERM (128+SIGHUP = 129).
+trap '_on_interrupt 129' HUP
 # Created in the parent here — before the overlap path may background the bring-up
 # (see _scratch_dir above) — so the dir is visible to every trap regardless of which
 # scope later writes a file into it.
