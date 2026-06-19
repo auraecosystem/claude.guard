@@ -812,14 +812,27 @@ def _resolve_compose_version_default(name: str) -> str:
     return re.sub(r"\$\{CLAUDE_CODE_VERSION:-(?P<ver>[^}]+)\}", r"\g<ver>", name)
 
 
+def _is_bash_compose_up_site(text: str) -> bool:
+    """True if a bash script brings the compose stack up. Matching on ``up -d`` in a
+    non-comment line (rather than only the ``"${DC[@]}" up`` literal) catches a script
+    that wraps ``docker compose`` in a local function and invokes ``<wrapper> ... up -d``
+    — e.g. check-monitor-disengage-e2e.bash's ``dc "$COMPOSE" up -d`` — which an
+    invocation-shape-specific regex silently missed."""
+    if "docker compose" not in text:
+        return False
+    return bool(re.search(r"(?m)^(?!\s*#).*\bup -d\b", text))
+
+
 def _discover_compose_up_sites() -> list[Path]:
     """Every site that brings the devcontainer stack up. The launcher (via the
-    devcontainer CLI) is always included; bash scripts that run ``"${DC[@]}" up`` and
-    CI workflows/actions that run ``docker compose ... up`` are discovered so a new
-    up-site can't slip the guard by not being listed."""
-    bash_up = re.compile(r'"\$\{DC\[@\]\}"\s+up\b')
+    devcontainer CLI) is always included; bash scripts that run ``docker compose ... up
+    -d`` (directly or through a local wrapper) and CI workflows/actions that run
+    ``docker compose ... up`` are discovered so a new up-site can't slip the guard by
+    not being listed."""
     bash_sites = [
-        p for p in (REPO_ROOT / "bin").glob("*.bash") if bash_up.search(p.read_text())
+        p
+        for p in (REPO_ROOT / "bin").glob("*.bash")
+        if _is_bash_compose_up_site(p.read_text())
     ]
     gh = REPO_ROOT / ".github"
     yaml_sites = [
