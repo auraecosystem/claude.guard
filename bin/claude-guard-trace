@@ -118,6 +118,17 @@ def capture_launch_trace(workspace: str) -> tuple[str, int | None]:
             "CLAUDE_GUARD_TRACE_FILE": path,
             "CLAUDE_GUARD_EXIT_AT_HANDOVER": "1",
             "CLAUDE_WORKSPACE": workspace,
+            # Force a COLD boot. A warm launch adopts a pre-warmed spare whose firewall and
+            # hardener already ran during prewarm with the trace channel OFF, so its
+            # containers never re-run the producers and this launch's trace file would stay
+            # empty — yielding a false "nothing engaged" verdict. Adoption is keyed by the
+            # workspace folder (prewarm_spec_hash), and this self-test boots a throwaway temp
+            # workspace nobody pre-warms, so adoption can't happen TODAY; pinning NO_PREWARM
+            # makes the cold-boot guarantee explicit rather than incidental, so a future
+            # change to how spares are keyed can't silently turn the self-test into an
+            # empty-trace false failure. The tool can only verify engagement on the path
+            # where it owns the trace file from the first boot.
+            "CLAUDE_GUARD_NO_PREWARM": "1",
         }
         returncode: int | None = None
         try:

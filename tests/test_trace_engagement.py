@@ -231,6 +231,11 @@ def test_capture_launch_trace_runs_wrapper_and_reads_back(monkeypatch) -> None:
         assert check is False
         assert env["CLAUDE_GUARD_TRACE"] == "info"
         assert env["CLAUDE_GUARD_EXIT_AT_HANDOVER"] == "1"
+        # Must force a COLD boot: a warm/adopted spare ran its producers during prewarm
+        # with the channel off, so it would yield an empty trace and a false "nothing
+        # engaged" verdict. The self-test can only assert engagement on the path where it
+        # owns the trace file from the first boot.
+        assert env["CLAUDE_GUARD_NO_PREWARM"] == "1"
         path = env["CLAUDE_GUARD_TRACE_FILE"]
         seen_path["path"] = path
         Path(path).write_text('{"event":"firewall_rules_applied"}\n', encoding="utf-8")
