@@ -504,3 +504,57 @@ edge only bites a project that registers its own executable hooks, and we lock f
 it rather than rely on the review gate. So the seed-mode kernel-ro set is
 **`{ node_modules, .claude }`**, and `{ .devcontainer, CLAUDE.md, AGENTS.md }`
 ride the extract→review gate.
+
+### Measuring end-to-end coverage (not lines)
+
+**Line coverage is the wrong instrument for this feature, and a green unit suite
+here is actively misleading.** Every unit test of the seed/verify/extract bash runs
+against a _stubbed_ `docker`, which cannot disagree with the real daemon — so it
+reports 100% while the boundary that matters could be wide open. The branches that
+can actually hurt us are **runtime/integration behaviors a fake `docker` never
+observes**: does Compose's volume-merge-by-target actually _replace_ the bind; does
+a read-only named sub-volume actually deny in-container-root writes **under gVisor**;
+does the hardener's `pnpm install` land in the `node_modules` sub-volume the app
+reads ro; does extract really run **before** volume removal and fail loud. "Did our
+bash execute" is not "did the lock hold."
+
+The repo already has the right generalized instrument, and we use all three tiers:
+
+1. **Line coverage** (kcov/c8/pytest) — floor only; proves code _ran_, blind to
+   integration. Necessary, never sufficient here.
+2. **Mutation testing** — proves the tests _assert_ rather than merely execute.
+3. **Trace-event engagement** (`config/trace-events.json`) — the end-to-end honesty
+   net: each defense layer _announces it engaged_, so a silent non-engagement is loud
+   at runtime and in CI. This is the closest thing to a generalized "did the defense
+   actually work end-to-end" metric the codebase has — it measures **engagement**,
+   not line execution.
+
+So the answer to "have we exhausted the branches?" is: the **bash decision branches**
+are unit-covered (and a few more land with the wiring), but the **load-bearing
+branches are integration invariants**, and those are covered only by the gVisor e2e
+(`worktree-seed-e2e`, modeled on `claude-auth-e2e.yaml`) plus engagement events — not
+by any coverage percentage. The e2e's assertion spec is this **invariant × fail-mode
+matrix** (positive AND negative — a fail-closed path is unproven until a test forces
+it to abort):
+
+| Invariant / fail-mode                                                  | Only provable on the real stack? | Covered by                                   |
+| ---------------------------------------------------------------------- | -------------------------------- | -------------------------------------------- |
+| Seed compose **replaces** the bind (both containers see the volume)    | Yes                              | gVisor e2e                                   |
+| `node_modules` + `.claude` ro mounts **deny in-container-root write**  | Yes (kernel/gVisor)              | gVisor e2e (verify probe) + unit (logic)     |
+| Inert paths (`.devcontainer`/`CLAUDE.md`/`AGENTS.md`) **writable**     | Yes                              | gVisor e2e                                   |
+| Hardener `pnpm install` → `node_modules` sub-volume, visible ro to app | Yes                              | gVisor e2e (hooks resolve → tool call works) |
+| Seeded tree **byte-identical**, `..`/symlink-contained under gVisor    | Yes                              | gVisor e2e (S1 covers bare tar only)         |
+| Agent edit **returns** on a `claude/<name>` host branch                | Yes                              | gVisor e2e                                   |
+| **Extract runs before volume removal**, fail-loud on failure           | Yes (teardown ordering)          | gVisor e2e (negative: force extract failure) |
+| Verify **aborts** when a lock is writable                              | No (logic)                       | unit (`test_verify_seed_mode_fails_closed`)  |
+| Seed failure **aborts** launch (no half-seeded handover)               | Partly                           | unit + gVisor e2e                            |
+| `CLAUDE_NO_WORKTREE` / non-git **fall back** to bind                   | No                               | unit                                         |
+
+**Engagement events for seed mode.** Two new defense engagements get a trace event
+emitted by the launch producer when wired: `WORKTREE_SEED_LOCKED` (the guardrail
+verify proved the sub-volume locks) and `WORKTREE_EXTRACTED` (the mandatory
+pre-teardown extract completed). They stay `required: false` in the SSOT — seed mode
+is opt-in, so they don't fire on every launch and can't be `required` without
+flaking the global engagement self-test — but the seed e2e asserts both **fired** on
+a seed launch. That is the generalized "the layer engaged end-to-end" check applied
+to this feature; the matrix above is what it asserts.
