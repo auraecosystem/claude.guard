@@ -483,10 +483,12 @@ maybe_link_claude_alias() {
 # relocation in maybe_link_claude_alias. No-ops when pnpm is unavailable or the
 # symlink is already correct.
 _retarget_claude_original() {
-  local gbin preserved="$HOME/.local/bin/claude-original"
+  local preserved="$HOME/.local/bin/claude-original"
+  local gbin
   gbin="$(pnpm bin -g 2>/dev/null)" || return 0
   [[ -x "$gbin/claude" ]] || return 0
   [[ -L "$preserved" && "$(readlink "$preserved")" == "$gbin/claude" ]] && return 0
+  mkdir -p "$(dirname "$preserved")"
   ln -sf "$gbin/claude" "$preserved"
 }
 
