@@ -79,15 +79,17 @@ per-server | all-future) ;;
 esac
 # Keystrokes that accept the harness's project-MCP trust prompt. This is the one
 # version-sensitive knob: the prompt's TUI may change between Claude Code releases.
-# per-server sends Down (highlight the per-server approve option) then Enter; the
-# all-future grant is the prompt's default-highlighted (widest) option, so Enter
-# alone. Override either if a release moves it. The discover-or-fail-loud guard below
-# means a wrong sequence fails with a clear "tune MCP_E2E_APPROVE*_KEYS" message,
-# never a silent pass.
+# The prompt's options are (CC 2.1.x):
+#   ❯ 1. Use this MCP server                                    ← default-highlighted
+#     2. Use this and all future MCP servers in this project
+# so per-server accepts the default with Enter alone, and all-future moves Down one
+# row then Enter to pick the blanket grant. Override either if a release reorders
+# them. The discover-or-fail-loud guard below means a wrong sequence fails with a
+# clear "tune MCP_E2E_APPROVE*_KEYS" message, never a silent pass.
 if [[ "$MCP_MODE" == all-future ]]; then
-  MCP_APPROVE_KEYS="${MCP_E2E_APPROVE_ALL_KEYS:-$'\r'}"
+  MCP_APPROVE_KEYS="${MCP_E2E_APPROVE_ALL_KEYS:-$'\x1b[B\r'}"
 else
-  MCP_APPROVE_KEYS="${MCP_E2E_APPROVE_KEYS:-$'\x1b[B\r'}"
+  MCP_APPROVE_KEYS="${MCP_E2E_APPROVE_KEYS:-$'\r'}"
 fi
 # Keystrokes that make interactive claude EXIT gracefully so its SessionEnd hook
 # runs (the capture this check depends on). Closing the pty's stdin writer is NOT
