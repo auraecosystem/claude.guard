@@ -79,20 +79,26 @@ ipset create allowed-domains hash:net
 ipset add allowed-domains "$PUBLIC_IP"
 
 # ── Replay init-firewall.bash's exact OUTPUT chain ordering ──────────────────
-# Copied VERBATIM from .devcontainer/init-firewall.bash (the IP firewall block
-# through the over-quota REJECT) so a wiring bug in the real ordering is
-# reproduced here. tests/test_egress_quota_e2e.py pins this block against the
-# source. We do NOT set the OUTPUT policy to DROP: the assertion is purely the
-# quota/REJECT counters on the allowed-domains ipset traffic, and leaving the
-# policy at ACCEPT keeps unrelated host traffic (the python origin's own sockets,
-# any return path) from interfering — only packets to PUBLIC_IP hit the ipset
-# rules, and PUBLIC_IP is the only member of the set.
+# The load-bearing rules (the quota ACCEPT and over-quota REJECT, in order before
+# the ESTABLISHED accept) are copied VERBATIM from .devcontainer/init-firewall.bash
+# and pinned against the source by tests/test_egress_quota_e2e.py. We DELIBERATELY
+# omit the source's leading `iptables -A OUTPUT -o lo -j ACCEPT`: our origin binds a
+# local /32, and the kernel routes any locally-assigned address out the LOOPBACK
+# device (`ip route get <local-ip>` => `dev lo`), so an `-o lo` accept would
+# short-circuit the very PUBLIC_IP packets before they reach the quota rule and the
+# budget would never decrement (the test would pass vacuously). With it omitted,
+# PUBLIC_IP traffic hits the ipset quota/REJECT rules by destination regardless of
+# the carrier device, exactly as real allowed-domain egress would.
+#
+# We do NOT set the OUTPUT policy to DROP: the assertion is purely the quota/REJECT
+# counters on the allowed-domains ipset traffic, and leaving the policy at ACCEPT
+# keeps unrelated host traffic from interfering — only packets to PUBLIC_IP hit the
+# ipset rules, and PUBLIC_IP is the only member of the set.
 # >>> BEGIN REPLAY (init-firewall.bash) >>>
 SANDBOX_SUBNET="172.30.0.0/24"
 EGRESS_QUOTA="$QUOTA_MB"
 
 iptables -F OUTPUT
-iptables -A OUTPUT -o lo -j ACCEPT
 
 iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
 iptables -A OUTPUT -d "$SANDBOX_SUBNET" -j ACCEPT

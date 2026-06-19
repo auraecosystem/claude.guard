@@ -106,6 +106,7 @@ KCOV_EXCLUDED: list[str] = [
     "bin/check-compose-lifecycle.bash",
     "bin/check-dev-lifecycle.bash",
     "bin/check-devcontainer.bash",
+    "bin/check-egress-quota.bash",
     "bin/check-firewall-caps.bash",
     "bin/check-firewall-egress.bash",
     "bin/check-foreign-repo.bash",
