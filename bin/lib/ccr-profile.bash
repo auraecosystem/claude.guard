@@ -13,7 +13,7 @@ source "${BASH_SOURCE[0]%/*}/msg.bash"
 _add_compose_profile() {
   local profile="$1"
   case ",${COMPOSE_PROFILES:-}," in
-  *",$profile,"*) ;; # already present — nothing to add
+  *",$profile,"*) return 0 ;; # already present — nothing to add
   *) export COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}$profile" ;;
   esac
 }
