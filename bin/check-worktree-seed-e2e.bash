@@ -34,11 +34,28 @@ for tool in docker devcontainer script git; do
   }
 done
 
-# Boot budget in seconds: covers a from-scratch local image build on a CI runner.
-BOOT_TIMEOUT="${SEED_E2E_BOOT_TIMEOUT:-1500}"
+# Boot budget in seconds: the workflow pre-builds the images, so a launch only has
+# to boot (not build); a generous default still covers a cold runner.
+BOOT_TIMEOUT="${SEED_E2E_BOOT_TIMEOUT:-700}"
+
+# Launch logs live OUTSIDE the per-session scratch dir (which the cleanup trap
+# removes) so a "show logs on failure" workflow step — and the inline dump below —
+# can still read them after teardown. One file per session, tagged by phase.
+LOG_DIR="${SEED_E2E_LOG_DIR:-/tmp/claude-seed-e2e-logs}"
+mkdir -p "$LOG_DIR"
+CUR_LOG="" # the launch log of the session currently under test (dumped on failure)
 
 # Suppress host-onboarding prompts that would block the pty; none is under test.
+# A missing managed-settings file triggers first-run provisioning that blocks the
+# pty, so satisfy its existence check with a placeholder on CI runners that never
+# ran setup.bash (mirrors bin/check-claude-auth-e2e.bash). NO_UPDATE keeps the
+# launch hermetic — the stay-current `git fetch` is not under test.
 export CLAUDE_GUARD_ASSUME_YES=1
+export CLAUDE_GUARD_NO_UPDATE=1
+[[ -f "${CLAUDE_GUARD_MANAGED_SETTINGS:-/etc/claude-code/managed-settings.json}" ]] || {
+  export CLAUDE_GUARD_MANAGED_SETTINGS="$LOG_DIR/.managed-settings-placeholder.json"
+  echo '{}' >"$CLAUDE_GUARD_MANAGED_SETTINGS"
+}
 
 # The app container carries the devcontainer CLI's local_folder label plus
 # compose's per-service label — the same discovery the launcher itself uses.
@@ -46,6 +63,16 @@ find_app() {
   docker ps -q \
     --filter "label=devcontainer.local_folder=$1" \
     --filter "label=com.docker.compose.service=app" | head -1
+}
+
+# dump_cur_log — echo the current session's launch log to stderr (the job output),
+# so a failure is diagnosable even though the cleanup trap later removes the scratch
+# workspace. No-op when no session is in flight yet.
+dump_cur_log() {
+  [[ -n "$CUR_LOG" && -f "$CUR_LOG" ]] || return 0
+  echo "----- launch log ($CUR_LOG) -----" >&2
+  tail -120 "$CUR_LOG" >&2 || true
+  echo "----- end launch log -----" >&2
 }
 
 # Force-remove any compose project this workspace left behind (a launcher that
@@ -107,8 +134,9 @@ make_workspace() {
 # pty). The caller closes fd 9 (`exec 9>&-`) to trigger teardown.
 LAUNCH_PID=""
 launch_session() {
-  local ws="$1" trace="$2" log fifo
-  log="$ws/.launch.log"
+  local ws="$1" trace="$2" tag="$3" log fifo
+  log="$LOG_DIR/$tag.log"
+  CUR_LOG="$log"
   fifo="$ws/.pty-stdin"
   mkfifo "$fifo"
   (
@@ -122,20 +150,25 @@ launch_session() {
   exec 9>"$fifo"
 }
 
-# wait_for_seed_repo <workspace> — block until the app container is up AND the
-# launcher has stood up the in-sandbox seed repo (a claude/seed-* branch checked
-# out in /workspace). Prints the app container id. Fails loud on timeout or a
-# launcher that exited early.
+# wait_for_seed_repo <workspace> <pid> — block until the app container is up AND the
+# launcher has stood up the in-sandbox seed repo (a claude/seed-* branch checked out
+# in /workspace). Prints ONLY the app container id on stdout (every diagnostic goes
+# to stderr so the caller's `$(...)` capture stays clean). Fails loud on timeout or a
+# launcher that exited early, dumping the launch log so the cause is visible in CI.
 wait_for_seed_repo() {
-  local ws="$1" pid="$2" deadline=$((SECONDS + BOOT_TIMEOUT)) cid branch
+  local ws="$1" pid="$2" deadline=$((SECONDS + BOOT_TIMEOUT)) cid branch saw_cid=false
   while :; do
     kill -0 "$pid" 2>/dev/null || {
-      cg_error "FAIL: launcher exited before the seed repo came up — last log lines:"
-      tail -60 "$ws/.launch.log" >&2 || true
+      cg_error "FAIL: launcher exited before the seed repo came up."
+      dump_cur_log
       exit 1
     }
     cid="$(find_app "$ws")"
     if [[ -n "$cid" ]]; then
+      "$saw_cid" || {
+        echo "    app container up ($cid); waiting for the in-sandbox seed repo..." >&2
+        saw_cid=true
+      }
       branch="$(docker exec -u node "$cid" git -C /workspace rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
       [[ "$branch" == claude/seed-* ]] && {
         printf '%s' "$cid"
@@ -143,8 +176,9 @@ wait_for_seed_repo() {
       }
     fi
     ((SECONDS < deadline)) || {
-      cg_error "FAIL: timed out (${BOOT_TIMEOUT}s) waiting for the seeded in-sandbox repo."
-      tail -60 "$ws/.launch.log" >&2 || true
+      cg_error "FAIL: timed out (${BOOT_TIMEOUT}s) waiting for the seeded in-sandbox repo (app container seen: $saw_cid; last HEAD: ${branch:-<none>})."
+      docker ps -a >&2 || true
+      dump_cur_log
       exit 1
     }
     sleep 5
@@ -153,6 +187,7 @@ wait_for_seed_repo() {
 
 fail() {
   cg_error "FAIL: $1"
+  dump_cur_log
   exit 1
 }
 
@@ -162,7 +197,7 @@ run_positive() {
   local ws trace pid cid
   ws="$(make_workspace)"
   trace="$ws/.trace.jsonl"
-  launch_session "$ws" "$trace"
+  launch_session "$ws" "$trace" positive
   pid="$LAUNCH_PID"
   CLEAN_WS+=("$ws")
   CLEAN_PID+=("$pid")
@@ -228,7 +263,7 @@ run_negative() {
   local ws trace pid cid
   ws="$(make_workspace)"
   trace="$ws/.trace.jsonl"
-  launch_session "$ws" "$trace"
+  launch_session "$ws" "$trace" negative
   pid="$LAUNCH_PID"
   CLEAN_WS+=("$ws")
   CLEAN_PID+=("$pid")
@@ -247,7 +282,7 @@ run_negative() {
   # Fail-loud: the launcher must exit non-zero AND keep the session's volume so the
   # agent's work isn't destroyed with it. A removed volume here is silent data loss.
   ((rc != 0)) || fail "a broken extract exited 0 — the fail-loud teardown did not engage."
-  grep -q "could not extract the agent's work" "$ws/.launch.log" ||
+  grep -q "could not extract the agent's work" "$CUR_LOG" ||
     fail "the fail-loud teardown did not print its keep-the-volume warning."
   [[ -n "$(docker ps -aq --filter "label=devcontainer.local_folder=$ws")" ]] ||
     fail "the session's container was removed despite a failed extract (data-loss)."
