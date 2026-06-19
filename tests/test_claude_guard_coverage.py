@@ -1174,8 +1174,13 @@ def test_container_worktree_seed_mode_remaps_workspace(tmp_path: Path) -> None:
     _seed_repo(tmp_path)
     _write_settings(tmp_path, {})
     cache = tmp_path / "xdgcache"
+    trace = tmp_path / "trace.jsonl"
     _, _, env = _container_env(
-        tmp_path, CLAUDE_GUARD_WORKTREE_SEED="1", XDG_CACHE_HOME=str(cache)
+        tmp_path,
+        CLAUDE_GUARD_WORKTREE_SEED="1",
+        XDG_CACHE_HOME=str(cache),
+        CLAUDE_GUARD_TRACE="info",
+        CLAUDE_GUARD_TRACE_FILE=str(trace),
     )
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
@@ -1194,6 +1199,10 @@ def test_container_worktree_seed_mode_remaps_workspace(tmp_path: Path) -> None:
         check=True,
     ).stdout
     assert "claude/seed-" in branches, branches
+    # Both seed-mode engagement events announced on the trace channel.
+    trace_text = trace.read_text()
+    assert "worktree_seed_locked" in trace_text, trace_text
+    assert "worktree_extracted" in trace_text, trace_text
 
 
 def test_container_worktree_seed_mode_keeps_volume_when_extract_fails(

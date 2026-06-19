@@ -1283,6 +1283,11 @@ fi
 source "$(dirname "$SELF_CANONICAL")/lib/overmounts.bash"
 # shellcheck source=lib/worktree-seed.bash disable=SC1091
 source "$(dirname "$SELF_CANONICAL")/lib/worktree-seed.bash"
+# cg_trace: the opt-in engagement channel (no-op unless CLAUDE_GUARD_TRACE is set). The
+# seed-mode launch announces its two defense engagements (sub-volume lock proven, agent
+# work extracted) through it, asserted by the worktree-seed e2e.
+# shellcheck source=lib/trace.bash disable=SC1091
+source "$(dirname "$SELF_CANONICAL")/lib/trace.bash"
 # shellcheck source=lib/volume-id.bash disable=SC1091
 source "$(dirname "$SELF_CANONICAL")/lib/volume-id.bash"
 # The install root holds the .devcontainer stack (derived from $_self_dir, since
@@ -1759,6 +1764,7 @@ _ephemeral_cleanup() {
     if worktree_extract_to_host "$container_id" "$_seed_base_ref" "$repo_root" \
       "$_seed_base_commit" "$_seed_branch" "$_seed_out/$_seed_slug" "$_seed_wip_patch" \
       "$_seed_out/$_seed_slug.mbox"; then
+      cg_trace "$TRACE_WORKTREE_EXTRACTED" branch="$_seed_branch"
       cg_ok "seed mode: the agent's work is on branch $_seed_branch (worktree at $_seed_out/$_seed_slug)."
     else
       cg_error "seed mode: could not extract the agent's work — KEEPING this session's volume so nothing is lost. Recover from container $container_id, then remove volume set $CLAUDE_VOLUME_ID by hand."
@@ -2631,6 +2637,7 @@ warn_if_workspace_unwritable
 # failure to create it must abort the launch — without it the agent's work can't be
 # extracted. Only when this launch seeded (a non-git/empty workspace leaves _seed_branch "").
 if [[ -n "$_seed_branch" ]]; then
+  cg_trace "$TRACE_WORKTREE_SEED_LOCKED" branch="$_seed_branch"
   _seed_base_ref="$(worktree_container_init_repo "$container_id" "$_seed_branch")" || exit 1
 fi
 build_ccr_flags

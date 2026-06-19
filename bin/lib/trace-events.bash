@@ -17,6 +17,8 @@ TRACE_FIREWALL_RULES_APPLIED="firewall_rules_applied"
 TRACE_HARDENER_LOCKDOWN_APPLIED="hardener_lockdown_applied"
 TRACE_HOOK_RAN="hook_ran"
 TRACE_MONITOR_DECIDED="monitor_decided"
+TRACE_WORKTREE_SEED_LOCKED="worktree_seed_locked"
+TRACE_WORKTREE_EXTRACTED="worktree_extracted"
 
 declare -A TRACE_EVENT_LAYER=(
   ["managed_settings_installed"]="hardener"
@@ -24,6 +26,8 @@ declare -A TRACE_EVENT_LAYER=(
   ["hardener_lockdown_applied"]="hardener"
   ["hook_ran"]="hooks"
   ["monitor_decided"]="monitor"
+  ["worktree_seed_locked"]="seed"
+  ["worktree_extracted"]="seed"
 )
 declare -A TRACE_EVENT_LEVEL=(
   ["managed_settings_installed"]="info"
@@ -31,4 +35,6 @@ declare -A TRACE_EVENT_LEVEL=(
   ["hardener_lockdown_applied"]="info"
   ["hook_ran"]="info"
   ["monitor_decided"]="debug"
+  ["worktree_seed_locked"]="info"
+  ["worktree_extracted"]="info"
 )
