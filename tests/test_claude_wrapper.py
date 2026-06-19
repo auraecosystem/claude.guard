@@ -506,6 +506,9 @@ def test_wrapper_firewall_tip_absent_when_firewall_skipped_via_env(
     assert _FW_TIP_MARKER not in r.stderr
 
 
+@pytest.mark.drift_guard(
+    "the wrapper and claude-audit must compute the same volume id; the test pins reuse of the shared claude_volume_id helper instead of an inlined copy"
+)
 def test_wrapper_volume_id_branches_by_persistence_mode() -> None:
     """The volume-id assignment branches ephemeral → shared-auth → per-workspace.
     Ephemeral (the default) uses a unique throwaway id; CLAUDE_SHARED_AUTH pins

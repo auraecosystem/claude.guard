@@ -443,6 +443,9 @@ def test_sandbox_subnet_and_ip_are_per_session(compose: dict) -> None:
     assert fw_ip.startswith("${SANDBOX_IP:-") and _default(fw_ip) == "172.30.0.2"
 
 
+@pytest.mark.drift_guard(
+    "two compose services must reference the single x-sandbox-proxy-env anchor; YAML cannot enforce that a service uses an anchor, so both references are asserted"
+)
 def test_proxy_env_anchor_is_single_source(compose: dict) -> None:
     """The squid endpoint is defined once (the x-sandbox-proxy-env anchor) and
     shared by the app and the dependency-fetch hardener, so the two cannot drift."""
@@ -504,6 +507,9 @@ def test_hardener_memory_fits_install_and_has_no_swap(compose: dict) -> None:
     assert default >= 1024
 
 
+@pytest.mark.drift_guard(
+    "--ignore-scripts is hand-written on each pnpm install in the hardener; the source is asserted so the flag cannot fall out of step with the egress grant it offsets"
+)
 def test_hardener_install_ignores_lifecycle_scripts() -> None:
     """Granting the hardener egress means a malicious package postinstall could
     exfiltrate; install_deps must pass --ignore-scripts to EVERY pnpm install to close
@@ -1608,6 +1614,9 @@ class TestDangerouslySkipContainer:
     def _load(self) -> None:
         self.wrapper = CLAUDE_WRAPPER.read_text()
 
+    @pytest.mark.drift_guard(
+        "host-mode and the container firewall are separate code paths that must read the same allowlist file; the shared source is pinned since neither can import the other"
+    )
     def test_host_firewall_sources_shared_allowlist(self) -> None:
         """The host-mode allowlist must come from the same file the container
         firewall uses, so the two never drift."""
@@ -2313,6 +2322,9 @@ class TestMonitorAskOnly:
         env = compose["services"]["monitor"]["environment"]
         assert env["MONITOR_ASK_ONLY"] == "${MONITOR_ASK_ONLY:-1}"
 
+    @pytest.mark.drift_guard(
+        "the fail-closed default is forwarded from the monitor container to the app at runtime; the test pins forwarding so the two containers cannot diverge"
+    )
     def test_compose_sidecar_fails_closed(self, compose: dict) -> None:
         """The sidecar's own API outages fall back to "ask" (fail closed) and
         the value is forwardable so it can't diverge from the app container."""
