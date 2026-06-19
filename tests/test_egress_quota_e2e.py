@@ -117,11 +117,17 @@ def test_probe_uses_a_public_dummy_ip_not_loopback() -> None:
     assert not m.group("ip").startswith(bogons), "probe origin ip is in a bogon range"
 
 
-def test_wrapper_runs_probe_privileged_with_only_net_admin() -> None:
-    # The wrapper must grant NET_ADMIN (needed for the dummy iface + iptables) and
-    # nothing broader — cap_drop ALL + no-new-privileges mirrors the firewall's
-    # least-privilege posture, so the e2e proves the cap is sufficient AND minimal.
+def test_wrapper_runs_probe_under_the_firewall_service_cap_posture() -> None:
+    # The wrapper must mirror the real firewall service's least-privilege posture
+    # (cap_drop ALL + no-new-privileges) and grant exactly the three caps that
+    # service grants, each load-bearing here: NET_ADMIN (dummy iface + iptables/
+    # ipset install), NET_RAW (the `-m set` match's netlink socket — without it,
+    # cap_drop ALL fails install with "Can't open socket to ipset"), and
+    # NET_BIND_SERVICE (the :80 origin can't bind under cap_drop ALL without it).
     wrapper = WRAPPER.read_text()
-    assert "--cap-drop ALL --cap-add NET_ADMIN" in wrapper
+    assert (
+        "--cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW --cap-add NET_BIND_SERVICE"
+        in wrapper
+    )
     assert "--security-opt no-new-privileges" in wrapper
     assert "egress-quota-probe.sh" in wrapper

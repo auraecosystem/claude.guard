@@ -112,6 +112,15 @@ iptables -A OUTPUT -m set --match-set allowed-domains dst \
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # <<< END REPLAY (init-firewall.bash) <<<
 
+# Fail loudly at the real cause if the two ipset-matched rules did not install.
+# The `-m set` match opens a netlink socket that needs CAP_NET_RAW; under the
+# wrapper's cap_drop ALL its absence makes the install print "Can't open socket to
+# ipset" and silently drop the rule — without this guard the only symptom is a
+# baffling downstream "origin did not come up" (the budget is never enforced).
+installed=$(iptables -L OUTPUT -n | grep -c 'match-set allowed-domains')
+[[ "$installed" -eq 2 ]] ||
+  die "quota/REJECT ipset rules failed to install (found $installed/2) — check container caps (need NET_ADMIN + NET_RAW)"
+
 # ── Origin bound to the public ip ────────────────────────────────────────────
 # Bound to PUBLIC_IP (not 0.0.0.0/loopback) so the only path to it from this netns
 # is OUTPUT -> dummy0, traversing the quota rule. It serves a tiny GET response and

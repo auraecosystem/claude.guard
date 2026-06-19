@@ -7,11 +7,12 @@
 # is spent.
 #
 # It runs the in-container probe (tests/smoke/egress-quota-probe.sh) inside the
-# real sandbox image, in a PRIVILEGED netns (--cap-add NET_ADMIN) so the probe can
-# create a dummy interface with a public ip and install the replayed quota rules.
-# No external network: the probe serves its own large body from an origin bound to
-# that public ip and drives traffic at it locally, still traversing the OUTPUT
-# chain and the quota rule. See the probe header for the determinism argument.
+# real sandbox image, under the firewall service's exact cap posture (see the
+# docker run below), so the probe can create a dummy interface with a public ip and
+# install the replayed quota rules. No external network: the probe serves its own
+# large body from an origin bound to that public ip and drives traffic at it
+# locally, still traversing the OUTPUT chain and the quota rule. See the probe
+# header for the determinism argument.
 #
 # Usage:
 #   bash bin/check-egress-quota.bash            # image must already exist
@@ -46,14 +47,20 @@ if "$BUILD" || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     -t "$IMAGE" "$REPO_ROOT/.devcontainer" || die "image build failed"
 fi
 
-# Run as root with ONLY NET_ADMIN added (cap_drop ALL + no-new-privileges mirrors
-# the firewall service's least-privilege posture): NET_ADMIN is what gates the
-# dummy-interface creation and iptables rule install the probe needs, and nothing
-# else is granted. The probe owns its own assertions and exits non-zero on any
-# failure, which propagates out of docker run as this script's status.
+# Run as root under the firewall service's exact least-privilege posture (cap_drop
+# ALL + no-new-privileges, see docker-compose.yml): the three caps it grants are
+# all load-bearing for this probe, mirroring the real service —
+#   NET_ADMIN          dummy-interface creation + iptables/ipset rule install
+#   NET_RAW            the `iptables -m set` match opens a SOCK_RAW netlink socket;
+#                      under cap_drop ALL its absence fails rule install with
+#                      "Can't open socket to ipset"
+#   NET_BIND_SERVICE   the origin binds :80; under cap_drop ALL even root needs it
+# The probe owns its own assertions and exits non-zero on any failure, which
+# propagates out of docker run as this script's status.
 status "EGRESS_QUOTA_MB hard-cap enforcement (real kernel -m quota counter, dummy public-ip origin)"
 if docker run --rm --user root \
-  --cap-drop ALL --cap-add NET_ADMIN --security-opt no-new-privileges \
+  --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW --cap-add NET_BIND_SERVICE \
+  --security-opt no-new-privileges \
   -v "$PROBE:/probe.sh:ro" \
   --entrypoint bash "$IMAGE" /probe.sh; then
   status "PASS: EGRESS_QUOTA_MB caps allowed-domain egress — pre-quota request passes, the bulk transfer exhausts the budget, the post-quota request is REJECTed"
