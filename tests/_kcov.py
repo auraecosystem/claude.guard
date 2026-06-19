@@ -141,6 +141,7 @@ KCOV_EXCLUDED: list[str] = [
     "bin/lib/forensic-volume.bash",
     "bin/lib/ghcr-metadata.bash",
     "bin/lib/launch.bash",
+    "bin/lib/maintenance-log.bash",
     "bin/lib/launch-marks.bash",
     "bin/lib/launch-trace.bash",
     "bin/lib/monitor-key.bash",
