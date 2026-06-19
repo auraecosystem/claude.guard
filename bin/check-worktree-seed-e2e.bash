@@ -199,6 +199,18 @@ fail() {
   exit 1
 }
 
+# assert_runsc <app_container_id> — prove the session actually ran under the gVisor
+# (runsc) runtime. On a Linux CI runner the runtime resolves to runsc only
+# incidentally (no /dev/kvm); if it ever resolved to runc or kata every other
+# assertion here would still pass while this check's central "under gVisor" claim
+# silently became untrue. Pin it on the container's real HostConfig.Runtime.
+assert_runsc() {
+  local rt
+  rt="$(docker inspect -f '{{.HostConfig.Runtime}}' "$1" 2>/dev/null || true)"
+  [[ "$rt" == runsc ]] ||
+    fail "app container ran under runtime ${rt:-<unknown>}, not runsc — the gVisor lock claim every assertion below rests on is UNVERIFIED."
+}
+
 # trigger_teardown — drive claude to exit so the launcher proceeds to its ephemeral
 # EXIT-trap teardown (the extract under test). Interactive claude treats one Ctrl-D as
 # the first press of its two-step "Press Ctrl-D again to exit" confirm, so send two
@@ -222,6 +234,7 @@ run_positive() {
   CLEAN_WS+=("$ws")
   CLEAN_PID+=("$pid")
   cid="$(wait_for_seed_repo "$ws" "$pid")"
+  assert_runsc "$cid"
   echo "==> [positive] session up (app ${cid}); in-sandbox seed repo present."
 
   # Matrix: the seed compose REPLACED the bind — the app sees the seeded tree,
@@ -288,6 +301,7 @@ run_negative() {
   CLEAN_WS+=("$ws")
   CLEAN_PID+=("$pid")
   cid="$(wait_for_seed_repo "$ws" "$pid")"
+  assert_runsc "$cid"
 
   # Break the in-sandbox repo so the teardown `git format-patch` extract fails.
   docker exec -u root "$cid" rm -rf /workspace/.git ||
