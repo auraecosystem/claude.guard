@@ -135,12 +135,17 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 # ── IPv6 lockdown: replay init-firewall.bash lock_down_ipv6's OUTPUT policy DROP
-# (lines 215-223). lo is accepted; everything else drops by policy. ─────────────
+# (lines 215-223). The real branch ACCEPTs `-o lo` first, but we deliberately omit
+# that here: our v6 destination is a local /32 on dummy0, and the kernel routes any
+# locally-assigned address out the LOOPBACK device (ip route get <local-ip> => dev
+# lo). An `-o lo -j ACCEPT` would therefore short-circuit the very packet under
+# test before the policy DROP could count it — the check would pass vacuously. With
+# the accept omitted, the test packet hits the policy DROP regardless of which
+# device carries it, which is exactly the default-deny we want to prove. ─────────
 IP6_OK=1
 if [[ -e /proc/net/if_inet6 ]]; then
   ip6tables -F
   ip6tables -P OUTPUT DROP
-  ip6tables -A OUTPUT -o lo -j ACCEPT
   ip6tables -S | grep -q '^-P OUTPUT DROP' || die "ip6tables OUTPUT policy is not DROP after setup"
 else
   IP6_OK=0

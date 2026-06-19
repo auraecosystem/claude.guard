@@ -108,6 +108,7 @@ KCOV_EXCLUDED: list[str] = [
     "bin/check-devcontainer.bash",
     "bin/check-firewall-caps.bash",
     "bin/check-firewall-egress.bash",
+    "bin/check-firewall-packet-egress.bash",
     "bin/check-foreign-repo.bash",
     "bin/check-runsc-smoke.bash",
     "bin/check-sandbox-runtime.bash",
