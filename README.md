@@ -100,15 +100,15 @@ When you type `claude-guard`:
 
 Auto mode and the monitor are **best-effort** filters, not hard boundaries — a model can be talked past. The hard boundaries are the VM and the firewall. See [`SECURITY.md`](SECURITY.md).
 
-Sessions are **ephemeral by default**: throwaway volumes are wiped on exit, so nothing an attacker stages in one session survives into the next. Your workspace is a host directory, so every file and commit the agent makes stays on your local disk. What you'd otherwise lose across sessions:
+Sessions are **ephemeral by default**: throwaway volumes are wiped on exit, so nothing an attacker stages in one session survives into the next. Claude's work is backed out fine, but the rest of the session state is lost. That'd normally be annoying (e.g. re-login to every service) but I did some fancy mitigations.
 
 |                                                                                                                       |     |
-| :-------------------------------------------------------------------------------------------------------------------- | --: |
-| **Claude login** — `setup-token` captures your credential on the host; re-injected automatically every session.       |   ✓ |
-| **GitHub access** — `gh-app` mints a short-lived repo-scoped token per session, but requires a one-time App install.  |   ◐ |
-| **Conversation continuity** — `--resume` / `--continue` restores the prior transcript, but requires an explicit flag. |   ✗ |
-| **Monitor audit history** — archived to the host on teardown; restored read-only on resume only.                      |   ✓ |
-| **MCP connector approvals** — approvals persist to the project settings file, keyed per repo.                         |   ✓ |
+| -------------------------------------------------------------------------------------------------------------------: | --: |
+| **Claude login**. Only auth a single time.      |   ✓ |
+| **GitHub access**. Requires a one-time App install.  |   ◐ |
+| **Conversation continuity**. `--resume` / `--continue` magically work! |   ✓ |
+| **Monitor audit history**. Not lost on resume.                |   ✓ |
+| **MCP connector approvals**. Remembers your preferences for each repo.               |   ✓ |
 
 [`docs/configuration.md`](docs/configuration.md) covers persistence options and resume details.
 
