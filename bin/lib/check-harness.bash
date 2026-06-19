@@ -39,6 +39,45 @@
 # shellcheck source=claude-code-version.bash disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/claude-code-version.bash"
 
+# ── Shared devcontainer-lifecycle helpers ────────────────────────────────
+# The lifecycle smoke checks (check-compose-lifecycle / check-foreign-repo /
+# check-dev-lifecycle) bring up the same four-container stack the same way, so
+# their build / shared-cache-create / volume-teardown steps live here once. All
+# three reference the caller's `DC` array (the `docker compose -p … -f …` prefix
+# each defines before invoking these), resolved dynamically at call time.
+
+# Build the stack images; echo + nonzero on failure so the check is recorded.
+ck_build() {
+  "${DC[@]}" build --quiet || {
+    echo "docker compose build failed"
+    return 1
+  }
+}
+
+# Create the two shared caches the compose declares external: true (it errors at
+# `up` if they're absent), mirroring bin/claude-guard. Call from ck_up before
+# `up`. Echoes + returns nonzero on failure so the bring-up check records it.
+ensure_shared_cache_volumes() {
+  docker volume create claude-gh-meta-cache >/dev/null || {
+    echo "could not create shared gh-meta cache volume"
+    return 1
+  }
+  docker volume create "claude-code-update-v${CLAUDE_CODE_VERSION:-$CLAUDE_CODE_VERSION_DEFAULT}" >/dev/null || {
+    echo "could not create shared claude-code update cache volume"
+    return 1
+  }
+}
+
+# Tear down the stack and drop the shared caches. `down -v` removes the stack's
+# own volumes but never an external one, so the two shared caches are dropped
+# explicitly. File-specific teardown (a script's own temp dir/file) stays in the
+# caller's cleanup() around this call.
+lifecycle_cleanup_volumes() {
+  "${DC[@]}" down -v --timeout 10 2>/dev/null || true
+  docker volume rm -f claude-gh-meta-cache 2>/dev/null || true
+  docker volume rm -f "claude-code-update-v${CLAUDE_CODE_VERSION:-$CLAUDE_CODE_VERSION_DEFAULT}" 2>/dev/null || true
+}
+
 # Per-outcome name registries (gating + harness_result) and the description lists
 # the summary prints.
 HARNESS_PASSED=()
