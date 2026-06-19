@@ -25,17 +25,20 @@ import types
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
+import pytest
+
 from tests._helpers import REPO_ROOT
 
 TRACE = REPO_ROOT / "bin" / "claude-guard-trace"
 MANIFEST = REPO_ROOT / "config" / "trace-events.json"
 # The startup producers that emit the required engagement events: the bash hardener +
-# firewall (referencing the TRACE_<const> bash constant) and the Python monitor sidecar
-# (referencing the bare <const> from monitorlib.trace_events).
+# firewall (referencing the TRACE_<const> bash constant), the Python monitor sidecar
+# (referencing the bare <const> from monitorlib.trace_events), and the Python audit sink.
 PRODUCERS = (
     REPO_ROOT / ".devcontainer" / "entrypoint.bash",
     REPO_ROOT / ".devcontainer" / "init-firewall.bash",
     REPO_ROOT / ".devcontainer" / "monitor-server.py",
+    REPO_ROOT / ".claude" / "hooks" / "monitorlib" / "audit_sink.py",
 )
 
 
@@ -69,8 +72,8 @@ def test_required_events_match_manifest() -> None:
 
 
 def test_required_events_includes_the_startup_layers() -> None:
-    """The firewall + hardener + monitor startup events are the required engagement set today;
-    pin them so dropping one from the manifest (un-gating a layer) trips this test."""
+    """The firewall + hardener + monitor + audit startup events are the required engagement set
+    today; pin them so dropping one from the manifest (un-gating a layer) trips this test."""
     trace = load_trace()
     values = {e["value"] for e in trace.required_events()}
     assert values == {
@@ -78,6 +81,7 @@ def test_required_events_includes_the_startup_layers() -> None:
         "managed_settings_installed",
         "hardener_lockdown_applied",
         "monitor_started",
+        "audit_sink_started",
     }
 
 
@@ -248,6 +252,9 @@ def test_every_mode_declares_the_four_required_fields() -> None:
         assert isinstance(mode["boots_container"], bool), name
 
 
+@pytest.mark.drift_guard(
+    "the default mode's expect_on and the `required: true` flag are separate fields of the trace-events SSOT; pinned equal so neither can be edited alone"
+)
 def test_default_mode_expect_on_equals_required_set() -> None:
     """The default mode's expect_on is the same SSOT as the `required: true` flag — pin them
     equal so the two can't drift (a required event dropped from default, or vice versa)."""
@@ -279,6 +286,7 @@ def test_mode_expectations_resolves_skip_firewall() -> None:
         "hardener_lockdown_applied",
         "firewall_allow_all_applied",
         "monitor_started",
+        "audit_sink_started",
     }
     assert [e["value"] for e in expect_off] == ["firewall_rules_applied"]
     # resolution carried the layer through, not just the wire name.
@@ -304,6 +312,7 @@ def test_mode_expectations_host_boots_no_container() -> None:
         "firewall_allow_all_applied",
         "hardener_lockdown_applied",
         "monitor_started",
+        "audit_sink_started",
     }
 
 
@@ -354,6 +363,7 @@ def test_run_self_test_skip_firewall_passes_and_forwards_the_flag(monkeypatch) -
                 "managed_settings_installed",
                 "hardener_lockdown_applied",
                 "monitor_started",  # monitor still engages under skip-firewall
+                "audit_sink_started",
             ),
             0,
         )
@@ -571,6 +581,9 @@ def test_run_self_test_empty_trace_on_timeout_says_timed_out(
 # ── manifest ⇄ producer ⇄ verbosity invariants ───────────────────────────────
 
 
+@pytest.mark.drift_guard(
+    "an event's required flag and its level are separate fields of the trace-events SSOT; the implication is pinned so a required debug-level event cannot slip in"
+)
 def test_every_required_event_is_info_level() -> None:
     """The self-test launches at CLAUDE_GUARD_TRACE=info, so a debug-level required event
     would never be emitted and the test would fail for the wrong reason. Marking an event
@@ -590,7 +603,9 @@ def test_every_required_event_has_a_startup_producer() -> None:
     trace = load_trace()
     for event in trace.required_events():
         const = event["const"]
-        assert f"TRACE_{const}" in producer_text or const in producer_text, (
+        # bash producers reference the generated TRACE_<const>; the Python monitor sidecar
+        # and audit sink reference the bare <const> from monitorlib.trace_events.
+        assert (f"TRACE_{const}" in producer_text) or (const in producer_text), (
             f"{const} has no producer in {[p.name for p in PRODUCERS]}"
         )
 
