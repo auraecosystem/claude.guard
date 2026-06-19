@@ -200,15 +200,14 @@ fail() {
 }
 
 # trigger_teardown — drive claude to exit so the launcher proceeds to its ephemeral
-# EXIT-trap teardown (the extract under test). Interactive claude treats one Ctrl-D as
-# the first press of its two-step "Press Ctrl-D again to exit" confirm, so send two
-# Ctrl-D (0x04) bytes through the pty. Do NOT close fd 9 here: closing the fifo makes
-# `script` hang up the pty, which SIGHUPs the launcher MID-teardown (it exits 129 and
-# its container/volume removal is cut short after the extract, leaving the session
-# behind). Leaving the pty open lets the launcher exit cleanly through extract AND
-# teardown; cleanup() releases fd 9 at process exit once the launcher is gone.
+# teardown (the extract under test). Closing fd 9 hangs up the pty, which exits the
+# interactive claude reliably (two Ctrl-D bytes alone don't dismiss its first-run
+# theme picker). The launcher traps SIGHUP and runs its FULL teardown on a hangup, so
+# the extract AND the container/volume removal both complete — closing here no longer
+# races teardown. Send the Ctrl-D bytes first as a graceful nudge, then hang up.
 trigger_teardown() {
   printf '\004\004' >&9 2>/dev/null || true
+  exec 9>&-
 }
 
 # ── Positive path: seed → locks hold → agent commits → extract to host branch ──
