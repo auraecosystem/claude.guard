@@ -51,21 +51,33 @@ def required_events(manifest_path: Path = MANIFEST) -> list[dict]:
 
 def events_in_trace(trace_text: str) -> set[str]:
     """The set of event names present in a trace dump — one JSON object per non-blank
-    line. A malformed line is a corrupt trace, not something to paper over, so json.loads
-    raises rather than silently skipping (which would let a real miss read as 'emitted')."""
+    line. The firewall and hardener append to this one file concurrently, so a rare
+    torn/interleaved line is a sink artifact, not a corrupt verdict: skip it with a
+    warning rather than crash the whole self-test on one unparsable line. A genuinely
+    missing required event still surfaces below as its absence — the signal that matters
+    — so tolerating a torn line cannot mask a real miss, only a coincidental one whose
+    own line tore (which over-reports a failure, never silently passes one)."""
     seen: set[str] = set()
     for line in trace_text.splitlines():
         if not line.strip():
             continue
-        seen.add(json.loads(line)["event"])
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            sys.stderr.write(
+                f"trace self-test: skipping unparsable trace line: {line!r}\n"
+            )
+            continue
+        event = record.get("event")
+        if event is not None:
+            seen.add(event)
     return seen
 
 
-def evaluate(trace_text: str, required: list[dict]) -> tuple[list[str], list[str]]:
-    """Check the captured trace against the required events. Returns (report_lines,
+def evaluate(seen: set[str], required: list[dict]) -> tuple[list[str], list[str]]:
+    """Check the parsed event-name set against the required events. Returns (report_lines,
     missing): one human line per required event (present or missing) for the operator,
     and the values of the events that were NOT emitted (empty == the self-test passed)."""
-    seen = events_in_trace(trace_text)
     lines: list[str] = []
     missing: list[str] = []
     for event in required:
@@ -78,15 +90,19 @@ def evaluate(trace_text: str, required: list[dict]) -> tuple[list[str], list[str
     return lines, missing
 
 
-def capture_launch_trace(workspace: str) -> str:
+def capture_launch_trace(workspace: str) -> tuple[str, int | None]:
     """Drive one real launch of the wrapper to handover with the trace channel on and a
-    shared host trace file, and return the file's contents. CLAUDE_GUARD_EXIT_AT_HANDOVER
-    stops the launch once the stack is up instead of starting an interactive claude. The
-    host file is pre-created and world-writable so the container-side producers can append
-    regardless of how their UID maps to the host.
+    shared host trace file. CLAUDE_GUARD_EXIT_AT_HANDOVER stops the launch once the stack
+    is up instead of starting an interactive claude. The host file is pre-created and
+    world-writable so the container-side producers can append regardless of how their UID
+    maps to the host.
 
-    The wrapper's exit code is ignored: a launch that exits non-zero at/after handover
-    still produced the trace, and the file — not the exit status — is the source of truth.
+    Returns (trace_text, returncode): the file's contents and the wrapper's exit status
+    (None if the launch timed out and was killed). The file — not the exit status — is the
+    source of truth for the verdict: a launch that exits non-zero at/after handover still
+    produced the trace. The returncode is used ONLY to explain an EMPTY trace (a launch
+    that never reached handover) distinctly from a layer that reached handover but never
+    announced it engaged.
     """
     fd, path = tempfile.mkstemp(prefix="cg-trace-selftest-")
     os.close(fd)
@@ -103,17 +119,19 @@ def capture_launch_trace(workspace: str) -> str:
             "CLAUDE_GUARD_EXIT_AT_HANDOVER": "1",
             "CLAUDE_WORKSPACE": workspace,
         }
+        returncode: int | None = None
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 [str(WRAPPER)], env=env, check=False, timeout=launch_timeout_s()
             )
+            returncode = completed.returncode
         except subprocess.TimeoutExpired:
             sys.stderr.write(
                 f"launch exceeded {launch_timeout_s()}s — killed; evaluating the partial "
                 "trace. Raise CLAUDE_GUARD_LAUNCH_TIMEOUT if a cold build is legitimately "
                 "slower.\n"
             )
-        return Path(path).read_text(encoding="utf-8")
+        return Path(path).read_text(encoding="utf-8"), returncode
     finally:
         os.unlink(path)
 
@@ -126,8 +144,22 @@ def run_self_test() -> int:
         "trace self-test: launching one session to handover with the trace channel on …"
     )
     with tempfile.TemporaryDirectory(prefix="cg-trace-ws-") as workspace:
-        trace_text = capture_launch_trace(workspace)
-    lines, missing = evaluate(trace_text, required)
+        trace_text, returncode = capture_launch_trace(workspace)
+    seen = events_in_trace(trace_text)
+    # An EMPTY trace means no layer announced anything — the launch never reached the
+    # point where producers fire. Report that as a launch/boot failure, not as "a
+    # defense layer declined to engage": blaming a layer for a build error sends the
+    # reader down the wrong path. A partial trace (some events, some required missing)
+    # is genuine non-engagement and falls through to the per-event report below.
+    if not seen:
+        how = "timed out" if returncode is None else f"exited {returncode}"
+        print(
+            f"FAIL: the launch produced no trace events (wrapper {how}) — it never reached "
+            "handover. This is a launch/boot failure, not a defense layer declining to "
+            "engage; check the launch output above."
+        )
+        return 1
+    lines, missing = evaluate(seen, required)
     print("\n".join(lines))
     if not missing:
         print(f"PASS: all {len(required)} required engagement events were emitted.")
