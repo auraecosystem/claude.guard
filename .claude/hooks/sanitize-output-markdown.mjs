@@ -586,22 +586,31 @@ const SCRIPT_URI_RE = /^\s*(?:javascript|vbscript):/i;
 
 const RELATIVE_URL_BASE = "http://relative.invalid";
 
-// Parameter NAMES that legitimately carry a long opaque (base64/hex) value, so
-// a blob in one of them is NOT exfil: CDN request-signing (AWS SigV4 / CloudFront
-// `X-Amz-*`, GCS `X-Goog-*`, Azure SAS `sv/sr/sig/se/sp/st/spr/skoid/sktid`),
-// pagination cursors, and analytics tags. Matched case-insensitively against the
-// exact (lowercased) parameter name. A blob or credential-shaped value in any
-// OTHER parameter still fires — this allowlist trades a narrow rename-dodge
+// Parameter NAMES that legitimately carry a LONG opaque (base64/hex) value, so
+// a blob in one of them is NOT exfil: CDN request-signing (AWS SigV4 /
+// CloudFront `X-Amz-*`/`Signature`/`Policy`/`Key-Pair-Id`, GCS `X-Goog-*`,
+// Azure SAS `sv/sr/sig/se/sp/st/spr/skoid/sktid`), pagination cursors /
+// continuation tokens, and the long analytics click-IDs. Matched
+// case-insensitively against the exact (lowercased) parameter name. Scope is
+// deliberately limited to names whose benign value is genuinely a long token —
+// generic short params (`page`, `limit`, `v`, `t`, `cb`, …) are NOT listed,
+// since their values never reach the blob threshold anyway and listing them
+// would only widen the rename-dodge surface. A blob or credential-shaped value
+// in any OTHER parameter still fires — this allowlist trades a narrow dodge
 // (`?sig=<stolen>`, still caught by Layer 4 redaction + the firewall) for not
 // drowning the model in false positives on ordinary fetched pages.
 const BENIGN_BLOB_PARAM_RE =
-  /^(?:x-(?:amz|goog|ms|oss|obs)-[a-z0-9-]+|amz-[a-z0-9-]+|utm_[a-z]+|sig|signature|hmac|policy|credential|expires|key-pair-id|se|sp|sr|sv|st|spr|si|skoid|sktid|page|pagesize|page_size|per_page|perpage|offset|limit|count|cursor|after|before|since|start|end|continuation|continuationtoken|continuation_token|pagetoken|page_token|nexttoken|next_token|next|prev|gclid|fbclid|dclid|msclkid|gbraid|wbraid|_ga|_gl|mc_eid|mc_cid|cb|cache|cachebuster|v|ver|version|rev|build|etag|t|ts|_)$/i;
+  /^(?:x-(?:amz|goog|ms|oss|obs)-[a-z0-9-]+|amz-[a-z0-9-]+|utm_[a-z]+|sig|signature|hmac|policy|credential|expires|key-pair-id|se|sp|sr|sv|st|spr|si|skoid|sktid|cursor|after|before|continuation|continuationtoken|continuation_token|pagetoken|page_token|nexttoken|next_token|gclid|fbclid|dclid|msclkid|gbraid|wbraid|_ga|_gl|mc_eid|mc_cid)$/i;
 
-// Floor before a parameter/value is tested against the secret-shape gate: a
-// short value can't be a credential, and a bare keyword ("token", "secret") in
-// a value is descriptive text, not a leaked key, so the floor keeps
-// matchesSecretHint off ordinary prose values.
+// Floor before a parameter value is tested against the secret-shape gate: a
+// short value can't be a credential. The gate (matchesSecretHint) is a
+// deliberately broad PRE-gate whose bare-keyword arms (`token`, `secret`, …)
+// also match ordinary prose; with no detect-secrets subprocess to refine the
+// verdict here, the value must ALSO carry a digit (an entropy proxy real opaque
+// tokens satisfy but `session-token-expired` prose does not) before it counts
+// as a leaked credential.
 const MIN_PARAM_SECRET_LEN = 16;
+const VALUE_HAS_DIGIT_RE = /\d/;
 
 // A value that is ENTIRELY a long base64 (40+ chars, optional `=` padding) or
 // hex (32+ chars) run. Anchored to the whole value (operating on the RAW,
@@ -648,7 +657,11 @@ function rawParams(qs) {
  */
 function paramExfilReason(name, value) {
   if (BENIGN_BLOB_PARAM_RE.test(name)) return null;
-  if (value.length >= MIN_PARAM_SECRET_LEN && matchesSecretHint(value))
+  if (
+    value.length >= MIN_PARAM_SECRET_LEN &&
+    VALUE_HAS_DIGIT_RE.test(value) &&
+    matchesSecretHint(value)
+  )
     return "credential-shaped token in URL parameter";
   if (BLOB_VALUE_B64_RE.test(value) || BLOB_VALUE_HEX_RE.test(value))
     return "suspicious query parameter";
