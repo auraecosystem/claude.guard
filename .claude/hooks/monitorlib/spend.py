@@ -67,7 +67,7 @@ def cap_reached(session_id: str | None) -> bool:
     cap boundary so the PreToolUse gate and the PermissionDenied review can't
     drift apart on the comparison."""
     cap = cap_usd()
-    return cap > 0 and read_spend(session_id) >= cap
+    return 0 < cap <= read_spend(session_id)
 
 
 def read_spend(session_id: str | None) -> float:
