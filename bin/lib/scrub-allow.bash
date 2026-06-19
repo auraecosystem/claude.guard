@@ -63,7 +63,7 @@ scrub_predict_stripped() {
     esac
     [[ "$exclude" == *" $name "* ]] && continue
     stripped="$stripped $name"
-  done < <(compgen -v)
+  done < <(compgen -v) # kcov-ignore-line  done < <(...) closing; kcov credits the while loop to its opening line, not done (test_scrub_allow_kcov.py drives the loop body)
   printf '%s' "${stripped# }"
 }
 

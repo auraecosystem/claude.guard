@@ -124,7 +124,6 @@ KCOV_EXCLUDED: list[str] = [
     "bin/lib/auto-mint-gh-token.bash",
     "bin/lib/build-heartbeat.bash",
     "bin/lib/ccr-launch.bash",
-    "bin/lib/ccr-profile.bash",
     "bin/lib/check-harness.bash",
     "bin/lib/claude-auth.bash",
     "bin/lib/claude-code-version.bash",
@@ -133,16 +132,10 @@ KCOV_EXCLUDED: list[str] = [
     "bin/lib/docker-engine.bash",
     "bin/lib/docker-plugins-repair.bash",
     "bin/lib/docker-plugins.bash",
-    "bin/lib/docker-retry.bash",
-    "bin/lib/retry.bash",
     "bin/lib/egress-archive.bash",
-    "bin/lib/envchain.bash",
     "bin/lib/ephemeral.bash",
-    "bin/lib/forensic-registry.bash",
     "bin/lib/forensic-volume.bash",
     "bin/lib/ghcr-metadata.bash",
-    "bin/lib/image-cache.bash",
-    "bin/lib/json.bash",
     "bin/lib/launch.bash",
     "bin/lib/launch-marks.bash",
     "bin/lib/launch-trace.bash",
@@ -159,10 +152,7 @@ KCOV_EXCLUDED: list[str] = [
     "bin/lib/runtime-detect.bash",
     "bin/lib/sandbox-net.bash",
     "bin/lib/sandbox-runtime.bash",
-    "bin/lib/sbom-cache.bash",
-    "bin/lib/scrub-allow.bash",
     "bin/lib/self-update.bash",
-    "bin/lib/session-name.bash",
     "bin/lib/settings-box.bash",
     "bin/lib/sudo-helpers.bash",
     "bin/lib/trace.bash",
@@ -190,6 +180,19 @@ KCOV_GATED_VIA_VEHICLE = {
     # directly, so a small test driver sources it and drives its function under
     # kcov. The driver's own body isn't gated (include-pattern scopes to the lib).
     "tests/drive-bash-completion.bash": "completions/claude-guard.bash",
+    # Sourced-only bin/lib/ helpers gated through a static driver that sources the
+    # lib and drives its functions under kcov (the driver's own body isn't gated —
+    # include-pattern scopes each run to the lib). See the matching tests/test_*_kcov.py.
+    "tests/drive-ccr-profile.bash": "bin/lib/ccr-profile.bash",
+    "tests/drive-docker-retry.bash": "bin/lib/docker-retry.bash",
+    "tests/drive-retry.bash": "bin/lib/retry.bash",
+    "tests/drive-envchain.bash": "bin/lib/envchain.bash",
+    "tests/drive-forensic-registry.bash": "bin/lib/forensic-registry.bash",
+    "tests/drive-image-cache.bash": "bin/lib/image-cache.bash",
+    "tests/drive-json.bash": "bin/lib/json.bash",
+    "tests/drive-sbom-cache.bash": "bin/lib/sbom-cache.bash",
+    "tests/drive-scrub-allow.bash": "bin/lib/scrub-allow.bash",
+    "tests/drive-session-name.bash": "bin/lib/session-name.bash",
 }
 
 # Scripts whose real line coverage is gated at 100% by `kcov_gate.py`.
@@ -237,6 +240,17 @@ KCOV_TEST_FILES = [
     "tests/test_stack_gc.py",
     "tests/test_buildcache_gc.py",
     "tests/test_claude_gc.py",
+    # Vehicle-driven sourced-lib coverage (see KCOV_GATED_VIA_VEHICLE).
+    "tests/test_ccr_profile_kcov.py",
+    "tests/test_docker_retry_kcov.py",
+    "tests/test_retry_kcov.py",
+    "tests/test_envchain_kcov.py",
+    "tests/test_forensic_registry_kcov.py",
+    "tests/test_image_cache_kcov.py",
+    "tests/test_json_kcov.py",
+    "tests/test_sbom_cache_kcov.py",
+    "tests/test_scrub_allow_kcov.py",
+    "tests/test_session_name_kcov.py",
 ]
 
 

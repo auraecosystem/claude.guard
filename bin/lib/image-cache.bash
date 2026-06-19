@@ -11,7 +11,7 @@ _sccd_local_digest() {
       printf '%s' "${line##*@}"
       return 0
     }
-  done < <(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" 2>/dev/null)
+  done < <(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" 2>/dev/null) # kcov-ignore-line  done < <(...) closing; kcov credits the while loop to its opening line, not done, and the docker probe runs in the <(...) subshell (test_image_cache_kcov.py drives both the digest-match and no-match loop paths)
   return 1
 }
 
