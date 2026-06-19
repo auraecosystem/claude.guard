@@ -38,13 +38,12 @@ done
 # to boot (not build); a generous default still covers a cold runner.
 BOOT_TIMEOUT="${SEED_E2E_BOOT_TIMEOUT:-700}"
 
-# Teardown budget in seconds. The exit trigger (a pty EOF) only takes effect once
-# claude has finished its OWN interactive startup inside the sandbox — under gVisor
-# on a cold runner that heavy Node boot can take minutes, and it sits on the critical
-# path BEFORE the launcher can reach the teardown (the extract under test). So this
-# must cover claude's full boot + exit + teardown, not teardown alone; sizing it for
-# teardown only made the wait a coin-flip against claude's boot latency.
-TEARDOWN_TIMEOUT="${SEED_E2E_TEARDOWN_TIMEOUT:-600}"
+# Teardown budget in seconds: how long to wait for the launcher to finish its
+# extract + container/volume removal after it is signalled. trigger_teardown drives
+# this with a direct SIGHUP to the launcher pid, so it no longer waits on claude's
+# variable in-sandbox boot — teardown starts at once and a generous default just
+# covers a slow daemon under gVisor.
+TEARDOWN_TIMEOUT="${SEED_E2E_TEARDOWN_TIMEOUT:-180}"
 
 # Launch logs live OUTSIDE the per-session scratch dir (which the cleanup trap
 # removes) so a "show logs on failure" workflow step — and the inline dump below —
@@ -139,8 +138,9 @@ make_workspace() {
 # instead of getting an EOF and exiting before we inject the agent commit. Sets the
 # global LAUNCH_PID and opens fd 9 in the CALLER's shell (a function shares the
 # caller's fds, whereas a $(...) subshell would close fd 9 on return and drop the
-# pty). The caller calls trigger_teardown to make claude exit; fd 9 stays open until
-# cleanup() so the pty never hangs up the launcher mid-teardown.
+# pty). fd 9 stays open until cleanup(), so claude never gets an EOF and the pty
+# never hangs up the launcher; teardown is driven deterministically by signalling the
+# launcher pid (trigger_teardown), independent of claude's variable in-sandbox boot.
 LAUNCH_PID=""
 launch_session() {
   local ws="$1" trace="$2" tag="$3" log fifo
@@ -242,15 +242,22 @@ assert_runsc() {
     fail "app container ran under runtime ${rt:-<unknown>}, not runsc — the gVisor lock claim every assertion below rests on is UNVERIFIED."
 }
 
-# trigger_teardown — drive claude to exit so the launcher proceeds to its ephemeral
-# teardown (the extract under test). Closing fd 9 hangs up the pty, which exits the
-# interactive claude reliably (two Ctrl-D bytes alone don't dismiss its first-run
-# theme picker). The launcher traps SIGHUP and runs its FULL teardown on a hangup, so
-# the extract AND the container/volume removal both complete — closing here no longer
-# races teardown. Send the Ctrl-D bytes first as a graceful nudge, then hang up.
+# trigger_teardown <app_container_id> — drive the launcher into its ephemeral
+# teardown (the extract under test) by sending it SIGHUP directly, rather than
+# hanging up the pty and waiting for the interactive claude to notice an EOF and
+# exit. claude's in-sandbox startup under gVisor is wildly variable (it can stall
+# for many minutes on firewall-blocked boot probes), and the pty-EOF path can't take
+# effect until claude is interactive — so it raced claude's boot, timing out or
+# firing at an unpredictable moment. The launcher stamps its OWN host pid onto the
+# app container as claude-guard.session.launcher (docker-compose.yml; the orphan
+# reaper reads it too), so read it back and signal it. The launcher traps SIGHUP and
+# runs its FULL orderly teardown (extract THEN container/volume removal), the same
+# path a real terminal hangup takes; claude needn't have finished booting.
 trigger_teardown() {
-  printf '\004\004' >&9 2>/dev/null || true
-  exec 9>&-
+  local launcher
+  launcher="$(docker inspect -f '{{ index .Config.Labels "claude-guard.session.launcher" }}' "$1" 2>/dev/null || true)"
+  [[ "$launcher" =~ ^[0-9]+$ ]] || fail "could not read the launcher pid off container $1 (got: ${launcher@Q})."
+  kill -HUP "$launcher" 2>/dev/null || true
 }
 
 # ── Positive path: seed → locks hold → agent commits → extract to host branch ──
@@ -293,8 +300,8 @@ run_positive() {
     fail "could not inject the agent commit into the in-sandbox repo."
   echo "    OK — agent commit made on the seed branch."
 
-  echo "==> [positive] signalling claude to exit to trigger teardown + extract..."
-  trigger_teardown
+  echo "==> [positive] signalling the launcher (SIGHUP) to trigger teardown + extract..."
+  trigger_teardown "$cid"
   local waited=0
   while ((waited++ < TEARDOWN_TIMEOUT)) && kill -0 "$pid" 2>/dev/null; do sleep 1; done
   kill -0 "$pid" 2>/dev/null && fail "launcher did not finish teardown within ${TEARDOWN_TIMEOUT}s."
@@ -346,8 +353,8 @@ run_negative() {
   # Break the in-sandbox repo so the teardown `git format-patch` extract fails.
   docker exec -u root "$cid" rm -rf /workspace/.git ||
     fail "could not corrupt the in-sandbox repo for the negative case."
-  echo "==> [negative] in-sandbox repo removed; signalling claude to exit to trigger teardown..."
-  trigger_teardown
+  echo "==> [negative] in-sandbox repo removed; signalling the launcher (SIGHUP) to trigger teardown..."
+  trigger_teardown "$cid"
   local rc=0 waited=0
   while ((waited++ < TEARDOWN_TIMEOUT)) && kill -0 "$pid" 2>/dev/null; do sleep 1; done
   kill -0 "$pid" 2>/dev/null && fail "launcher did not finish within ${TEARDOWN_TIMEOUT}s."
