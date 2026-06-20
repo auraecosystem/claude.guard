@@ -122,20 +122,28 @@ seed_pnpm_store() {
   "dependencies": { "$PKG_NAME": "$PKG_VER" }
 }
 EOF
-  docker run --rm -v "$SCRATCH:/scratch" --entrypoint bash "$MAIN_IMAGE" -c \
-    "set -euo pipefail; cd /scratch/workspace && pnpm install --store-dir /scratch/pnpm-store --silent"
-  # Drop node_modules so the in-container install has real work to do (a miss can't be
-  # masked by a tree the seed left behind). Explicit --entrypoint to bypass the base
-  # node image's docker-entrypoint.sh wrapper.
-  docker run --rm -v "$SCRATCH:/scratch" --entrypoint rm "$MAIN_IMAGE" -rf /scratch/workspace/node_modules
-  # Fail at the seed (not the consume) if the store was not actually populated, so a
+  # Seed online, prove the install actually linked the package from the store, THEN drop
+  # node_modules — all in ONE container so the in-container paths resolve. The link check
+  # (node_modules/$PKG_NAME present) is the reliable proof the store holds the package:
+  # pnpm's content-addressable store names files by integrity hash, not package name, so a
+  # name-based store search finds nothing even when the store is correctly populated. The
+  # bare `rm` afterward gives the in-container install real work (a miss can't be masked by
+  # a tree the seed left behind). Explicit --entrypoint bypasses the base node image's wrapper.
+  docker run --rm -v "$SCRATCH:/scratch" -e "PKG_NAME=$PKG_NAME" --entrypoint bash "$MAIN_IMAGE" -c '
+    set -euo pipefail
+    cd /scratch/workspace
+    pnpm install --store-dir /scratch/pnpm-store --silent
+    test -f "node_modules/$PKG_NAME/package.json"
+    rm -rf node_modules
+  '
+  # Fail at the seed (not the consume) if it left no lockfile or an empty host store, so a
   # broken seed can't masquerade as a broken host-store fast path.
   [[ -f "$WORKSPACE/pnpm-lock.yaml" ]] || {
     cg_error "FAIL: seeding did not produce a lockfile in the workspace."
     exit 1
   }
-  find "$PNPM_STORE" -iname "*$PKG_NAME*" -print -quit | grep -q . || {
-    cg_error "FAIL: seeding did not populate the host pnpm store with $PKG_NAME (store: $PNPM_STORE)."
+  find "$PNPM_STORE" -type f -print -quit | grep -q . || {
+    cg_error "FAIL: seeding left the host pnpm store empty (store: $PNPM_STORE)."
     exit 1
   }
 }
