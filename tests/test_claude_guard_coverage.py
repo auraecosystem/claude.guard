@@ -98,6 +98,8 @@ def _seed_orientation_acked(state_root: Path) -> None:
 #                          branch of the shared gh-meta cache creation).
 #   FAKE_PNPM_STORE_CREATE_FAIL=1  only the shared pnpm-store create fails
 #                          (gh-meta + claude-code-update succeed first).
+#   FAKE_NODE_MODULES_CREATE_FAIL=1  only the persistent node_modules create fails
+#                          (the --label create; the other three creates succeed first).
 #   FAKE_NEIGHBOR=<dir>    the concurrent-session query (folder label +
 #                          --format) reports another session mounted at <dir>.
 #   FAKE_WORKSPACE_UNWRITABLE=1  the node workspace-writability probe fails
@@ -211,6 +213,10 @@ volume)
   # FAKE_PNPM_STORE_CREATE_FAIL fails ONLY the shared pnpm-store create (gh-meta and
   # claude-code-update still succeed), reaching that volume's own fail-loud branch.
   { [ -n "${FAKE_PNPM_STORE_CREATE_FAIL:-}" ] && [ "$2" = create ] && [ "$3" = claude-guard-pnpm-store ]; } && exit 1
+  # FAKE_NODE_MODULES_CREATE_FAIL fails ONLY the persistent per-workspace node_modules
+  # create — uniquely identified by its --label flag (the other three creates are bare),
+  # reaching that volume's own fail-loud branch (seed mode only sets the env that triggers it).
+  { [ -n "${FAKE_NODE_MODULES_CREATE_FAIL:-}" ] && [ "$2" = create ] && [ "$3" = --label ]; } && exit 1
   # FAKE_VOLUME_RM_FAIL makes ephemeral teardown fail so the EXIT trap's
   # _rc=1 bump (surfacing a failed teardown even on a clean session exit) is exercised.
   { [ -n "${FAKE_VOLUME_RM_FAIL:-}" ] && [ "$2" = rm ]; } && exit 1
@@ -2328,6 +2334,42 @@ def test_cold_start_pnpm_store_volume_create_failure_aborts(tmp_path: Path) -> N
     r = _run_container(tmp_path, env)
     assert r.returncode == 1
     assert "could not create the shared pnpm store volume" in r.stderr
+
+
+def test_cold_start_seed_mode_creates_persistent_node_modules_volume(
+    tmp_path: Path,
+) -> None:
+    """In SEED mode the launcher creates the persistent per-workspace node_modules volume
+    (labeled for GC) next to the other external caches before `up`. Opting back into the
+    default seed mode sets CLAUDE_GUARD_NODE_MODULES_VOL, so the guarded create actually
+    runs and succeeds (bind mode leaves the env unset and skips it entirely)."""
+    _init_repo(tmp_path)
+    _, _, env = _container_env(
+        tmp_path,
+        FAKE_COLD="1",
+        CLAUDE_GUARD_NO_PREBUILT="1",
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",  # opt back into the default seed mode
+    )
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+
+
+def test_cold_start_node_modules_volume_create_failure_aborts(tmp_path: Path) -> None:
+    """The persistent node_modules cache is `external: true`, created (with its GC label)
+    after the other three external volumes before `up` in seed mode. Its own `docker volume
+    create` failing must fail loud too (the other creates succeed here, so this exercises
+    that volume's distinct branch)."""
+    _init_repo(tmp_path)
+    _, _, env = _container_env(
+        tmp_path,
+        FAKE_COLD="1",
+        CLAUDE_GUARD_NO_PREBUILT="1",
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",  # seed mode sets CLAUDE_GUARD_NODE_MODULES_VOL
+        FAKE_NODE_MODULES_CREATE_FAIL="1",
+    )
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 1
+    assert "could not create the persistent node_modules volume" in r.stderr
 
 
 # ---------------------------------------------------------------------------
