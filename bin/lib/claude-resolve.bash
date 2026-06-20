@@ -157,10 +157,13 @@ gc_pnpm_store() {
   local low_mb=$((cap_mb * 80 / 100))
   local image="${CLAUDE_GUARD_PNPM_STORE_GC_IMAGE:-busybox}"
   local script="${BASH_SOURCE[0]%/*}/pnpm-store-gc.sh"
-  docker run --rm \
-    -v claude-guard-pnpm-store:/s \
-    -v "$script:/pnpm-store-gc.sh:ro" \
-    "$image" sh /pnpm-store-gc.sh /s "$cap_mb" "$low_mb" >/dev/null 2>&1 || true
+  # The sweep is fed on stdin (`sh -s` reads the program from stdin, then takes /s + the
+  # cap/low as positional args), NOT bind-mounted in — so it never depends on the docker
+  # daemon being able to see the launcher's filesystem (the macOS-host-in-a-VM and
+  # rootless/remote-context cases this store targets), matching gc_stale_code_update_volumes'
+  # host-path-free shape.
+  docker run --rm -i -v claude-guard-pnpm-store:/s \
+    "$image" sh -s /s "$cap_mb" "$low_mb" <"$script" >/dev/null 2>&1 || true
 }
 
 # prune_dangling_images — remove dangling (untagged, unreferenced) image layers that

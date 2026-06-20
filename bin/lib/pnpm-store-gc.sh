@@ -10,12 +10,15 @@
 #   LOW_MB  low-water mark — when over CAP, evict until total size is at/below this
 #
 # Eviction is LRU by access time: files are sorted ascending by atime (least-recently-used
-# first) and removed from the top until the store is back under LOW_MB. atime is a TRUE
-# last-use signal here because the store and node_modules live on separate volume mounts, so
-# pnpm cannot hardlink and COPIES each needed blob on every install — that read updates atime.
-# Removing a content-addressed blob is safe: pnpm refetches it on the next integrity miss.
-# Best-effort throughout (the caller discards failures); store paths are hex hashes with no
-# spaces, so awk's whitespace split on `atime size path` is exact.
+# first) and removed from the top until the store is back under LOW_MB. atime approximates
+# last-use here because the store and node_modules live on separate volume mounts, so pnpm
+# cannot hardlink and COPIES each needed blob on every install — that read updates atime — so
+# the CURRENT lockfile's blobs (just read) carry the newest atime and are evicted LAST; only
+# stale, older-lockfile blobs are dropped. Removing a content-addressed blob is recovered by a
+# refetch on the next integrity miss WHEN egress is available; an offline relaunch that needs
+# an evicted blob fails its offline verify, which is why eviction only fires above the cap.
+# Best-effort throughout (the caller discards failures). pnpm's store is content-addressed
+# with hex-hash paths (no whitespace), which this awk split on `atime size path` relies on.
 set -eu
 
 root="$1"

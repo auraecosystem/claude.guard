@@ -69,10 +69,10 @@ def _run_helper(
 
 
 def _expected(cap_mb: int, low_mb: int, image: str = "busybox") -> str:
+    # The sweep is fed on stdin (`sh -s`), so it is not in argv — only the store mount and
+    # the /s + cap/low positionals are. `-i` keeps stdin open for `sh -s` to read.
     return (
-        f"run --rm -v claude-guard-pnpm-store:/s "
-        f"-v {SCRIPT}:/pnpm-store-gc.sh:ro {image} "
-        f"sh /pnpm-store-gc.sh /s {cap_mb} {low_mb}"
+        f"run --rm -i -v claude-guard-pnpm-store:/s {image} sh -s /s {cap_mb} {low_mb}"
     )
 
 
@@ -153,6 +153,32 @@ def test_script_evicts_oldest_atime_down_to_low_water(tmp_path: Path) -> None:
     _run_script(store, cap_mb=3, low_mb=2)
     survivors = {f.name for f in store.iterdir() if f.is_file()}
     assert survivors == {"f3", "f4"}
+
+
+def test_script_evicts_by_byte_size_not_file_count(tmp_path: Path) -> None:
+    """Unequal sizes pin the running-total arithmetic to the per-file BYTE size, not a file
+    count: one 4-MiB oldest file plus three newer 1-MiB files (total 7 MiB) over a 6-MiB cap,
+    3-MiB low-water. Evicting just the single 4-MiB file drops the store to 3 MiB (== the
+    low-water), so exactly that one file goes and all three newer small files survive. A bug
+    that decremented by a constant (file count) instead of `$2` would, after evicting the
+    4-MiB file, see only a 1-MiB drop and keep evicting the small files — so this fails it."""
+    store = tmp_path / "store"
+    store.mkdir()
+    _make_file(store / "big", 4 * MIB, atime=1_000_000)  # oldest, evicted first
+    for i in range(3):
+        _make_file(store / f"s{i}", MIB, atime=2_000_000 + i)  # newer, survive
+    _run_script(store, cap_mb=6, low_mb=3)
+    assert {f.name for f in store.iterdir() if f.is_file()} == {"s0", "s1", "s2"}
+
+
+def test_script_at_exactly_cap_removes_nothing(tmp_path: Path) -> None:
+    """A store sitting EXACTLY at the cap is left untouched (pins the `-le` boundary: a `-lt`
+    would evict here)."""
+    store = tmp_path / "store"
+    store.mkdir()
+    _make_file(store / "f", 2 * MIB, atime=1_000_000)
+    _run_script(store, cap_mb=2, low_mb=1)
+    assert (store / "f").exists()
 
 
 def test_script_under_cap_removes_nothing(tmp_path: Path) -> None:
