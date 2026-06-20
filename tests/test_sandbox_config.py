@@ -2165,9 +2165,6 @@ class TestBakedGuardrails:
         repo-relative layout so $CLAUDE_GUARD_DIR/.claude/hooks/... resolves unchanged."""
         for dest in (
             "/opt/claude-guard/.claude/hooks",
-            # The baked hooks compile their detector denylists from this at import
-            # (secret_plugins.py / redact-secrets.py), so it must ship beside them.
-            "/opt/claude-guard/config/secret-detectors.json",
             "/opt/claude-guard/user-config/settings.json",
             "/opt/claude-guard/bin/merge-user-settings.sh",
             "/opt/claude-guard/.devcontainer/",
@@ -2198,6 +2195,46 @@ class TestBakedGuardrails:
             assert dest in self.dockerfile, (
                 f"merge-user-settings.sh sources {path}, but the Dockerfile has no "
                 f"COPY of it to {dest} — the baked hardener will abort sourcing it"
+            )
+
+    def test_dockerfile_bakes_files_baked_hooks_read_at_import(self) -> None:
+        """The Python analog of the bash-``source`` guard above: a baked hook that
+        reads a repo file at import via a ``__file__``-relative path needs that file
+        baked too, or the in-container redactor/credscan dies with FileNotFoundError
+        on its first import (the gap that shipped redact-secrets.py reading an unbaked
+        config/secret-detectors.json). Reads that stay inside an already-wholesale-baked
+        dir (``.claude/hooks``) ride its COPY for free; this derives the set that climbs
+        ABOVE those dirs and asserts each has its own COPY — no hand-kept file list."""
+        # ``.claude/hooks`` is COPYd in full, so a sibling/descendant read needs no
+        # separate COPY; only a path that escapes the wholesale-baked dirs does.
+        wholesale_baked = (".claude/hooks",)
+        hook_dir = REPO_ROOT / ".claude" / "hooks"
+        # Path(__file__).resolve()(.parent)+ ( / "seg")+ — the load-time read idiom.
+        read_path = re.compile(
+            r"Path\(__file__\)\.resolve\(\)(?P<parents>(?:\.parent)+)"
+            r'(?P<segs>(?:\s*/\s*"[^"]+")+)'
+        )
+        segment = re.compile(r'"(?P<name>[^"]+)"')
+        external: set[str] = set()
+        for hook in hook_dir.glob("*.py"):
+            for m in read_path.finditer(hook.read_text()):
+                # N ``.parent`` climbs (N-1) levels up from the hooks dir.
+                base = hook_dir
+                for _ in range(m.group("parents").count(".parent") - 1):
+                    base = base.parent
+                segs = segment.findall(m.group("segs"))
+                rel = base.joinpath(*segs).relative_to(REPO_ROOT)
+                if not any(
+                    rel == Path(w) or str(rel).startswith(w + "/")
+                    for w in wholesale_baked
+                ):
+                    external.add(rel.as_posix())
+        assert external, "extraction found no external import-time reads — regex broke"
+        for rel in sorted(external):
+            dest = f"/opt/claude-guard/{rel}"
+            assert dest in self.dockerfile, (
+                f"a baked hook reads {rel} at import, but the Dockerfile has no COPY "
+                f"of it to {dest} — the baked redactor will die with FileNotFoundError"
             )
 
     def test_dockerfile_bakes_hook_production_deps(self) -> None:
