@@ -32,12 +32,14 @@ from tests._helpers import REPO_ROOT
 TRACE = REPO_ROOT / "bin" / "claude-guard-trace"
 MANIFEST = REPO_ROOT / "config" / "trace-events.json"
 # The startup producers that emit the required engagement events: the bash producers
-# (entrypoint + init-firewall) and the Python audit sink, which announces
-# audit_sink_started when its always-on listener binds.
+# (entrypoint + init-firewall), the Python audit sink (announces audit_sink_started
+# when its always-on listener binds), and the monitor sidecar (announces
+# monitor_engaged when its listening socket binds).
 PRODUCERS = (
     REPO_ROOT / ".devcontainer" / "entrypoint.bash",
     REPO_ROOT / ".devcontainer" / "init-firewall.bash",
     REPO_ROOT / ".claude" / "hooks" / "monitorlib" / "audit_sink.py",
+    REPO_ROOT / ".devcontainer" / "monitor-server.py",
 )
 
 
@@ -71,8 +73,8 @@ def test_required_events_match_manifest() -> None:
 
 
 def test_required_events_includes_the_startup_layers() -> None:
-    """The firewall + hardener + audit startup events are the required engagement set
-    today; pin them so dropping one from the manifest (un-gating a layer) trips this test."""
+    """The firewall + hardener + audit + monitor startup events are the required engagement
+    set today; pin them so dropping one from the manifest (un-gating a layer) trips this test."""
     trace = load_trace()
     values = {e["value"] for e in trace.required_events()}
     assert values == {
@@ -80,6 +82,7 @@ def test_required_events_includes_the_startup_layers() -> None:
         "managed_settings_installed",
         "hardener_lockdown_applied",
         "audit_sink_started",
+        "monitor_engaged",
     }
 
 
@@ -284,6 +287,7 @@ def test_mode_expectations_resolves_skip_firewall() -> None:
         "hardener_lockdown_applied",
         "firewall_allow_all_applied",
         "audit_sink_started",
+        "monitor_engaged",
     }
     assert [e["value"] for e in expect_off] == ["firewall_rules_applied"]
     # resolution carried the layer through, not just the wire name.
@@ -309,6 +313,7 @@ def test_mode_expectations_host_boots_no_container() -> None:
         "firewall_allow_all_applied",
         "hardener_lockdown_applied",
         "audit_sink_started",
+        "monitor_engaged",
     }
 
 
@@ -359,6 +364,7 @@ def test_run_self_test_skip_firewall_passes_and_forwards_the_flag(monkeypatch) -
                 "managed_settings_installed",
                 "hardener_lockdown_applied",
                 "audit_sink_started",
+                "monitor_engaged",
             ),
             0,
         )
@@ -366,6 +372,56 @@ def test_run_self_test_skip_firewall_passes_and_forwards_the_flag(monkeypatch) -
     monkeypatch.setattr(trace, "capture_launch_trace", fake_capture)
     assert trace.run_self_test("skip-firewall") == 0
     assert captured["flags"] == ["--dangerously-skip-firewall"]
+
+
+def test_run_self_test_skip_monitor_passes_when_monitor_engaged_absent(
+    monkeypatch,
+) -> None:
+    """skip-monitor PASSES when the firewall + hardener + audit events fired and
+    monitor_engaged stayed absent — positive disengagement proof that
+    --dangerously-skip-monitor stripped the sidecar (it never bound its socket)."""
+    trace = load_trace()
+    captured: dict[str, list[str]] = {}
+
+    def fake_capture(_ws, flags):
+        captured["flags"] = flags
+        return (
+            _trace_with(
+                "firewall_rules_applied",
+                "managed_settings_installed",
+                "hardener_lockdown_applied",
+                "audit_sink_started",
+            ),
+            0,
+        )
+
+    monkeypatch.setattr(trace, "capture_launch_trace", fake_capture)
+    assert trace.run_self_test("skip-monitor") == 0
+    assert captured["flags"] == ["--dangerously-skip-monitor"]
+
+
+def test_run_self_test_skip_monitor_fails_when_monitor_engaged_present(
+    monkeypatch,
+) -> None:
+    """If --dangerously-skip-monitor is set yet monitor_engaged fires, the sidecar was
+    NOT actually stripped — an expect_off violation that must FAIL the self-test. This is
+    the regression the new monitor engagement event was added to catch."""
+    trace = load_trace()
+    monkeypatch.setattr(
+        trace,
+        "capture_launch_trace",
+        lambda _ws, _flags: (
+            _trace_with(
+                "firewall_rules_applied",
+                "managed_settings_installed",
+                "hardener_lockdown_applied",
+                "audit_sink_started",
+                "monitor_engaged",  # forbidden under skip-monitor
+            ),
+            0,
+        ),
+    )
+    assert trace.run_self_test("skip-monitor") == 1
 
 
 def test_run_self_test_skip_firewall_fails_when_rules_event_present(
