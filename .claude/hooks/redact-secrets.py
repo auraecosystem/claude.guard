@@ -319,10 +319,10 @@ def _is_benign_cursor(m: re.Match[str]) -> bool:
     keyword = _normalize_ident(
         re.split(r"[:=]", m.group("field_prefix"), maxsplit=1)[0].strip(" \t\"'")
     )
-    # "token" is the only keyword that reaches this guard, so its order
-    # comparisons coincide with != (equivalent mutants; the != flip itself is
-    # covered by the benign-cursor cases asserting True).
-    if keyword != "token":  # pragma: no mutate
+    # Only "token" reaches this guard, so the order/identity/`not in` flips are
+    # behaviour-equivalent (floor-absorbed); the != flip is killed by
+    # test_is_benign_cursor. Not pragma'd — it shares the line with that killable flip.
+    if keyword != "token":
         return False
     # Walk back over the identifier characters glued before the bare keyword to
     # recover the full field name (e.g. "next" in "nextToken", "page_" in
@@ -393,18 +393,21 @@ def _is_metadata_field(line: str, value: str) -> bool:
     ``=>`` ``:=`` ``==``), then read back the identifier and test its suffix.
     """
     idx = line.find(value)
-    # idx == 0 (value starts the line) has no prefix to be a metadata field and
-    # returns False on the empty-prefix path below too, so <= and < coincide here.
-    if idx <= 0:  # pragma: no mutate
+    # idx == 0 (value starts the line) returns False on the empty-prefix path below
+    # too, so only the < flip is behaviour-equivalent (floor-absorbed); the ==/!=/>
+    # and number flips are killed by test_is_metadata_field. Not pragma'd — it shares
+    # the line with killable flips.
+    if idx <= 0:
         return False
     prefix = line[:idx].rstrip()
     if prefix[-1:] in "\"'@":
         prefix = prefix[:-1].rstrip()
     after_op = prefix.rstrip(_ASSIGN_OP_CHARS)
     # No assignment operator before the value. after_op is always a prefix of
-    # `prefix`, so the order comparisons (<= >=) coincide with ==; only the !=
-    # flip changes behaviour and it is covered by the metadata tests.
-    if after_op == prefix:  # pragma: no mutate
+    # `prefix`, so the >/>=/is/`not in` flips are behaviour-equivalent (floor-absorbed);
+    # the !=/</<= flips are killed by test_is_metadata_field. Not pragma'd — it shares
+    # the line with killable flips.
+    if after_op == prefix:
         return False
     name = after_op.rstrip().rstrip("\"'")
     field = name[_ident_run_start(name, len(name), "_") :]
