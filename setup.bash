@@ -402,9 +402,27 @@ detect_and_report_wsl2() {
 }
 detect_and_report_wsl2
 
+# ensure_dir — guarantee $1 is a usable directory, or fail loud. `mkdir -p` returns
+# success on macOS/BSD even when the path is an existing (possibly dangling) symlink,
+# so it can report OK while leaving nothing writable behind — the next write then
+# dies with a baffling "No such file or directory" on its destination. Trust the
+# resulting state, not mkdir's exit status, and name the one fix when it's a broken
+# link (we can't guess where the user meant a symlinked path to live).
+ensure_dir() {
+  local dir="$1"
+  mkdir -p "$dir" 2>/dev/null || true
+  [[ -d "$dir" ]] && return 0
+  if [[ -L "$dir" ]]; then
+    warn "$dir is a broken symbolic link (its target $(readlink "$dir") is missing). Remove or repoint it, then re-run setup."
+  else
+    warn "Could not create $dir as a directory. Check its permissions, then re-run setup."
+  fi
+  exit 1
+}
+
 safe_symlink() {
   local src="$1" dst="$2" label="$3"
-  mkdir -p "$(dirname "$dst")"
+  ensure_dir "$(dirname "$dst")"
   if [[ -L "$dst" && "$(readlink "$dst")" == "$src" ]]; then
     return
   fi
@@ -419,25 +437,13 @@ safe_symlink() {
 }
 
 # install_security_claude_md — ensure $HOME/.claude/CLAUDE.md is a regular file
-# carrying the security instructions. Repairs the failure modes a dotfiles user
-# hits: `mkdir -p` silently succeeds on macOS/BSD when the path is an existing
-# symlink (even a dangling one), so a broken ~/.claude or a broken CLAUDE.md link
-# would otherwise make the later copy die with a baffling "No such file or
-# directory" on its destination. Fail loud for a broken ~/.claude (we can't guess
-# where the user meant it to live); clear a broken CLAUDE.md link and recreate it.
+# carrying the security instructions. ensure_dir handles a broken ~/.claude; here we
+# additionally clear a broken CLAUDE.md symlink (a dotfiles link whose target was
+# removed) that would otherwise make the copy die on its dead destination.
 install_security_claude_md() {
   local dir="$HOME/.claude" md
   md="$dir/CLAUDE.md"
-
-  mkdir -p "$dir" 2>/dev/null || true
-  if [[ ! -d "$dir" ]]; then
-    if [[ -L "$dir" ]]; then
-      warn "$dir is a broken symbolic link (its target $(readlink "$dir") is missing). Remove or repoint it, then re-run setup."
-    else
-      warn "Could not create $dir as a directory. Check its permissions, then re-run setup."
-    fi
-    exit 1
-  fi
+  ensure_dir "$dir"
 
   if [[ -L "$md" && ! -e "$md" ]]; then
     warn "Replacing broken symbolic link $md (its target $(readlink "$md") is missing)."
@@ -742,7 +748,7 @@ if running_from_homebrew; then
 else
   status "Linking wrapper scripts into ~/.local/bin/..."
 
-  mkdir -p "$HOME/.local/bin"
+  ensure_dir "$HOME/.local/bin"
   for script in "${WRAPPER_SCRIPTS[@]}"; do
     safe_symlink "$SCRIPT_DIR/bin/$script" \
       "$HOME/.local/bin/$script" "$script"
@@ -787,7 +793,7 @@ if command_exists pnpm; then
   else
     export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
   fi
-  mkdir -p "$PNPM_HOME/bin"
+  ensure_dir "$PNPM_HOME/bin"
   case ":$PATH:" in
   *":$PNPM_HOME/bin:"*) ;;
   *) export PATH="$PNPM_HOME/bin:$PATH" ;;
@@ -1343,7 +1349,7 @@ ensure_man_page() {
     return 0
   fi
   man_dir="${XDG_DATA_HOME:-$HOME/.local/share}/man/man1"
-  mkdir -p "$man_dir"
+  ensure_dir "$man_dir"
   cp "$src" "$man_dir/claude-guard.1"
   ln -sf claude-guard.1 "$man_dir/claude.1"
   status "Installed man page (man claude-guard / man claude) in $man_dir"

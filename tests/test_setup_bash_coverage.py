@@ -264,6 +264,8 @@ def test_prewarm_interactive_build_uses_grid_signal(tmp_path: Path) -> None:
 
 _MAYBE_LINK_HARNESS = (
     _STUBS
+    + slice_bash_function(SETUP, "ensure_dir")
+    + "\n"
     + slice_bash_function(SETUP, "safe_symlink")
     + "\n"
     + slice_bash_function(SETUP, "_confirm_override_claude")
@@ -320,6 +322,8 @@ def test_maybe_link_claude_alias_idempotent(tmp_path: Path) -> None:
 
     harness = (
         _STUBS
+        + slice_bash_function(SETUP, "ensure_dir")
+        + "\n"
         + slice_bash_function(SETUP, "safe_symlink")
         + "\n"
         + slice_bash_function(SETUP, "maybe_link_claude_alias")
@@ -563,6 +567,8 @@ _CLAUDE_MARKER = "Never bypass, disable, or work around security hooks"
 
 _CLAUDE_MD_HARNESS = (
     _STUBS
+    + slice_bash_function(SETUP, "ensure_dir")
+    + "\n"
     + slice_bash_function(SETUP, "install_security_claude_md")
     + "\ninstall_security_claude_md\n"
 )
@@ -1013,6 +1019,36 @@ def test_hooks_only_does_not_install_pnpm_packages(tmp_path: Path) -> None:
     )
     assert r.returncode == 0, r.stderr
     assert "Installing claude-code" not in (r.stdout + r.stderr)
+
+
+def test_reinstall_heals_broken_claude_md_symlink(tmp_path: Path) -> None:
+    """Full-script reinstall over stale state: a prior install left
+    ~/.claude/CLAUDE.md as a (now dangling) symlink — a dotfiles link whose target
+    was removed. Re-running setup must self-heal it instead of dying on the cryptic
+    `cp: ... No such file or directory`. This is the end-to-end counterpart to the
+    install_security_claude_md unit matrix: the reinstall path over leftover state is
+    exactly where the original bug lived, and a fresh-install-only test never sees it."""
+    repo = _make_minimal_repo(tmp_path)
+    env = _make_env(tmp_path, repo)
+    home = Path(env["HOME"])
+    md = home / ".claude" / "CLAUDE.md"
+
+    # First install reaches the CLAUDE.md step (it runs before the --hooks-only exit).
+    r1 = run_capture(
+        ["bash", str(repo / "setup.bash"), "--hooks-only"], env=env, cwd=str(repo)
+    )
+    assert r1.returncode == 0, r1.stderr
+    assert md.is_file()
+
+    # Corrupt it into a dangling symlink, then reinstall.
+    md.unlink()
+    md.symlink_to(tmp_path / "removed-dotfiles" / "CLAUDE.md")
+    r2 = run_capture(
+        ["bash", str(repo / "setup.bash"), "--hooks-only"], env=env, cwd=str(repo)
+    )
+    assert r2.returncode == 0, r2.stderr
+    assert md.is_file() and not md.is_symlink()
+    assert _CLAUDE_MARKER in md.read_text()
 
 
 # ---------------------------------------------------------------------------

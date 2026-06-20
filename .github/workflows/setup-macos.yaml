@@ -1,0 +1,69 @@
+name: macOS setup filesystem states
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "setup.bash"
+      - "tests/test_setup_filesystem_states.py"
+      - "tests/test_setup_symlinks.py"
+      - "tests/_helpers.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+      - ".github/workflows/setup-macos.yaml"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One in-flight run per workflow per branch; a new commit (or merge that deletes
+  # the branch) cancels the superseded run so it stops holding runners. Gated to
+  # pull_request so post-merge/cron/release runs are never cancelled mid-flight.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Gate at the job level, not the pull_request trigger: a workflow-level paths
+  # filter never reports on an unrelated PR and hangs the required check, while a
+  # skipped job reports success. Decide runs on cheap ubuntu so an irrelevant PR
+  # never boots the costly macOS runner. See decide-reusable.yaml.
+  decide:
+    name: Decide (macOS setup)
+    uses: ./.github/workflows/decide-reusable.yaml
+    with:
+      paths-regex: '^(setup\.bash|tests/test_setup_filesystem_states\.py|tests/test_setup_symlinks\.py|tests/_helpers\.py|pyproject\.toml|uv\.lock|\.python-version|\.github/workflows/setup-macos\.yaml)$'
+
+  setup-macos-run:
+    name: Setup filesystem-state tests (macOS, BSD coreutils) — run
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-base-env
+        with:
+          setup-python: "true"
+      # The host installer runs on macOS, where BSD `mkdir -p` silently succeeds on a
+      # dangling symlink (GNU errors). These slice-level tests exercise the real BSD
+      # behavior, proving the path-creating helpers behave identically to Linux.
+      - name: Run setup filesystem-state tests against BSD coreutils
+        run: uv run --extra dev pytest tests/test_setup_filesystem_states.py tests/test_setup_symlinks.py -v --tb=short
+
+  setup-macos:
+    name: Setup filesystem-state tests (macOS)
+    needs: [decide, setup-macos-run]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/report-job-result
+        with:
+          run: ${{ needs.decide.outputs.run }}
+          result: ${{ needs.setup-macos-run.result }}

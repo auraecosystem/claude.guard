@@ -26,7 +26,15 @@ _STUBS = (
 
 
 def _call(func: str, args: str) -> subprocess.CompletedProcess[str]:
-    harness = _STUBS + slice_bash_function(SETUP, func) + f"\n{func} {args}\n"
+    # safe_symlink delegates its parent-dir creation to ensure_dir, so the slice
+    # harness must carry that dependency too.
+    harness = (
+        _STUBS
+        + slice_bash_function(SETUP, "ensure_dir")
+        + "\n"
+        + slice_bash_function(SETUP, func)
+        + f"\n{func} {args}\n"
+    )
     return run_capture([BASH, "-c", harness], env={"PATH": "/usr/bin:/bin"})
 
 
