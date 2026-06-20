@@ -286,7 +286,6 @@ setup_macos_sandbox() {
   fi
 
   if [[ "${CONTAINER_RUNTIME:-}" != "runsc" ]]; then
-    status "Using the standard container runtime (runc) inside the OrbStack VM."
     export CONTAINER_RUNTIME=runc
     sandbox_ok=true
     return
