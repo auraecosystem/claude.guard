@@ -7,6 +7,14 @@ field-value patterns, plus a regex for unquoted field-values KeywordDetector
 misses.
 """
 
+# pylint: disable=too-many-lines
+# This module is the SINGLE detection engine (the task's invariant: detect-secrets
+# is the one and only oracle, no second port to keep in sync). The serving daemon
+# co-locates with the detection functions it reuses directly (_redact_core,
+# handle_request, the primed mapping cache) — splitting them would either fork the
+# engine or require importing this hyphenated script across a module boundary. The
+# socket/wire plumbing is the separable part if this needs to shrink later.
+
 import contextlib
 import errno
 import functools
@@ -1003,7 +1011,8 @@ def _read_frame(conn: socket.socket) -> object | None:
     body = _recv_exact(conn, length)
     if body is None:
         return None
-    return json.loads(body.decode("utf-8"))
+    parsed: object = json.loads(body.decode("utf-8"))
+    return parsed
 
 
 def _write_frame(conn: socket.socket, obj: object) -> None:
@@ -1036,7 +1045,7 @@ def _serve_one(conn: socket.socket) -> None:
                 bool(req.get("web_ingress", False)),
                 _redact_core,
             )
-        except Exception:  # noqa: BLE001 -- see below
+        except Exception:  # noqa: BLE001 -- see below  # pylint: disable=broad-exception-caught
             # A genuine detection failure for THIS request: signal the client so it
             # fails THAT call closed, but keep the daemon (and the rest of the
             # session's redaction) alive — the whole reason the daemon exists is

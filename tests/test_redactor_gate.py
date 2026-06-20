@@ -29,6 +29,8 @@ _DOCKER_STUB = r"""#!/bin/bash
 cmd="$1"; shift
 case "$cmd" in
   exec)
+    # The daemon-log dump (`docker exec <id> cat /tmp/...daemon.log`) on an abort path.
+    case "$*" in *cat*) printf '%s' "${STUB_DAEMON_LOG:-}"; exit 0 ;; esac
     if [ -n "${STUB_SOCK_AFTER:-}" ]; then
       n=0; [ -f "$STUB_COUNT" ] && n=$(cat "$STUB_COUNT")
       n=$((n + 1)); echo "$n" > "$STUB_COUNT"
@@ -106,20 +108,25 @@ def test_aborts_when_app_container_crashed(tmp_path: Path) -> None:
     crashed before the daemon began serving), so the gate aborts loudly instead of
     launching without Layer-4 redaction — and does NOT wait out the full timeout (the
     crash is detected on the first probe)."""
-    r = _run(tmp_path, STUB_RUNNING="false")
+    r = _run(tmp_path, STUB_RUNNING="false", STUB_DAEMON_LOG="Traceback: boom")
     assert r.returncode == 1
     assert "GATE-PASSED" not in r.stdout
     assert "app container exited before the secret-redactor daemon" in r.stderr
+    # The captured daemon log is surfaced so the startup crash is diagnosable.
+    assert "[redactor] Traceback: boom" in r.stderr
 
 
 def test_aborts_on_timeout_without_socket(tmp_path: Path) -> None:
     """Fail closed: no socket and the app container is still running (not observably
     crashed), so once the bounded wait elapses the gate aborts rather than launching
     without redaction. Timeout 0 makes the deadline expire on the first iteration."""
-    r = _run(tmp_path, CLAUDE_REDACTOR_WAIT_TIMEOUT="0")
+    r = _run(
+        tmp_path, CLAUDE_REDACTOR_WAIT_TIMEOUT="0", STUB_DAEMON_LOG="ImportError: x"
+    )
     assert r.returncode == 1
     assert "GATE-PASSED" not in r.stdout
     assert "did not begin serving within 0s" in r.stderr
+    assert "[redactor] ImportError: x" in r.stderr
 
 
 def test_emits_engagement_event_on_success(tmp_path: Path) -> None:

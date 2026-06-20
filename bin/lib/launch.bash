@@ -198,6 +198,18 @@ wait_for_firewall_healthy_or_abort() {
   done
 }
 
+# _dump_redactor_daemon_log — best-effort tail of the in-container daemon's captured
+# stdout/stderr (the app command redirects it to /tmp/claude-redactor-daemon.log) to
+# this launcher's stderr, so a startup crash that would otherwise vanish into the
+# backgrounded process is visible on a gate abort. No-op when the file is absent.
+_dump_redactor_daemon_log() {
+  local log
+  log="$(docker exec "$container_id" cat /tmp/claude-redactor-daemon.log 2>/dev/null || true)"
+  [[ -n "$log" ]] || return 0
+  cg_error "secret-redactor daemon log:"
+  printf '%s\n' "$log" | sed 's|^|    [redactor] |' >&2 || true # allow-exit-suppress: best-effort diagnostic dump in the abort path
+}
+
 # wait_for_redactor_ready_or_abort — fail-closed Layer-4 gate: the secret-redactor daemon
 # (started at app boot) must be SERVING on its 0600 Unix socket before handover, so the
 # first tool payload is vetted by detect-secrets without paying its multi-hundred-ms
@@ -225,11 +237,13 @@ wait_for_redactor_ready_or_abort() {
     running="$(docker inspect -f '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
     if [[ "$running" == "false" ]]; then
       cg_error "FATAL — the app container exited before the secret-redactor daemon began serving; refusing to launch without Layer-4 secret redaction."
+      _dump_redactor_daemon_log
       _dump_container_logs "$container_id" 25
       exit 1
     fi
     if ((SECONDS >= deadline)); then
       cg_error "FATAL — the secret-redactor daemon did not begin serving within ${timeout}s (no $sock socket); refusing to launch without Layer-4 secret redaction."
+      _dump_redactor_daemon_log
       cg_error "increase CLAUDE_REDACTOR_WAIT_TIMEOUT and retry, or run 'claude-guard doctor' to diagnose."
       exit 1
     fi

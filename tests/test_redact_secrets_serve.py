@@ -269,6 +269,37 @@ def test_non_dict_request_dropped(daemon):
     assert daemon.request(text=f"aws_key = {AWS_KEY}", map=False) is not None
 
 
+def test_short_body_closed_keeps_serving(daemon):
+    # A complete 4-byte header promising N body bytes, but the connection closes
+    # before they arrive: _read_frame's body recv returns None and the daemon drops
+    # the connection without replying — distinct from the short-HEADER case above.
+    sock = daemon.connect()
+    try:
+        sock.sendall(struct.pack(">I", 64))  # promise 64 bytes...
+        sock.sendall(b"{}")  # ...then send only 2 and hang up
+        sock.close()
+    except OSError:
+        pass
+    assert daemon.request(text=f"aws_key = {AWS_KEY}", map=False) is not None
+
+
+def test_handle_request_failure_is_isolated(mod, daemon, monkeypatch):
+    # A genuine detection failure for ONE request must fail only THAT call closed
+    # (the client gets an {"error"} it turns into a suppressed output) while the
+    # daemon keeps serving — the whole reason the daemon replaced the per-call spawn.
+    def boom(*_a, **_k):
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(mod, "handle_request", boom)
+    assert daemon.request(text=f"aws_key = {AWS_KEY}", map=False) == {
+        "error": "redaction failed"
+    }
+    monkeypatch.undo()
+    assert daemon.request(text=f"aws_key = {AWS_KEY}", map=False)["found"] == [
+        "AWS Access Key"
+    ]
+
+
 # ─── Concurrency: serialized scans must equal the serial baseline ────────────
 
 
@@ -357,3 +388,27 @@ def test_shutdown_removes_socket(mod, tmp_path):
     d = Daemon(mod, str(path)).start()
     d.shutdown()
     assert not path.exists(), "serve() must unlink its socket on clean shutdown"
+
+
+def test_bind_raises_on_non_addrinuse_error(mod, tmp_path):
+    # _bind_or_exit silently yields the path to a live owner (EADDRINUSE) and reclaims
+    # a stale one, but any OTHER bind failure (here a missing parent dir -> ENOENT) is
+    # a real fault that must propagate, not be swallowed into a quiet exit.
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError):
+            mod._bind_or_exit(sock, str(tmp_path / "no-such-dir" / "x.sock"))
+    finally:
+        sock.close()
+
+
+def test_main_serve_flag_dispatches_to_serve(mod, monkeypatch):
+    # `redact-secrets.py --serve <path>` routes to serve() with that path (and runs
+    # no CLI scan), the entry the app container's boot command uses.
+    captured = {}
+    monkeypatch.setattr(
+        mod.sys, "argv", ["redact-secrets.py", "--serve", "/tmp/x.sock"]
+    )
+    monkeypatch.setattr(mod, "serve", lambda path: captured.setdefault("path", path))
+    mod.main()
+    assert captured == {"path": "/tmp/x.sock"}

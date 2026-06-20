@@ -75,6 +75,7 @@ function collectEnvSecrets() {
   return out;
 }
 
+/** @param {number} ms */
 const sleep = (ms) =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -85,11 +86,14 @@ const sleep = (ms) =>
  * the socket file is missing (no daemon) or present but no one is listening (the
  * daemon crashed and left a stale socket). A protocol/scan error is NOT this — it
  * fails closed without a respawn (the daemon is alive; detection genuinely failed).
- * @param {NodeJS.ErrnoException} err
+ * @param {unknown} err
  * @returns {boolean}
  */
 function isRespawnable(err) {
-  return Boolean(err) && (err.code === "ENOENT" || err.code === "ECONNREFUSED");
+  const errno = /** @type {{code?: string}} */ (err);
+  return (
+    Boolean(errno) && (errno.code === "ENOENT" || errno.code === "ECONNREFUSED")
+  );
 }
 
 /**
@@ -107,21 +111,34 @@ function failClosed(cause) {
 }
 
 /**
+ * The shape redact-secrets.py returns: plain mode `{text, found}`, map mode
+ * `{text, pairs, found}` or `{unmappable}`. All fields optional so a consumer
+ * narrows the variant it expects.
+ * @typedef {object} RedactResponse
+ * @property {string} [text]
+ * @property {string[]} [found]
+ * @property {{placeholder: string, original: string, start: number}[]} [pairs]
+ * @property {string} [unmappable]
+ */
+
+/**
  * Open one connection, send `request`, resolve with the parsed response object
  * (or null). Rejects on connect failure, a malformed/oversize/short frame, or an
  * {error} response — every one of which the caller turns into a fail-closed.
  * @param {string} socketPath
  * @param {{text: string, map: boolean, web_ingress: boolean}} request
- * @returns {Promise<object|null>}
+ * @returns {Promise<RedactResponse|null>}
  */
 export function connectAndRequest(socketPath, request) {
   return new Promise((resolve, reject) => {
     const sock = createConnection(socketPath);
     /** @type {Buffer[]} */
     const chunks = [];
+    /** @type {number|null} */
     let expected = null;
     // destroy() stops further events and a settled Promise ignores a second
     // resolve/reject, so the first terminal event wins with no explicit guard.
+    /** @type {(fn: (value?: any) => void, arg?: unknown) => void} */
     const finish = (fn, arg) => {
       sock.destroy();
       fn(arg);
@@ -134,7 +151,9 @@ export function connectAndRequest(socketPath, request) {
       sock.write(Buffer.concat([header, body]));
     });
     sock.on("data", (chunk) => {
-      chunks.push(chunk);
+      // No setEncoding, so 'data' is always a Buffer at runtime; the cast tells the
+      // type checker that without a (never-taken, uncoverable) string branch.
+      chunks.push(/** @type {Buffer} */ (chunk));
       const buf = Buffer.concat(chunks);
       if (expected === null) {
         if (buf.length < 4) return;
@@ -230,7 +249,7 @@ function canConnect(socketPath) {
  * @param {{map?: boolean, webIngress?: boolean, socketPath?: string,
  *   connect?: typeof connectAndRequest, spawn?: typeof spawnDaemon,
  *   waitForSocket?: typeof waitForSocket}} [opts]
- * @returns {Promise<object|null>}
+ * @returns {Promise<RedactResponse|null>}
  */
 export async function redactViaDaemon(text, opts = {}) {
   const {

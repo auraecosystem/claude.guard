@@ -52,6 +52,14 @@ import {
 const HINT = "[REDACTED";
 
 /**
+ * Map-mode response from the redactor: either the mappable view (text + ordered
+ * (placeholder, original, start) pairs) or an unmappable verdict carrying its
+ * reason — a discriminated pair, matching what redact-secrets.py returns.
+ * @typedef {{text: string, pairs: {placeholder: string, original: string, start: number}[], found?: string[]}
+ *   | {unmappable: string}} RedactMapView
+ */
+
+/**
  * Real I/O used by the hook; tests may inject a fake. `redactMap` returns the
  * redacted view of (Layer-1-cleaned) file text plus the ordered
  * (placeholder, original, start) pairs; `redact` returns the plain redacted text
@@ -60,15 +68,19 @@ const HINT = "[REDACTED";
  * are async; rehydrateRedacted awaits them. The pure mapping logic (with an
  * injected fake io) is what mutation targets instead.
  * @type {{ readFile: (path: string) => string,
- *   redactMap: (text: string) => Promise<object>,
+ *   redactMap: (text: string) => Promise<RedactMapView>,
  *   redact: (text: string) => Promise<string|null> }}
  */
 export const defaultIo = {
   readFile: (path) => readFileSync(path, "utf8"),
-  redactMap: (text) => redactViaDaemon(text, { map: true }),
+  // Map mode always yields a dict (only plain mode is ever null), so the cast
+  // asserts the non-null map shape the daemon's contract guarantees.
+  redactMap: async (text) =>
+    /** @type {RedactMapView} */ (await redactViaDaemon(text, { map: true })),
   redact: async (text) => {
     const out = await redactViaDaemon(text, {});
-    return out ? out.text : null;
+    // Plain-mode responses always carry `text`; null means nothing was redacted.
+    return out ? /** @type {string} */ (out.text) : null;
   },
 };
 
@@ -366,7 +378,7 @@ export async function rehydrateRedacted(tool, toolInput, io = defaultIo) {
 
   const deletions = alignDeletions(content, cleaned);
   const view = await io.redactMap(cleaned);
-  if (view.unmappable) {
+  if ("unmappable" in view) {
     if (!hinted) return null;
     return {
       deny: `cannot resolve redaction placeholders in ${toolInput.file_path}: ${view.unmappable}`,
