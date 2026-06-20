@@ -159,6 +159,17 @@ _deps_store_flag() {
   printf -- "--store-dir '%s' " "$CLAUDE_GUARD_PNPM_STORE_DIR"
 }
 
+# True when the launcher wired a READ-ONLY host pnpm store (CLAUDE_GUARD_HOST_PNPM_STORE_DIR —
+# the hardener's /opt/host-pnpm-store mount of the trusted host ~/.pnpm-store) AND it is a
+# non-empty directory. An absent host store is mounted as /dev/null (not a directory) or an
+# empty placeholder (a directory with no entries); either way this returns non-zero and the
+# caller skips the link attempt, falling through to the writable store + online path.
+_deps_host_store_usable() {
+  local d="${CLAUDE_GUARD_HOST_PNPM_STORE_DIR:-}"
+  [[ -n "$d" && -d "$d" ]] || return 1
+  [[ -n "$(ls -A "$d" 2>/dev/null)" ]]
+}
+
 # Install deps in $dir as the node user (node_modules stays node-owned — no root leak
 # onto the host). --ignore-scripts always: the hardener has egress, so a malicious
 # package's lifecycle script must never run. Installs the FULL tree (no --prod) so the
@@ -185,6 +196,19 @@ install_deps() {
   if ! _deps_has_stamp "$dir" && deps_hooks_resolvable "$dir"; then
     echo "Production dependencies in $dir already present (no prior install stamp) — skipping the offline verify; hooks resolve."
     return 0
+  fi
+  # Same-OS fast path: when a read-only host pnpm store is wired and non-empty, try linking the
+  # project's deps straight from it offline — no network, no fetch+extract. For a superset host
+  # store (the common same-OS case) this populates node_modules from local files; pnpm leaves the
+  # read-only store untouched. Any miss/failure (incomplete store, cross-OS platform binaries)
+  # falls through to the writable shared store + online path below, so correctness never depends
+  # on the host store.
+  if _deps_host_store_usable; then
+    echo "Linking dependencies in $dir from the host pnpm store (offline)..."
+    if su node -c "cd '$dir' && pnpm install --frozen-lockfile --offline --ignore-scripts --silent --store-dir '$CLAUDE_GUARD_HOST_PNPM_STORE_DIR'" 2>/dev/null; then
+      deps_mark_installed "$dir"
+      return 0
+    fi
   fi
   echo "Verifying dependencies in $dir (offline)..."
   if su node -c "cd '$dir' && pnpm install --frozen-lockfile --offline --ignore-scripts --silent $store_flag" 2>/dev/null; then

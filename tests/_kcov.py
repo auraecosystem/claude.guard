@@ -124,6 +124,10 @@ KCOV_EXCLUDED: list[str] = [
     "bin/lib/audit-archive.bash",
     "bin/lib/auto-mint-gh-token.bash",
     "bin/lib/build-heartbeat.bash",
+    # sourced by bin/claude-guard; its host-cache probes are pure (no docker) and behaviorally
+    # covered by test_cache_seed.py (+ the deps-install link path in test_deps_install.py),
+    # so it is line-gated by those unit tests, not by a standalone kcov run.
+    "bin/lib/cache-seed.bash",
     "bin/lib/ccr-launch.bash",
     "bin/lib/ccr-profile.bash",
     "bin/lib/check-harness.bash",

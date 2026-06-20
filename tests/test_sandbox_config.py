@@ -2514,3 +2514,49 @@ class TestInitFirewallNtfyEgress:
         """The refresh cycle must swap monitor-ntfy alongside allowed-domains,
         or the ntfy server's rotated IPs strand alerts mid-session."""
         assert 'ipset swap "$new_ntfy_set" monitor-ntfy' in self.content
+
+
+# ── Read-only host dependency-cache mounts ──────────────────────────
+# Node's host pnpm store seeds the pre-agent HARDENER (no agent edge); Python's host pip
+# cache seeds the AGENT (a documented read edge). Both are zero-copy read-only bind-mounts
+# that default to /dev/null for a bare `docker compose up`, and add no named volume — so the
+# ephemeral reaper SSOT (config/session-volume-roles.json) is untouched.
+
+
+def _mount_for(compose: dict, svc: str, target: str) -> str:
+    for v in compose["services"][svc].get("volumes", []) or []:
+        if isinstance(v, str) and f":{target}:" in f"{v}:":
+            return v
+    raise AssertionError(f"no mount targeting {target} in service {svc}")
+
+
+def test_host_pnpm_store_seeds_hardener_read_only(compose: dict) -> None:
+    m = _mount_for(compose, "hardener", "/opt/host-pnpm-store")
+    src, target, mode = m.rsplit(":", 2)
+    assert target == "/opt/host-pnpm-store"
+    assert mode == "ro"
+    assert _default(src) == "/dev/null"  # harmless no-op default
+    # The hardener reads it through this env-named in-container path.
+    env = compose["services"]["hardener"]["environment"]
+    assert env["CLAUDE_GUARD_HOST_PNPM_STORE_DIR"] == "/opt/host-pnpm-store"
+
+
+def test_host_pnpm_store_not_mounted_into_the_agent(compose: dict) -> None:
+    """The pnpm store must never reach the agent container — only the pre-agent hardener."""
+    app_vols = compose["services"]["app"].get("volumes", []) or []
+    assert not any("host-pnpm-store" in v for v in app_vols)
+
+
+def test_host_pip_cache_seeds_agent_read_only(compose: dict) -> None:
+    m = _mount_for(compose, "app", "/home/node/.cache/pip")
+    src, target, mode = m.rsplit(":", 2)
+    assert target == "/home/node/.cache/pip"
+    assert mode == "ro"  # agent reads cached wheels but cannot write/poison the cache
+    assert _default(src) == "/dev/null"
+
+
+def test_host_caches_add_no_named_volumes(compose: dict) -> None:
+    """Both caches are bind-mounts of host paths, not docker volumes — so no new entry joins
+    the top-level volumes or the reaper SSOT (config/session-volume-roles.json)."""
+    vols = compose.get("volumes", {}) or {}
+    assert not any("host-pnpm-store" in n or "pip-cache" in n for n in vols)
