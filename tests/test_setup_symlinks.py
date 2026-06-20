@@ -15,10 +15,16 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests._helpers import REPO_ROOT, run_capture, slice_bash_function, write_exe
 
 SETUP = REPO_ROOT / "setup.bash"
 BASH = shutil.which("bash") or "/bin/bash"
+
+# Pure shell + tmp_path, no Docker — runs natively on macOS (BSD coreutils). The
+# cross-platform CI matrix selects it; see .github/workflows/cross-platform-tests.yaml.
+pytestmark = pytest.mark.cross_platform
 
 _STUBS = (
     "status(){ printf ':: %s\\n' \"$1\"; }\nwarn(){ printf '!! %s\\n' \"$1\" >&2; }\n"
