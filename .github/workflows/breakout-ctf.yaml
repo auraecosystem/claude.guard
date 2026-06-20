@@ -144,7 +144,7 @@ jobs:
           # comment, reusing render_transcript's status logic so it can't drift.
           label="NO VERDICT"
           if [ -f "$base/verdict.json" ]; then
-            label=$(python3 -c "import json; from tests.ctf.render_transcript import _status_key,_STATUS; print(_STATUS[_status_key(json.load(open('$base/verdict.json')))][0])" 2>/dev/null || echo "NO VERDICT")
+            label=$(VJSON="$base/verdict.json" python3 -c "import os,json; from tests.ctf.render_transcript import _status_key,_STATUS; print(_STATUS[_status_key(json.load(open(os.environ['VJSON'])))][0])" 2>/dev/null || echo "NO VERDICT")
           fi
           echo "label=$label" >>"$GITHUB_OUTPUT"
 
@@ -193,6 +193,9 @@ jobs:
         id: publish
         if: always() && steps.gate.outputs.run == 'true'
         continue-on-error: true
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [ "${CLAUDE_GUARD_CHART_SKIP_UPLOAD:-}" = "1" ] || [ ! -s /tmp/ctf-transcript.html ]; then
@@ -201,10 +204,10 @@ jobs:
           fi
           # Unique per-run key (run id + attempt) so re-runs and concurrent PRs never
           # clobber each other's transcript — each run keeps its own record.
-          key="static/breakout-ctf/${{ github.run_id }}-${{ github.run_attempt }}/transcript.html"
-          # A publish hiccup must not override the security verdict decided earlier,
-          # so the upload is non-fatal — the `if` keeps `set -e` from tripping on a
-          # final-retry failure, which surfaces as a warning instead of a red gate.
+          key="static/breakout-ctf/${RUN_ID}-${RUN_ATTEMPT}/transcript.html"
+          # The `if` routes a final-retry upload failure to a warning (+ no url
+          # output) instead of a non-zero exit; the step is continue-on-error too, so
+          # the security verdict the main step decided is never affected either way.
           if rclone copyto /tmp/ctf-transcript.html "r2:turntrout/$key" --retries 5; then
             url="https://assets.turntrout.com/$key"
             echo "url=$url" >>"$GITHUB_OUTPUT"
@@ -248,11 +251,17 @@ jobs:
             echo "Raw artifacts (verdict JSON + stream-json transcript): see the **Artifacts** section of [this workflow run]($RUN_URL) (kept 7 days)."
           } >/tmp/ctf-comment.md
           # Sticky comment: update the existing marked comment in place rather than
-          # stacking a new one each re-run. --jq's `select` drops non-matches, so
-          # paginating emits only matching ids (one per line) — head -1 takes the
-          # first; no "null" sentinel to filter out.
-          existing=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" 2>/dev/null | head -1 || true)
+          # stacking a new one each re-run. Capture the listing on its OWN line so a
+          # gh/auth failure is distinguishable from "no existing comment" — masking
+          # both as empty would POST a duplicate comment every run on a broken token.
+          if ! comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id"); then
+            echo "::warning::could not list PR comments; skipping the sticky transcript comment."
+            exit 0
+          fi
+          # --jq's `select` drops non-matches, so this is only matching ids (one per
+          # line); take the first via bash expansion (no pipe → no SIGPIPE/pipefail).
+          existing=${comments%%$'\n'*}
           if [ -n "$existing" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@/tmp/ctf-comment.md >/dev/null
           else

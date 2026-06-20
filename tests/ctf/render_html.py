@@ -15,7 +15,6 @@ frame tags are disallowed entirely, not just attribute-scrubbed.
 """
 
 import argparse
-import re
 from pathlib import Path
 
 # Text/structure tags ONLY. No img/video/audio/iframe/object/embed: those would let
@@ -53,11 +52,6 @@ _ALLOWED_TAGS = {
     "th",
     "td",
 }
-
-# md_in_html only parses Markdown nested inside an HTML block when the tag carries
-# markdown="1"; the renderer's <details> blocks wrap the fenced JSON tool calls, so
-# without this they would render as a literal ``` line instead of a code block.
-_DETAILS_OPEN = re.compile(r"<details>")
 
 # A compact, self-contained stylesheet (auto light/dark via prefers-color-scheme).
 # Deliberately small: a readable transcript page, not a full Markdown-CSS clone.
@@ -106,10 +100,9 @@ def markdown_to_safe_html(md_text: str) -> str:
     import markdown
     import nh3
 
-    with_attr = _DETAILS_OPEN.sub('<details markdown="1">', md_text)
     raw = markdown.markdown(
-        with_attr,
-        extensions=["fenced_code", "md_in_html", "sane_lists", "tables"],
+        md_text,
+        extensions=["fenced_code", "sane_lists", "tables"],
         output_format="html5",
     )
     return nh3.clean(raw, tags=_ALLOWED_TAGS)
