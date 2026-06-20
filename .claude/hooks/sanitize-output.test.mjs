@@ -2,7 +2,7 @@ import { describe, it, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,14 +47,6 @@ const post = (text) =>
 const webPost = (text) =>
   run(POST, { tool_name: "WebFetch", tool_input: {}, tool_response: text });
 const cp = (codePoint) => String.fromCodePoint(codePoint);
-
-// redactSecrets writes this sentinel when detect-secrets is unavailable, then
-// short-circuits redaction for the rest of the process. A mutation run breaks
-// the subprocess on purpose, so a surviving sentinel would disable redaction for
-// every later mutant and falsely "kill" it — clear it before each test so each
-// starts from a working redactor. Mirrors DS_UNAVAILABLE_SENTINEL in the hook.
-const DS_UNAVAILABLE_SENTINEL = join(tmpdir(), ".detect-secrets-unavailable");
-beforeEach(() => rmSync(DS_UNAVAILABLE_SENTINEL, { force: true }));
 
 // ─── tool output extraction (PostToolUse `tool_response` shapes) ──────────────
 // The hook scans every string leaf of `tool_response` and rewrites it in place,
@@ -1608,37 +1600,46 @@ describe("sanitize-output: sanitizeText in-process (Layers 1-4)", () => {
     assert.match(res.warnings.join(" "), /API keys\/secrets redacted/);
   });
 
-  // Isolate each fail-closed case on its own sentinel path (via the hook's
-  // CLAUDE_GUARD_DS_SENTINEL override) so a concurrent test's beforeEach clearing
-  // the shared tmpdir sentinel can't race the subprocess mid-flight.
-  const withSentinel = (text) => {
-    const sentinel = join(
-      tmpdir(),
-      `.ds-sentinel-${Math.random().toString(36).slice(2)}`,
-    );
-    writeFileSync(sentinel, "");
-    return run(
+  // Force a fail-closed: point the client at a socket with no daemon AND a spawn
+  // command that never binds it (`true` exits immediately), with a short wait so
+  // the spawn-and-retry gives up fast instead of paying the cold-start margin.
+  // Unlike the old session-wide sentinel, this fails only the call that can't be
+  // vetted — there is no persistent state to leak into other tests.
+  const withDeadRedactor = (text) =>
+    run(
       POST,
       { tool_name: "Bash", tool_input: {}, tool_response: text },
-      { env: { CLAUDE_GUARD_DS_SENTINEL: sentinel } },
-    ).finally(() => rmSync(sentinel, { force: true }));
-  };
-
-  it("fails closed when detect-secrets is unavailable (sentinel set)", async () => {
-    // A prior subprocess crash wrote the sentinel. Secret-shaped output must now
-    // be suppressed, not passed through with a warning: a redactor we can't run
-    // might leak an API key. The sentinel-throw propagates to the main handler.
-    const hso = hookOutput(
-      await withSentinel("password: hunter2-not-a-real-secret"),
+      {
+        env: {
+          CLAUDE_GUARD_REDACTOR_SOCKET: join(
+            tmpdir(),
+            `.redactor-dead-${Math.random().toString(36).slice(2)}.sock`,
+          ),
+          CLAUDE_GUARD_REDACTOR_PYTHON: "true",
+          CLAUDE_GUARD_REDACTOR_WAIT_MS: "300",
+        },
+      },
     );
+
+  // Split so no contiguous AWS-key literal lands in the repo (gitleaks/push-protection).
+  const AWS_PREFIX = "AKIA";
+  const SECRET_SHAPED = `aws_key = ${AWS_PREFIX}IOSFODNN7EXAMPLE`;
+
+  it("fails closed when the redactor daemon cannot be reached or spawned", async () => {
+    // The daemon is absent and won't start. Secret-shaped output must be
+    // suppressed, not passed through with a warning: a redactor we can't run might
+    // leak an API key. The client's throw propagates to the main handler.
+    const hso = hookOutput(await withDeadRedactor(SECRET_SHAPED));
     assert.match(hso.updatedToolOutput, /SANITIZATION FAILED/);
     assert.match(hso.additionalContext, /output was suppressed/);
   });
 
-  it("leaves non-secret output untouched even when the sentinel is set", async () => {
+  it("leaves non-secret output untouched even when the daemon is unavailable", async () => {
     // The fail-closed throw is gated on secret-shaped content: ordinary output
     // with no secret hint never reaches the redactor, so it must pass through.
-    const hso = hookOutput(await withSentinel("just some ordinary log output"));
+    const hso = hookOutput(
+      await withDeadRedactor("just some ordinary log output"),
+    );
     assert.doesNotMatch(hso?.updatedToolOutput ?? "", /SANITIZATION FAILED/);
   });
 });

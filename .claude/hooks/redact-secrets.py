@@ -7,11 +7,16 @@ field-value patterns, plus a regex for unquoted field-values KeywordDetector
 misses.
 """
 
+import contextlib
+import errno
 import functools
 import json
 import os
 import re
+import socket
+import struct
 import sys
+import threading
 from pathlib import Path
 
 from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
@@ -98,6 +103,23 @@ ENV_BOUND_SECRET_VARS = tuple(_KEY_VARS["vars"])
 # Floor so a var set to a short placeholder (tests use "fake", "sk-test") can't
 # blank out unrelated output; real inference keys are far longer.
 _MIN_ENV_SECRET_LEN = _KEY_VARS["min_secret_len"]
+
+# Per-request override of the inference-key VALUES used for env-bound redaction.
+# The one-shot CLI and the in-process importers (credscan-secrets.py) read these
+# straight from os.environ — their process IS the session. The daemon, though, is
+# long-lived and may be SHARED across sessions (the host socket lives in a shared
+# tmpdir), so its own os.environ is not necessarily the requester's: it must
+# redact the REQUESTER's keys, which the client sends per request. _serve_one sets
+# this around each request (and clears it in a finally); the serve loop is
+# single-threaded, so no lock is needed. None ⇒ fall back to os.environ.
+_ENV_OVERRIDE: dict[str, str] | None = None
+
+
+def _env_source() -> "dict[str, str] | os._Environ[str]":
+    """The mapping env-bound redaction reads key values from: the per-request
+    override when the daemon set one, else this process's own environment."""
+    return _ENV_OVERRIDE if _ENV_OVERRIDE is not None else os.environ
+
 
 # ─── Placeholder↔secret map mode (--map) ─────────────────────────────────────
 # The PreToolUse rehydration layer (rehydrate-redacted.mjs) translates the
@@ -202,7 +224,7 @@ def _redact_env_bound(
 ) -> str:
     """Redact the literal value of each configured inference key from ``text``."""
     for name in ENV_BOUND_SECRET_VARS:
-        value = os.environ.get(name)
+        value = _env_source().get(name)
         if not value or len(value) < _MIN_ENV_SECRET_LEN:
             continue
         repl = functools.partial(_env_mark, f"[REDACTED: {name}]", entries)
@@ -613,7 +635,7 @@ def _cross_line_candidate_spans(collapsed: str) -> list[tuple[int, int, str, str
             )
             start = collapsed.find(value, start + len(value))
     for name in ENV_BOUND_SECRET_VARS:
-        value = os.environ.get(name)
+        value = _env_source().get(name)
         if not value or len(value) < _MIN_ENV_SECRET_LEN:
             continue
         for m in _env_value_re(value).finditer(collapsed):
@@ -712,13 +734,19 @@ def _redact_line(
     return redacted
 
 
-def _redact(
+def _redact_core(
     text: str,
     entries: list[tuple[str, str]] | None,
     web_ingress: bool = False,
     high_confidence: bool = False,
 ) -> tuple[str, list[str]]:
     """Core redaction over ``text``; return (redacted, found types).
+
+    Assumes the detect-secrets plugin set is ALREADY configured and the
+    secret_type->class mapping primed by the caller — ``_redact`` does that
+    per-call (CLI / in-process import), ``serve`` does it once at daemon startup.
+    This body therefore touches neither ``transient_settings`` nor the mapping
+    cache; doing so per call is the cost the daemon exists to avoid.
 
     In map mode ``entries`` is a list and each replacement is a unique sentinel
     _resolve_marks later pairs back to its placeholder; otherwise ``entries`` is
@@ -733,36 +761,21 @@ def _redact(
     ``high_confidence`` drops the fuzzy keyword/field-value detectors (the
     ``Secret Keyword`` plugin and the ``named secret field`` regex), leaving only
     detectors whose match shape IS the credential. The startup scan sets it for
-    source-code files; see PLUGINS_HIGH_CONFIDENCE.
+    source-code files; see PLUGINS_HIGH_CONFIDENCE. The plugin SELECTION it implies
+    lives in ``_redact``/``serve`` (which configure settings); here it only gates
+    the field-value regex below.
     """
     found: list[str] = []
     # Redact configured inference-key values first, then collapse PEM blocks so
     # the line scan never sees the base64 key body.
     working = _redact_env_bound(text, found, entries)
     working = _redact_pem_blocks(working, found, entries)
-
-    plugins = PLUGINS_HIGH_CONFIDENCE if high_confidence else PLUGINS
-    with transient_settings({"plugins_used": plugins + CUSTOM_PLUGINS}):
-        # detect-secrets caches the secret_type->class mapping in a process-global
-        # lru_cache(maxsize=1), built from whatever settings were active at the FIRST
-        # scan in the interpreter. An earlier in-process scan with different settings
-        # (another in-process caller like credscan-secrets.py, or a sibling test
-        # sharing this interpreter) can populate it WITHOUT our file-based custom
-        # plugins, after which scan_line raises TypeError ("No such
-        # AnthropicApiKeyDetector plugin"). Clear it so the mapping is rebuilt against
-        # the plugins we just configured; clear again on exit so our custom mapping
-        # doesn't leak into a later caller's default-plugin scan.
-        get_mapping_from_secret_type_to_class.cache_clear()
-        try:
-            # Catch newline-split tokens first (collapse to a single mark), then
-            # scan what remains line by line.
-            working = _redact_cross_line(working, found, entries)
-            lines = [
-                _redact_line(line, web_ingress, entries, found)
-                for line in working.split("\n")
-            ]
-        finally:
-            get_mapping_from_secret_type_to_class.cache_clear()
+    # Catch newline-split tokens first (collapse to a single mark), then scan what
+    # remains line by line.
+    working = _redact_cross_line(working, found, entries)
+    lines = [
+        _redact_line(line, web_ingress, entries, found) for line in working.split("\n")
+    ]
 
     rejoined = "\n".join(lines)
     if high_confidence:
@@ -797,6 +810,36 @@ def _redact(
         )
 
     return FIELD_VALUE_RE.sub(_replace_field, rejoined), found
+
+
+def _redact(
+    text: str,
+    entries: list[tuple[str, str]] | None,
+    web_ingress: bool = False,
+    high_confidence: bool = False,
+) -> tuple[str, list[str]]:
+    """CLI / in-process wrapper around ``_redact_core``: configure the
+    detect-secrets plugin set for THIS call and clear the secret_type->class
+    mapping cache around the scan.
+
+    detect-secrets caches that mapping in a process-global lru_cache(maxsize=1),
+    built from whatever settings were active at the FIRST scan in the interpreter.
+    An earlier in-process scan with different settings (another in-process caller
+    like credscan-secrets.py, or a sibling test sharing this interpreter) can
+    populate it WITHOUT our file-based custom plugins, after which scan_line raises
+    TypeError ("No such AnthropicApiKeyDetector plugin"). Clear it so the mapping
+    is rebuilt against the plugins we just configured; clear again on exit so our
+    custom mapping doesn't leak into a later caller's default-plugin scan. The
+    long-lived daemon (``serve``) configures once and skips this per-call dance;
+    that is the whole reason it exists.
+    """
+    plugins = PLUGINS_HIGH_CONFIDENCE if high_confidence else PLUGINS
+    with transient_settings({"plugins_used": plugins + CUSTOM_PLUGINS}):
+        get_mapping_from_secret_type_to_class.cache_clear()
+        try:
+            return _redact_core(text, entries, web_ingress, high_confidence)
+        finally:
+            get_mapping_from_secret_type_to_class.cache_clear()
 
 
 def redact_text(text: str, web_ingress: bool = False) -> tuple[str, list[str]]:
@@ -888,37 +931,192 @@ def secret_previews(text: str, high_confidence: bool = False) -> list[str]:
     )
 
 
-def main() -> None:
-    # argv[0] is the script path, never "--map", so [1:] vs [0:] are equivalent.
-    map_mode = "--map" in sys.argv[1:]  # pragma: no mutate
-    web_ingress = "--web-ingress" in sys.argv[1:]
-    text = sys.stdin.read()
+def handle_request(
+    text: str,
+    map_mode: bool,
+    web_ingress: bool,
+    engine=_redact,
+) -> dict | None:
+    """Decide the response for one redaction request; the single place the modes
+    are dispatched, shared by the CLI (``main``) and the daemon (``serve``).
+
+    Returns the response object, or ``None`` for "nothing to emit" (plain mode,
+    nothing redacted): the CLI writes no stdout, and the daemon sends JSON
+    ``null`` that the client reads as "ran, nothing to redact" (distinct from an
+    error). ``engine`` is ``_redact`` for the one-shot CLI (configures
+    detect-secrets per call) and ``_redact_core`` for the daemon (configured once
+    by ``serve``), so the wire response is identical to the CLI's stdout JSON.
+    """
     if not text:
-        if map_mode:
-            json.dump({"text": "", "pairs": []}, sys.stdout)
-        return
+        return {"text": "", "pairs": []} if map_mode else None
     if map_mode and (_MARK_OPEN in text or _MARK_CLOSE in text):
         # Pre-existing sentinel characters are indistinguishable from our own
         # marks; refuse to map rather than mis-pair placeholders with secrets.
-        json.dump(
-            {"unmappable": "input contains reserved sentinel characters"}, sys.stdout
-        )
-        return
-
+        return {"unmappable": "input contains reserved sentinel characters"}
     entries: list[tuple[str, str]] | None = [] if map_mode else None
-    redacted, found = _redact(text, entries, web_ingress)
+    redacted, found = engine(text, entries, web_ingress)
     if map_mode:
         assert entries is not None
         resolved, pairs = _resolve_marks(redacted, entries)
-        json.dump(
-            {"text": resolved, "pairs": pairs, "found": list(dict.fromkeys(found))},
-            sys.stdout,
-        )
-        return
+        return {"text": resolved, "pairs": pairs, "found": list(dict.fromkeys(found))}
     if redacted == text:
-        return
+        return None
+    return {"text": redacted, "found": list(dict.fromkeys(found))}
 
-    json.dump({"text": redacted, "found": list(dict.fromkeys(found))}, sys.stdout)
+
+# ─── Long-lived daemon (--serve) ─────────────────────────────────────────────
+# Layer 4 (sanitize-output.mjs / rehydrate-redacted.mjs) hits this redactor once
+# per secret-shaped tool payload. Spawning a fresh interpreter and reloading the
+# detect-secrets plugin set every time is slow enough to time out under load, and
+# a single failure used to trip a session-wide fail-closed blackout. The daemon
+# pays that cost ONCE — configure the plugins, prime the mapping cache — then
+# serves each request as just a scan, so a transient stall fails only that one
+# call and the next succeeds.
+#
+# Wire protocol (both directions): a 4-byte big-endian unsigned length prefix
+# then that many bytes of UTF-8 JSON. Request: {"text", "map", "web_ingress"}.
+# Response: exactly what the CLI would write for the same input — handle_request's
+# object, or JSON null for the "nothing to redact" case.
+_FRAME_CAP = 16 * 1024 * 1024  # refuse absurd frames rather than buffer unbounded
+
+
+def _recv_exact(conn: socket.socket, n: int) -> bytes | None:
+    """Read exactly ``n`` bytes, or None if the peer closed/reset mid-frame."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _read_frame(conn: socket.socket) -> object | None:
+    """Decode one length-prefixed JSON frame, or None on a closed, short, or
+    over-cap connection (the caller fails that one request closed)."""
+    header = _recv_exact(conn, 4)
+    if header is None:
+        return None
+    (length,) = struct.unpack(">I", header)
+    if length > _FRAME_CAP:
+        return None
+    body = _recv_exact(conn, length)
+    if body is None:
+        return None
+    return json.loads(body.decode("utf-8"))
+
+
+def _write_frame(conn: socket.socket, obj: object) -> None:
+    body = json.dumps(obj).encode("utf-8")
+    conn.sendall(struct.pack(">I", len(body)) + body)
+
+
+def _serve_one(conn: socket.socket) -> None:
+    """Handle one connection: read a request frame, write the response frame. Any
+    per-connection fault closes only this connection — a malformed frame or a
+    dropped client must never take the daemon down (that is the blackout reborn)."""
+    global _ENV_OVERRIDE
+    try:
+        req = _read_frame(conn)
+        if not isinstance(req, dict):
+            return  # no/garbage request frame: just close this connection
+        env_secrets = req.get("env_secrets")
+        _ENV_OVERRIDE = env_secrets if isinstance(env_secrets, dict) else None
+        try:
+            result = handle_request(
+                str(req.get("text", "")),
+                bool(req.get("map", False)),
+                bool(req.get("web_ingress", False)),
+                _redact_core,
+            )
+        except Exception:  # noqa: BLE001 -- see below
+            # A genuine detection failure for THIS request: signal the client so it
+            # fails THAT call closed, but keep the daemon (and the rest of the
+            # session's redaction) alive — the whole reason the daemon exists is
+            # that one failure must not black out every later call.
+            _write_frame(conn, {"error": "redaction failed"})
+            return
+        _write_frame(conn, result)
+    except (OSError, ValueError):
+        # ValueError: malformed JSON body. OSError: socket reset mid-frame. Both
+        # are this client's problem; drop the connection and keep serving.
+        pass
+    finally:
+        _ENV_OVERRIDE = None  # never let one request's keys bleed into the next
+        conn.close()
+
+
+def _bind_or_exit(sock: socket.socket, socket_path: str) -> bool:
+    """Bind ``sock`` at ``socket_path``; the bind is the cross-process mutex that
+    makes the JS client's respawn idempotent. Return False (caller exits quietly)
+    when a LIVE daemon already owns the path; clear a STALE socket file (left by a
+    crashed daemon — AF_UNIX paths are not auto-removed) and rebind otherwise."""
+    try:
+        sock.bind(socket_path)
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise
+    else:
+        return True
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.connect(socket_path)
+    except OSError:
+        pass  # nobody listening: a stale socket file
+    else:
+        return False  # a live daemon answered; we lost the spawn race
+    finally:
+        probe.close()
+    os.unlink(socket_path)
+    sock.bind(socket_path)
+    return True
+
+
+def serve(socket_path: str, stop: threading.Event | None = None) -> None:
+    """Serve redactions over the Unix socket at ``socket_path`` until ``stop`` is
+    set (or forever).
+
+    Configures the detect-secrets plugin set ONCE and primes the mapping cache
+    with a warm-up scan BEFORE binding, so a bound socket implies a ready daemon
+    (the launcher gates handover on exactly that). Always the full PLUGINS set —
+    high_confidence is a startup-scan-only concern; see _redact_core. ``stop`` is
+    a graceful-shutdown seam for tests; production passes none and loops forever.
+    """
+    os.makedirs(os.path.dirname(socket_path) or ".", mode=0o700, exist_ok=True)
+    with transient_settings({"plugins_used": PLUGINS + CUSTOM_PLUGINS}):
+        get_mapping_from_secret_type_to_class.cache_clear()
+        _redact_core("warm up the detect-secrets mapping cache", None)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if not _bind_or_exit(sock, socket_path):
+            sock.close()
+            return
+        try:
+            os.chmod(socket_path, 0o600)
+            sock.listen(64)
+            sock.settimeout(0.5)
+            while not (stop is not None and stop.is_set()):
+                try:
+                    conn, _ = sock.accept()
+                except TimeoutError:
+                    continue
+                _serve_one(conn)
+        finally:
+            sock.close()
+            with contextlib.suppress(OSError):
+                os.unlink(socket_path)
+
+
+def main() -> None:
+    # argv[0] is the script path, never a flag, so [1:] vs [0:] are equivalent.
+    argv = sys.argv[1:]
+    if "--serve" in argv:
+        serve(argv[argv.index("--serve") + 1])
+        return
+    map_mode = "--map" in argv  # pragma: no mutate
+    web_ingress = "--web-ingress" in argv
+    result = handle_request(sys.stdin.read(), map_mode, web_ingress)
+    if result is not None:
+        json.dump(result, sys.stdout)
 
 
 # CLI entry guard; tests import the module, so __main__-guard mutants are unkillable.
