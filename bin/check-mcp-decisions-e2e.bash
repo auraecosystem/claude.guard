@@ -82,15 +82,19 @@ esac
 # The prompt's options are (CC 2.1.x):
 #   ❯ 1. Use this MCP server                                    ← default-highlighted
 #     2. Use this and all future MCP servers in this project
-# so per-server accepts the default with Enter alone, and all-future moves Down one
-# row then Enter to pick the blanket grant. Override either if a release reorders
-# them. The discover-or-fail-loud guard below means a wrong sequence fails with a
-# clear "tune MCP_E2E_APPROVE*_KEYS" message, never a silent pass.
+# per-server accepts the default with Enter alone. all-future must navigate Down one
+# row first, then confirm with Enter — split as two separate writes with a sleep so
+# the TUI finishes processing the escape sequence before Enter fires (sending them
+# atomically lets the carriage-return land before the multi-byte escape is parsed,
+# which confirms the default option 1 instead of option 2). Override either variable
+# if a release reorders the menu. The discover-or-fail-loud guard below means a wrong
+# sequence fails with a clear "tune MCP_E2E_APPROVE*_KEYS" message, never a silent pass.
 if [[ "$MCP_MODE" == all-future ]]; then
-  MCP_APPROVE_KEYS="${MCP_E2E_APPROVE_ALL_KEYS:-$'\x1b[B\r'}"
+  MCP_APPROVE_NAV_KEYS="${MCP_E2E_APPROVE_ALL_NAV_KEYS:-$'\x1b[B'}"
 else
-  MCP_APPROVE_KEYS="${MCP_E2E_APPROVE_KEYS:-$'\r'}"
+  MCP_APPROVE_NAV_KEYS="${MCP_E2E_APPROVE_NAV_KEYS:-}"
 fi
+MCP_APPROVE_CONFIRM_KEYS="${MCP_E2E_APPROVE_CONFIRM_KEYS:-$'\r'}"
 # Keystrokes that make interactive claude EXIT gracefully so its SessionEnd hook
 # runs (the capture this check depends on). Closing the pty's stdin writer is NOT
 # enough: the raw-mode TUI ignores stdin EOF, so an already-interactive session
@@ -244,6 +248,17 @@ dump_log_and_fail() { # $1=message $2=logfile
   exit 1
 }
 
+# Send the approval keystroke sequence to the live pty. Navigation (if any) is sent
+# first as a separate write, then a brief sleep lets the TUI parse the escape sequence
+# before the confirm keystroke arrives.
+send_approve_keys() {
+  if [[ -n "$MCP_APPROVE_NAV_KEYS" ]]; then
+    { printf '%s' "$MCP_APPROVE_NAV_KEYS" >&"$pty_fd"; } 2>/dev/null || return 0
+    sleep 0.3
+  fi
+  { printf '%s' "$MCP_APPROVE_CONFIRM_KEYS" >&"$pty_fd"; } 2>/dev/null || true
+}
+
 # On a SessionStart-fingerprint timeout the interactive launcher's pty log shows
 # only the orientation banners (the harness's TUI redraws over its own hook-error
 # lines), so it does not reveal WHY the hook wrote no file. Interrogate the live
@@ -333,7 +348,7 @@ echo "==> Session 1 container up: $APP1"
 KEY1="$(store_key_of "$APP1")"
 echo "==> Session 1 store key: $KEY1"
 
-echo "==> Driving the REAL MCP trust prompt in '$MCP_MODE' mode (keys: $(printf %q "$MCP_APPROVE_KEYS"))..."
+echo "==> Driving the REAL MCP trust prompt in '$MCP_MODE' mode (nav: $(printf %q "${MCP_APPROVE_NAV_KEYS:-<none>}") confirm: $(printf %q "$MCP_APPROVE_CONFIRM_KEYS"))..."
 # Send the approval keystrokes to the live session's stdin, then DISCOVER where the
 # harness recorded it — never assume a location. Poll the candidate files the harness
 # could use; fail loud if none records the grant (the prompt flow changed). The needle
@@ -341,20 +356,20 @@ echo "==> Driving the REAL MCP trust prompt in '$MCP_MODE' mode (keys: $(printf 
 # enableAllProjectMcpServers key (which carries no server name).
 if [[ "$MCP_MODE" == all-future ]]; then
   approval_needle="enableAllProjectMcpServers"
-  approve_keys_var="MCP_E2E_APPROVE_ALL_KEYS"
+  approve_keys_var="MCP_E2E_APPROVE_ALL_NAV_KEYS" # gitleaks:allow — env var name, not a secret
 else
   approval_needle="$PROBE_SERVER"
-  approve_keys_var="MCP_E2E_APPROVE_KEYS"
+  approve_keys_var="MCP_E2E_APPROVE_NAV_KEYS" # gitleaks:allow — env var name, not a secret
 fi
-printf '%s' "$MCP_APPROVE_KEYS" >&"$pty_fd"
+send_approve_keys
 approval_path=""
 deadline=$((SECONDS + 120))
 while ((SECONDS < deadline)); do
   approval_path="$(docker exec -u node "$APP1" sh -c \
     'grep -l '"$approval_needle $SETTINGS_IN_CONTAINER"' "$HOME/.claude.json" 2>/dev/null | head -1' 2>/dev/null || true)"
   [[ -n "$approval_path" ]] && break
-  # Re-send once after a settle, in case the prompt was not ready on the first write.
-  { printf '%s' "$MCP_APPROVE_KEYS" >&"$pty_fd"; } 2>/dev/null || true
+  # Re-send in case the prompt was not ready on the first write.
+  send_approve_keys
   sleep 5
 done
 if [[ -z "$approval_path" ]]; then
