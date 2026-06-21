@@ -212,7 +212,8 @@ def test_gate_fails_when_warm_handover_never_reached(chk):
 
 
 def test_gate_inactive_below_min_baseline(chk):
-    failed, reason = chk.evaluate_gate(_run(99.0, 99.0), _history(chk.MIN_BASELINE - 1))
+    # Normal (sub-threshold) means so neither series short-circuits as first-ever/broken.
+    failed, reason = chk.evaluate_gate(_run(9.0, 9.0), _history(chk.MIN_BASELINE - 1))
     assert failed is False
     assert reason.count("gate inactive") == 2  # both series inactive
 
@@ -233,15 +234,35 @@ def test_gate_fails_when_only_warm_regresses(chk):
 
 
 def test_gate_fails_when_only_cold_regresses(chk):
-    failed, reason = chk.evaluate_gate(_run(20.0, 2.4), _history(chk.MIN_BASELINE))
+    # A sub-threshold cold regression (still a normal boot, just slow) reds the gate.
+    failed, reason = chk.evaluate_gate(_run(9.0, 2.4), _history(chk.MIN_BASELINE))
     assert failed is True
-    assert "cold mean 20.0s exceeds" in reason
+    assert "cold mean 9.0s exceeds" in reason
+
+
+def test_first_ever_cold_run_is_not_gated(chk):
+    # A first-ever (>threshold) cold run is a one-time uncached spike, not a regression — it
+    # never reds the gate even against a full normal baseline.
+    failed, reason = chk.evaluate_gate(_run(26.0, 2.4), _history(chk.MIN_BASELINE))
+    assert failed is False
+    assert "cold first-ever boot 26.0s — not gated" in reason
+
+
+def test_first_ever_runs_excluded_from_cold_baseline(chk):
+    # First-ever spikes in the history must not inflate the cold baseline: the median is taken
+    # over only the normal runs, so a real sub-threshold regression still fails.
+    history = _history(chk.MIN_BASELINE) + [
+        _entry(f"spike{i}", cold_mean=30.0) for i in range(5)
+    ]
+    failed, reason = chk.evaluate_gate(_run(9.0, 2.4), history)
+    assert failed is True  # baseline stays ~6.6 (spikes dropped), threshold ~8.25
+    assert "cold mean 9.0s exceeds" in reason
 
 
 def test_gate_baseline_is_window_median_not_mean(chk):
-    # One slow historical cold run must not drag the baseline: the median of the last
-    # GATE_WINDOW run-means ignores the outlier, so a normal current run passes.
-    history = _history(chk.GATE_WINDOW - 1) + [_entry("slow", cold_mean=999.0)]
+    # One slow (but sub-threshold) historical cold run must not drag the baseline: the median
+    # of the last GATE_WINDOW run-means ignores the outlier, so a normal current run passes.
+    history = _history(chk.GATE_WINDOW - 1) + [_entry("slow", cold_mean=9.5)]
     failed, _ = chk.evaluate_gate(_run(8.0, 2.4), history)
     assert failed is False  # cold window median ~6.6, threshold ~8.25
 
@@ -251,7 +272,7 @@ def test_gate_baseline_ignores_entries_without_the_key(chk):
     # warm_mean_s) are not counted, so each series' baseline starts fresh and stays inactive
     # until 5 such runs exist.
     old = [{"commit_sha": f"{i}", "median_s": 5.0} for i in range(20)]
-    failed, reason = chk.evaluate_gate(_run(99.0, 99.0), old)
+    failed, reason = chk.evaluate_gate(_run(9.0, 9.0), old)
     assert failed is False
     assert reason.count("gate inactive") == 2
 
@@ -322,7 +343,7 @@ def test_generate_chart_two_series_titled_launch_time(chk, monkeypatch):
     result = chk.generate_chart([], _entry())
     assert result == "![Launch timing chart](URL)\n"
     assert cap["slug"] == "launch-timing"
-    assert cap["kw"]["title"] == "launch time"
+    assert cap["kw"]["title"] == "Launch Time"
     assert cap["kw"]["y_label"] == "mean seconds"
     by_label = {s.label: s for s in cap["series"]}
     assert set(by_label) == {"cold boot", "warm"}
@@ -332,20 +353,34 @@ def test_generate_chart_two_series_titled_launch_time(chk, monkeypatch):
     assert by_label["warm"].data[-1] == 2.0
 
 
-def test_cold_line_is_continuous_across_first_ever_spikes(chk, monkeypatch):
-    # A first-ever (>threshold) run stays on the single cold line — no separate series, no
-    # gap. The spike is charted as-is and only annotated in the comment text.
+def test_historical_first_ever_dropped_and_backfilled(chk, monkeypatch):
+    # First-ever (>threshold) HISTORY entries are removed before windowing, and the window
+    # backfills with older normal runs so the cold line shows only non-first-start boots.
     cap = _capture_publish(chk, monkeypatch)
-    cached = _entry(sha="cache00", cold_mean=6.6)
-    spike = _entry(sha="firsts0", cold_mean=26.0)
-    chk.generate_chart([cached], spike)
+    history = [
+        _entry(sha="old0000", cold_mean=6.0),
+        _entry(sha="spike00", cold_mean=30.0),  # first-ever: dropped + backfilled away
+        _entry(sha="prev000", cold_mean=6.5),
+    ]
+    chk.generate_chart(history, _entry(sha="cur0000", cold_mean=6.6))
     by_label = {s.label: s for s in cap["series"]}
-    assert "first-ever" not in by_label
-    # Both points on one continuous line (no gap where the old green series broke it).
-    assert by_label["cold boot"].data == [6.6, 26.0]
-    # band is (lows, highs) across the window; the spike's CI is retained, not dropped.
-    assert by_label["cold boot"].band[0] == pytest.approx([6.3, 25.7])
-    assert by_label["cold boot"].band[1] == pytest.approx([6.9, 26.3])
+    # The 30.0 spike never appears; the cold line is the three normal runs, continuous.
+    assert by_label["cold boot"].data == [6.0, 6.5, 6.6]
+    assert 30.0 not in by_label["cold boot"].data
+    assert cap["labels"] == ["old0000", "prev000", "now"]
+
+
+def test_current_first_ever_run_off_the_cold_line(chk, monkeypatch):
+    # When the CURRENT run is itself a first-ever boot, its cold point/band drop to None (the
+    # spike is text-only); the warm point and the "now" tick still show.
+    cap = _capture_publish(chk, monkeypatch)
+    chk.generate_chart(
+        [_entry(sha="prev000", cold_mean=6.5)], _entry(sha="cur0000", cold_mean=26.0)
+    )
+    by_label = {s.label: s for s in cap["series"]}
+    assert by_label["cold boot"].data == [6.5, None]  # current spike off the line
+    assert by_label["cold boot"].band[0][1] is None  # and its band dropped too
+    assert by_label["warm"].data[-1] == 2.0  # warm "now" point still present
 
 
 def test_generate_chart_gate_lines_match_series_colors(chk, monkeypatch):
@@ -548,17 +583,32 @@ def test_main_update_appends_both_series(chk, monkeypatch, tmp_path, capsys):
 def test_main_update_gates_and_still_appends_on_regression(chk, monkeypatch, tmp_path):
     # The push-to-main path enforces the gate (reds main on a regression in either series)
     # AND records the run, so the rolling baseline moves with reality.
-    slow = {"reps": 5, "cold": {**_COLD, "mean_s": 60.0}, "warm": _WARM}
+    slow = {"reps": 5, "cold": {**_COLD, "mean_s": 9.0}, "warm": _WARM}
     monkeypatch.setattr(chk, "run_bench", lambda reps, cold_only=False: slow)
     history = tmp_path / "history.json"
     history.write_text(json.dumps(_history(chk.MIN_BASELINE)))
     rc = chk.main(
         ["--update", "--history-json", str(history), "--commit-sha", "deadbee"]
     )
-    assert rc == 1  # cold 60.0 >> 1.25 × baseline median 6.6
+    assert rc == 1  # cold 9.0 > 1.25 × baseline median 6.6 (8.25)
     saved = json.loads(history.read_text())
     assert len(saved) == chk.MIN_BASELINE + 1
-    assert saved[-1]["mean_s"] == 60.0
+    assert saved[-1]["mean_s"] == 9.0
+
+
+def test_main_update_records_first_ever_without_reding(chk, monkeypatch, tmp_path):
+    # A first-ever (>threshold) cold run on push-to-main is recorded for the trend but does
+    # NOT red the gate — it is an uncached one-time boot, not a regression.
+    first_ever = {"reps": 5, "cold": {**_COLD, "mean_s": 30.0}, "warm": _WARM}
+    monkeypatch.setattr(chk, "run_bench", lambda reps, cold_only=False: first_ever)
+    history = tmp_path / "history.json"
+    history.write_text(json.dumps(_history(chk.MIN_BASELINE)))
+    rc = chk.main(
+        ["--update", "--history-json", str(history), "--commit-sha", "deadbee"]
+    )
+    assert rc == 0  # not gated
+    saved = json.loads(history.read_text())
+    assert saved[-1]["mean_s"] == 30.0  # still recorded
 
 
 def test_main_cold_only_update_records_cold_series(chk, monkeypatch, tmp_path, capsys):

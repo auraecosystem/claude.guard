@@ -12,8 +12,9 @@ freshly-booted pre-warmed spare, skipping the cold build) in red, and the COLD l
 (pre-warm disabled — the full image-resolve + boot a fresh launch pays) in ice blue. The
 cold series continues the pre-existing `mean_s` history, so every legacy point reads as a
 cold launch; warm is the new `warm_mean_s` series. A cold run over `_FIRST_EVER_THRESHOLD_S`
-is a first-ever (fully uncached) boot — the comment flags it in text as a transient spike
-rather than splitting it onto its own line. For each run it then:
+is a first-ever (fully uncached) boot — a one-time spike, not a normal boot — so it is
+dropped from the cold line and its gate (the window backfills with older normal runs) and
+flagged in the comment text instead. For each run it then:
 
 - appends both means (+ each one's CI) to a rolling history kept on the `perf-history`
   data branch (`bin/persist-perf-history.sh`),
@@ -78,9 +79,9 @@ _COLD_LABEL_COLOR = "#31889b"
 _WARM_COLOR = "#d9534f"
 _WARM_LABEL_COLOR = "#b54440"
 
-# A cold mean over this many seconds is a first-ever (fully uncached) boot — a transient
-# spike on the cold line, not a regression. The comment calls it out in text rather than
-# splitting it onto its own series.
+# A cold mean over this many seconds is a first-ever (fully uncached) boot — a one-time
+# spike, not a normal cold boot. It is excluded from the cold line and its gate baseline
+# (both backfill with older normal runs) and called out in the comment text instead.
 _FIRST_EVER_THRESHOLD_S = 10.0
 
 # Shared with the other perf gates; bin/lib is not a package.
@@ -165,6 +166,21 @@ def make_history_entry(summary: dict, commit_sha: str) -> dict:
     return entry
 
 
+def _is_first_ever(entry: dict) -> bool:
+    """True when this entry's cold run is a first-ever (fully uncached) boot — a cold mean
+    over `_FIRST_EVER_THRESHOLD_S`. Such a run is a one-time spike, not a normal boot, so the
+    cold line and its gate exclude it and the comment flags it in text instead."""
+    mean = entry.get("mean_s")
+    return mean is not None and mean > _FIRST_EVER_THRESHOLD_S
+
+
+def _normal_cold(history: list) -> list:
+    """`history` with first-ever boots dropped, so the cold series and its gate baseline see
+    only normal non-first-start boots; the chart window and the rolling median backfill with
+    older normal runs to stay full. Warm-only legacy entries (no cold mean) are kept."""
+    return [e for e in history if not _is_first_ever(e)]
+
+
 def gate_baseline(history: list, mean_key: str = "mean_s") -> tuple[float | None, int]:
     """`(baseline, count)` for one series' gate: the median of the last `GATE_WINDOW`
     persisted run-means under `mean_key`, or `None` when fewer than `MIN_BASELINE` exist
@@ -197,10 +213,19 @@ def _gate_side(current_mean: float, history: list, mean_key: str) -> tuple[bool,
     )
 
 
+def _gate_cold(cold_mean: float, history: list) -> tuple[bool, str]:
+    """The cold side of the gate. A first-ever boot is a one-time fully-uncached spike, not a
+    regression, so it never reds the gate; any other run is compared against the rolling
+    median of only the normal (non-first-start) cold runs."""
+    if cold_mean > _FIRST_EVER_THRESHOLD_S:
+        return False, f"first-ever boot {cold_mean}s — not gated"
+    return _gate_side(cold_mean, _normal_cold(history), "mean_s")
+
+
 def evaluate_gate(summary: dict, history: list) -> tuple[bool, str]:
     """`(failed, reason)` for this run: each series gated against its own rolling baseline,
     and the run fails if EITHER the cold or the warm series regresses."""
-    cold_failed, cold_reason = _gate_side(summary["cold"]["mean_s"], history, "mean_s")
+    cold_failed, cold_reason = _gate_cold(summary["cold"]["mean_s"], history)
     if summary["warm"] is None:  # cold-only run (the backfill)
         return cold_failed, f"cold {cold_reason}"
     warm_failed, warm_reason = _gate_side(
@@ -214,6 +239,15 @@ def _band_for(lo_key: str, hi_key: str) -> Callable[[dict], tuple]:
     `(None, None)` when absent (a single-rep run, or an entry predating that series) so that
     point draws no band."""
     return lambda entry: (entry.get(lo_key), entry.get(hi_key))
+
+
+def _cold_band(entry: dict) -> tuple:
+    """The cold CI bounds, dropped to `(None, None)` for a first-ever boot so neither its
+    point nor its band sits on the cold line. Only the current run can still be first-ever
+    here — `generate_chart`/`publish_chart` already filter first-ever out of the history."""
+    if _is_first_ever(entry):
+        return (None, None)
+    return (entry.get("ci_low_s"), entry.get("ci_high_s"))
 
 
 def _gate_hline(
@@ -235,9 +269,10 @@ def _gate_hline(
 def _render_chart(history: list, window: list, x_labels: list) -> str:
     """A quickchart line of the cold (ice blue) and warm (red) mean invocation->handover
     totals over `window`, each shaded with its bootstrap 95% CI and drawn against its own
-    colour-matched gate threshold line. Returns "" when no run in `window` carries either
-    mean (nothing to plot)."""
-    cold_pts = [e.get("mean_s") for e in window]
+    colour-matched gate threshold line. First-ever boots are off the cold line (the window is
+    pre-filtered; a first-ever current run is dropped to None here too). Returns "" when no
+    run in `window` carries either mean (nothing to plot)."""
+    cold_pts = [None if _is_first_ever(e) else e.get("mean_s") for e in window]
     warm_pts = [e.get("warm_mean_s") for e in window]
     if not any(v is not None for v in cold_pts + warm_pts):
         return ""
@@ -246,7 +281,7 @@ def _render_chart(history: list, window: list, x_labels: list) -> str:
             "cold boot",
             cold_pts,
             _COLD_COLOR,
-            band=quickchart.make_band(window, _band_for("ci_low_s", "ci_high_s")),
+            band=quickchart.make_band(window, _cold_band),
         ),
         quickchart.Series(
             "warm",
@@ -260,7 +295,13 @@ def _render_chart(history: list, window: list, x_labels: list) -> str:
     hlines = [
         h
         for h in (
-            _gate_hline(history, "mean_s", "cold boot", _COLD_COLOR, _COLD_LABEL_COLOR),
+            _gate_hline(
+                _normal_cold(history),
+                "mean_s",
+                "cold boot",
+                _COLD_COLOR,
+                _COLD_LABEL_COLOR,
+            ),
             _gate_hline(history, "warm_mean_s", "warm", _WARM_COLOR, _WARM_LABEL_COLOR),
         )
         if h is not None
@@ -270,7 +311,7 @@ def _render_chart(history: list, window: list, x_labels: list) -> str:
         x_labels,
         series,
         alt="Launch timing chart",
-        title="launch time",
+        title="Launch Time",
         y_label="mean seconds",
         begin_at_zero=False,
         hline=hlines or None,
@@ -280,21 +321,24 @@ def _render_chart(history: list, window: list, x_labels: list) -> str:
 
 
 def generate_chart(history: list, current_entry: dict) -> str:
-    """The PR-comment trend: the last CHART_WINDOW runs with the current run as the
-    rightmost "now" point."""
-    window = perf_history.chart_window(history, current_entry, CHART_WINDOW)
+    """The PR-comment trend: the last CHART_WINDOW non-first-start runs with the current run
+    as the rightmost "now" point. First-ever boots are dropped before windowing, so the cold
+    line backfills with older normal runs rather than spiking."""
+    window = perf_history.chart_window(
+        _normal_cold(history), current_entry, CHART_WINDOW
+    )
     return _render_chart(history, window, perf_report.x_labels(window))
 
 
 def publish_chart(history: list) -> str:
-    """Render the canonical README trend (last CHART_WINDOW persisted runs, each x-tick
-    named by the commit it was measured at) and upload it to its stable hosting URL, which
-    the README embeds statically. Returns that markdown embed.
+    """Render the canonical README trend (last CHART_WINDOW persisted non-first-start runs,
+    each x-tick named by the commit it was measured at) and upload it to its stable hosting
+    URL, which the README embeds statically. Returns that markdown embed.
 
     The README is never rewritten: `main`'s ruleset rejects bot pushes, so the chart
     updates by re-uploading the SVG to a fixed object key, not by committing new markdown.
     Returns "" when no run carries a mean (nothing to plot)."""
-    window = history[-CHART_WINDOW:]
+    window = _normal_cold(history)[-CHART_WINDOW:]
     x_labels = [perf_report.short_sha(e.get("commit_sha"), empty="?") for e in window]
     return _render_chart(history, window, x_labels)
 
@@ -328,8 +372,8 @@ def _first_ever_note(cold: dict) -> str:
     if cold["mean_s"] <= _FIRST_EVER_THRESHOLD_S:
         return ""
     return (
-        f"> **Note:** this cold run ({cold['mean_s']}s) is a **first-ever** boot — a fully uncached "
-        f"first launch, a transient spike rather than a regression.\n\n"
+        f"> **Note:** this cold run ({cold['mean_s']}s) is a **first-ever** boot — "
+        f"a fully uncached first launch, a transient spike rather than a regression.\n\n"
     )
 
 
