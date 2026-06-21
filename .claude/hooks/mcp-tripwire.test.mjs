@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -1084,6 +1084,88 @@ describe("mcp-tripwire: captureSessionEnd", () => {
     const record = JSON.parse(readFileSync(store, "utf-8"))[project];
     assert.equal(record.enableAll, true);
     assert.equal(record.servers.srv.decision, "approved");
+  });
+});
+
+// The marker-gated diagnostic is internal (driven through captureSessionEnd), so it is
+// exercised here rather than imported directly: a `.mcp-capture-debug-on` file beside the
+// decisions store turns on a `mcp-capture-debug.json` dump that the live e2e reads.
+describe("mcp-tripwire: writeCaptureDebug (capture diagnostic)", () => {
+  let dir;
+  let project;
+  let store;
+  const writeMcp = (servers) =>
+    writeFileSync(
+      join(project, ".mcp.json"),
+      JSON.stringify({ mcpServers: servers }),
+    );
+  const armMarker = () => writeFileSync(join(dir, ".mcp-capture-debug-on"), "");
+  const debugPath = () => join(dir, "mcp-capture-debug.json");
+  const readDebug = () => JSON.parse(readFileSync(debugPath(), "utf-8"));
+  const deps = (extra = {}) => ({
+    env: { CLAUDE_GUARD_MCP_DECISIONS: store, HOME: dir, ...extra },
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mcp-capdbg-"));
+    project = join(dir, "repo");
+    mkdirSync(project);
+    store = join(dir, "decisions.json");
+    writeMcp({ srv: STDIO_DEF });
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("writes nothing when the marker is absent", () => {
+    writeFileSync(join(dir, ".claude.json"), JSON.stringify({ projects: {} }));
+    captureSessionEnd({ cwd: project }, deps());
+    assert.ok(!existsSync(debugPath()));
+  });
+
+  it("dumps project keys, captured servers, and a blanket grant when armed", () => {
+    armMarker();
+    writeFileSync(
+      join(dir, ".claude.json"),
+      JSON.stringify({
+        projects: {
+          [project]: { enableAllProjectMcpServers: true },
+          "/some/other/repo": {},
+        },
+      }),
+    );
+    captureSessionEnd({ cwd: project }, deps());
+    const dump = readDebug();
+    assert.equal(dump.projectDir, project);
+    assert.equal(dump.home, dir);
+    assert.deepEqual(dump.userJsonProjectsKeys.sort(), [
+      "/some/other/repo",
+      project,
+    ]);
+    assert.deepEqual(dump.capturedServers, ["srv"]);
+    assert.equal(dump.enableAll, true);
+    assert.equal(typeof dump.ranAt, "string");
+  });
+
+  it("reports empty project keys and no blanket grant for a null ~/.claude.json", () => {
+    armMarker();
+    writeFileSync(join(dir, ".claude.json"), "null");
+    captureSessionEnd({ cwd: project }, deps());
+    const dump = readDebug();
+    assert.deepEqual(dump.userJsonProjectsKeys, []);
+    assert.equal(dump.enableAll, false);
+    assert.deepEqual(dump.capturedServers, []);
+  });
+
+  it("marks the project keys unreadable when ~/.claude.json is missing or malformed", () => {
+    armMarker();
+    // No ~/.claude.json in HOME at all → readFileSync throws → "<unreadable>".
+    captureSessionEnd({ cwd: project }, deps());
+    assert.deepEqual(readDebug().userJsonProjectsKeys, ["<unreadable>"]);
+  });
+
+  it("falls back to os.homedir() when env carries no HOME", () => {
+    armMarker();
+    captureSessionEnd({ cwd: project }, deps({ HOME: undefined }));
+    assert.equal(readDebug().home, homedir());
   });
 });
 

@@ -395,28 +395,17 @@ for _ in 1 2 3; do
   sleep 3
 done
 
-# DIAG (temporary): the grant lands on the tmpfs $HOME's ~/.claude.json only when CC
-# flushes on exit, and that file is gone once the launcher tears the container down — so
-# the single observable window is between "exit keys sent" and "container removed". Send
-# the exit keys ourselves, then race the teardown with a tight docker-exec read to learn
-# (a) whether CC flushes the grant at all on this exit chord, and (b) the exact projects[]
-# key it uses — the two facts that decide why SessionEnd capture saw nothing.
-echo "==> DIAG: sending exit keys, probing ~/.claude.json during shutdown before teardown..." >&2
-{ printf '%s' "$MCP_EXIT_KEYS" >&"$pty_fd"; } 2>/dev/null || true
-diag_snap=""
-for ((_i = 0; _i < 80; _i++)); do
-  diag_snap="$(docker exec -u node -w /workspace "$APP1" sh -c 'cat "$HOME/.claude.json" 2>/dev/null' 2>/dev/null || true)"
-  [[ "$diag_snap" == *enabledMcpjsonServers* || "$diag_snap" == *"$PROBE_SERVER"* ]] && break
-  sleep 0.25
-done
-echo "----- DIAG: ~/.claude.json observed during shutdown -----" >&2
-if [[ "$diag_snap" == *enabledMcpjsonServers* || "$diag_snap" == *"$PROBE_SERVER"* ]]; then
-  printf '%s\n' "$diag_snap" | head -c 6000 >&2
-else
-  echo "(never observed the grant in ~/.claude.json before the container went away — last snapshot below)" >&2
-  printf '%s\n' "${diag_snap:-<empty/unreadable>}" | head -c 2000 >&2
-fi
-echo >&2
+# Arm the SessionEnd capture diagnostic before hangup: a `.mcp-capture-debug-on` marker
+# beside the durable decisions store turns on a mcp-capture-debug.json dump in the capture
+# hook. After teardown its mere PRESENCE proves SessionEnd fired on this exit chord (the
+# break the unit tests can't see), and its contents show which ~/.claude.json projects[]
+# key the approval lived under vs. the project dir capture looked up. Only path keys and
+# MCP server names are dumped — never a token or credential value. The marker lives on the
+# shared durable volume, so it is disarmed right after the dump is read (below) to keep a
+# real dev machine's volume from dumping on every later session.
+echo "==> Arming the SessionEnd capture diagnostic marker on the live container..."
+docker exec -u node "$APP1" touch /var/cache/claude-mcp/.mcp-capture-debug-on ||
+  cg_warn "WARNING: could not arm the capture-debug marker; the diagnostic dump will be absent."
 
 echo "==> Hanging up to trigger SessionEnd + a real ephemeral teardown..."
 hangup_and_wait ||
@@ -425,11 +414,27 @@ echo "==> Session 1 teardown complete."
 
 echo "==> Check 1: SessionEnd captured the approval to the durable $DECISIONS_VOLUME volume..."
 # The session's own volumes are gone; the external decision volume survives, so a
-# throwaway container can read what capture persisted.
+# throwaway container can read what capture persisted AND the capture diagnostic dump.
 decisions_json="$(docker run --rm -v "$DECISIONS_VOLUME":/v busybox \
   sh -c 'cat /v/decisions.json 2>/dev/null' || true)"
+capture_debug="$(docker run --rm -v "$DECISIONS_VOLUME":/v busybox \
+  sh -c 'cat /v/mcp-capture-debug.json 2>/dev/null' || true)"
+# Disarm so a dev machine's shared volume does not keep dumping on every later session.
+docker run --rm -v "$DECISIONS_VOLUME":/v busybox \
+  rm -f /v/.mcp-capture-debug-on >/dev/null 2>&1 || true
+# Print the capture diagnostic: absent ⇒ SessionEnd never fired on the exit chord;
+# present ⇒ it fired, and userJsonProjectsKeys vs. projectDir reveal a key mismatch.
+print_capture_debug() {
+  echo "----- capture diagnostic (mcp-capture-debug.json) -----" >&2
+  if [[ -n "$capture_debug" ]]; then
+    printf '%s\n' "$capture_debug" >&2
+  else
+    echo "(absent — the SessionEnd capture hook never ran on teardown: the exit chord did not fire SessionEnd, so no mid-session approval can ever be captured)" >&2
+  fi
+}
 if [[ -z "$decisions_json" ]]; then
   cg_error "FAIL: $DECISIONS_VOLUME holds no decisions.json after teardown. The SessionEnd hook did not fire, or capture did not read where Claude Code records the grant (~/.claude.json projects[<cwd>], issue #24657), so mid-session approvals are lost every launch."
+  print_capture_debug
   exit 1
 fi
 # The blanket grant persists as .enableAll=true (it has no single server to key on,
@@ -440,6 +445,7 @@ if [[ "$MCP_MODE" == all-future ]]; then
   if [[ "$enable_all" != "true" ]]; then
     cg_error "FAIL: capture stored enableAll='$enable_all' for [$KEY1], expected 'true'. The harness recorded the blanket grant somewhere the capture path does not read, or under a different key. Store contents:"
     printf '%s\n' "$decisions_json" >&2
+    print_capture_debug
     exit 1
   fi
   echo "    OK — capture persisted the real blanket grant across teardown."
@@ -449,6 +455,7 @@ else
   if [[ "$decision" != "approved" ]]; then
     cg_error "FAIL: capture stored decision='$decision' for [$KEY1].servers[$PROBE_SERVER], expected 'approved'. The harness records approvals somewhere the capture path does not read, or under a different key. Store contents:"
     printf '%s\n' "$decisions_json" >&2
+    print_capture_debug
     exit 1
   fi
   echo "    OK — capture persisted the real approval across teardown."

@@ -1031,6 +1031,51 @@ export function mergeDecisionSources(...sources) {
 }
 
 /**
+ * Marker-gated capture diagnostic for the live e2e (bin/check-mcp-decisions-e2e.bash).
+ * Writes nothing unless a `.mcp-capture-debug-on` file sits beside the durable decisions
+ * store; the harness creates that marker on the running container just before hangup, so
+ * the dump's mere existence proves SessionEnd actually fired on teardown (the failure the
+ * unit tests can't see). The dump records what capture saw: the keys under ~/.claude.json
+ * `projects` (a project-key mismatch shows here), this project's user-store decisions, and
+ * the captured record — only path keys and MCP approve/reject server NAMES, never a token
+ * or credential value. So it distinguishes "SessionEnd never fired" (no file) from "fired
+ * but the approval lived under a different projects key" (file present, keys mismatch) from
+ * "fired and captured nothing" (file present, empty record).
+ * @param {string} decisionsPath
+ * @param {string} projectDir
+ * @param {NodeJS.ProcessEnv} env
+ * @param {object} userStore readUserStoreDecisions result for projectDir
+ * @param {{ servers: Record<string, unknown>, enableAll?: true }} record
+ */
+function writeCaptureDebug(decisionsPath, projectDir, env, userStore, record) {
+  const dir = dirname(decisionsPath);
+  if (!existsSync(join(dir, ".mcp-capture-debug-on"))) return;
+  const home = env.HOME || homedir();
+  let userJsonProjectsKeys;
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(home, ".claude.json"), "utf-8"),
+    );
+    userJsonProjectsKeys = Object.keys(parsed?.projects ?? {});
+  } catch {
+    userJsonProjectsKeys = ["<unreadable>"];
+  }
+  const debug = {
+    ranAt: new Date().toISOString(),
+    projectDir,
+    home,
+    userJsonProjectsKeys,
+    userStoreForProjectDir: userStore,
+    capturedServers: Object.keys(record.servers),
+    enableAll: record.enableAll === true,
+  };
+  writeFileSync(
+    join(dir, "mcp-capture-debug.json"),
+    JSON.stringify(debug, null, 2),
+  );
+}
+
+/**
  * SessionEnd capture: record the harness's final approve/reject state for this project
  * into the durable cross-session store, so the next session can rehydrate it (decisions
  * are made mid-session, after SessionStart has run, so SessionEnd is the moment to read
@@ -1061,16 +1106,11 @@ export function captureSessionEnd(input, { env = process.env } = {}) {
   const projectSettings = existsSync(settingsPath)
     ? JSON.parse(readFileSync(settingsPath, "utf-8"))
     : {};
-  const settings = mergeDecisionSources(
-    projectSettings,
-    readUserStoreDecisions(projectDir, env),
-  );
-  return persistDecisions(
-    decisionsPath,
-    decisions,
-    storeKey,
-    captureDecisions(settings, servers),
-  );
+  const userStore = readUserStoreDecisions(projectDir, env);
+  const settings = mergeDecisionSources(projectSettings, userStore);
+  const record = captureDecisions(settings, servers);
+  writeCaptureDebug(decisionsPath, projectDir, env, userStore, record);
+  return persistDecisions(decisionsPath, decisions, storeKey, record);
 }
 
 /**
