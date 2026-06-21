@@ -28,7 +28,20 @@ import {
   OPTIONAL_WORKFLOWS_PERMISSION,
   createGuidance,
   suggestSubcommand,
+  manifestFlowAvailable,
+  appName,
+  homepageUrl,
 } from "../bin/lib/github-app/cli.mjs";
+import {
+  manifestPermissions,
+  manifestActionUrl,
+  buildManifest,
+  autoSubmitPage,
+  readCallbackCode,
+  makeRequestHandler,
+  exchangeManifestCode,
+  runManifestFlow,
+} from "../bin/lib/github-app/manifest.mjs";
 import * as kc from "../bin/lib/github-app/keychain.mjs";
 import * as storage from "../bin/lib/github-app/storage.mjs";
 
@@ -1251,4 +1264,438 @@ test("keychain: an unknown CLAUDE_GH_APP_KEYCHAIN throws, not silently falls bac
     () => kc.probeBackend(),
     /unknown CLAUDE_GH_APP_KEYCHAIN "bogus"/,
   );
+});
+
+// --- manifest flow: builder, CSRF/callback, conversions, loopback ---
+
+// A throwaway private key string for conversion stubs: exchangeManifestCode only
+// checks it contains "PRIVATE KEY", never signs with it, so a literal is enough.
+const FAKE_PEM =
+  "-----BEGIN PRIVATE KEY-----\nFAKEKEYBODY\n-----END PRIVATE KEY-----\n";
+
+// Set/restore one env var around a single test.
+function setEnv(t, key, value) {
+  const prev = process.env[key];
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+  t.after(() => {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  });
+}
+
+// A minimal http.ServerResponse stand-in capturing what the handler wrote.
+function mockRes() {
+  return {
+    statusCode: null,
+    headers: null,
+    body: null,
+    writeHead(status, headers) {
+      this.statusCode = status;
+      this.headers = headers;
+    },
+    end(body) {
+      this.body = body;
+    },
+  };
+}
+
+// Act as the user's browser against the live loopback: fetch the served page,
+// extract the round-tripped `state`, then GET the callback as GitHub would.
+async function driveBrowser(localUrl, { code = "THECODE", badState } = {}) {
+  const html = await (await fetch(localUrl)).text();
+  const state = badState ?? html.match(/state=([0-9a-f]+)/)[1];
+  const base = localUrl.replace(/\/+$/, "");
+  await fetch(`${base}/callback?code=${code}&state=${state}`);
+}
+
+test("manifest: maps APP_PERMISSIONS to snake_case write keys", () => {
+  assert.deepEqual(manifestPermissions(APP_PERMISSIONS), {
+    contents: "write",
+    issues: "write",
+    pull_requests: "write",
+  });
+  // A read-only level maps to "read", not "write".
+  assert.deepEqual(manifestPermissions([["Contents", "Read-only"]]), {
+    contents: "read",
+  });
+});
+
+test("manifest: buildManifest is the exact pre-filled App spec", () => {
+  assert.deepEqual(
+    buildManifest({
+      name: "claude-guard-x",
+      url: "https://example.com",
+      redirectUrl: "http://127.0.0.1:5000/callback",
+      permissions: APP_PERMISSIONS,
+    }),
+    {
+      name: "claude-guard-x",
+      url: "https://example.com",
+      public: false,
+      hook_attributes: { active: false },
+      default_permissions: {
+        contents: "write",
+        issues: "write",
+        pull_requests: "write",
+      },
+      redirect_url: "http://127.0.0.1:5000/callback",
+    },
+  );
+});
+
+test("manifest: action URL is account- or org-scoped and carries state", () => {
+  assert.equal(
+    manifestActionUrl({ state: "abc" }),
+    "https://github.com/settings/apps/new?state=abc",
+  );
+  assert.equal(
+    manifestActionUrl({ org: "acme", state: "abc" }),
+    "https://github.com/organizations/acme/settings/apps/new?state=abc",
+  );
+});
+
+test("manifest: auto-submit page embeds the manifest, HTML-escaped", () => {
+  const page = autoSubmitPage({
+    actionUrl: "https://github.com/settings/apps/new?state=S",
+    manifest: { name: "a<b>&\"q'" },
+  });
+  assert.match(
+    page,
+    /action="https:\/\/github.com\/settings\/apps\/new\?state=S"/,
+  );
+  assert.match(page, /Create GitHub App/);
+  // The manifest's dangerous characters are escaped, never emitted raw.
+  assert.ok(page.includes("&lt;b&gt;"));
+  assert.ok(page.includes("&amp;"));
+  assert.ok(page.includes("&quot;"));
+  assert.ok(page.includes("&#39;"));
+  assert.ok(!page.includes("<b>"));
+});
+
+test("manifest: readCallbackCode returns code on a matching state", () => {
+  const params = new URLSearchParams("code=THECODE&state=S");
+  assert.equal(readCallbackCode({ params, expectedState: "S" }), "THECODE");
+});
+
+test("manifest: readCallbackCode rejects a mismatched state (CSRF)", () => {
+  const params = new URLSearchParams("code=THECODE&state=WRONG");
+  assert.throws(
+    () => readCallbackCode({ params, expectedState: "S" }),
+    /CSRF check: state did not match/,
+  );
+});
+
+test("manifest: readCallbackCode rejects a missing code", () => {
+  const params = new URLSearchParams("state=S");
+  assert.throws(
+    () => readCallbackCode({ params, expectedState: "S" }),
+    /had no code/,
+  );
+});
+
+test("manifest: request handler serves the auto-submit page at /", () => {
+  let resolved = false;
+  let rejected = false;
+  const handler = makeRequestHandler({
+    state: "S",
+    actionUrl: "https://github.com/settings/apps/new?state=S",
+    manifest: { name: "n" },
+    resolve: () => {
+      resolved = true;
+    },
+    reject: () => {
+      rejected = true;
+    },
+  });
+  const res = mockRes();
+  handler({ url: "/" }, res);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.headers["content-type"], /text\/html/);
+  assert.match(res.body, /Create GitHub App/);
+  assert.equal(resolved, false);
+  assert.equal(rejected, false);
+  // A request with no url defaults to "/" and serves the same page.
+  const res2 = mockRes();
+  handler({}, res2);
+  assert.equal(res2.statusCode, 200);
+  assert.match(res2.body, /Create GitHub App/);
+});
+
+test("manifest: request handler captures code + resolves on a good callback", () => {
+  let captured;
+  const res = mockRes();
+  const handler = makeRequestHandler({
+    state: "S",
+    actionUrl: "x",
+    manifest: {},
+    resolve: (code) => {
+      captured = code;
+    },
+    reject: () => assert.fail("should not reject"),
+  });
+  handler({ url: "/callback?code=ABC&state=S" }, res);
+  assert.equal(captured, "ABC");
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body, /close this tab/);
+});
+
+test("manifest: request handler rejects + 400s on a forged callback", () => {
+  let err;
+  const res = mockRes();
+  const handler = makeRequestHandler({
+    state: "S",
+    actionUrl: "x",
+    manifest: {},
+    resolve: () => assert.fail("should not resolve"),
+    reject: (e) => {
+      err = e;
+    },
+  });
+  handler({ url: "/callback?code=ABC&state=NOPE" }, res);
+  assert.match(err.message, /state did not match/);
+  assert.equal(res.statusCode, 400);
+});
+
+test("manifest: request handler 404s an unknown path", () => {
+  const res = mockRes();
+  const handler = makeRequestHandler({
+    state: "S",
+    actionUrl: "x",
+    manifest: {},
+    resolve: () => assert.fail("no resolve"),
+    reject: () => assert.fail("no reject"),
+  });
+  handler({ url: "/nope" }, res);
+  assert.equal(res.statusCode, 404);
+  assert.match(res.body, /not found/);
+});
+
+test("manifest: exchangeManifestCode POSTs the code unauthenticated, returns creds", async () => {
+  let seen;
+  const fetchImpl = async (url, init) => {
+    seen = { url: String(url), init };
+    return fakeResponse({
+      json: { id: 7, slug: "made", name: "Made", html_url: "h", pem: FAKE_PEM },
+    });
+  };
+  const out = await exchangeManifestCode("CODE123", { fetchImpl });
+  assert.equal(out.id, 7);
+  assert.match(seen.url, /\/app-manifests\/CODE123\/conversions$/);
+  assert.equal(seen.init.method, "POST");
+  // The code IS the credential — there must be no Authorization header.
+  assert.equal(seen.init.headers.authorization, undefined);
+});
+
+test("manifest: exchangeManifestCode surfaces a non-2xx, stores nothing", async () => {
+  const fetchImpl = async () =>
+    fakeResponse({
+      ok: false,
+      status: 422,
+      statusText: "Unprocessable",
+      json: { message: "bad code" },
+    });
+  await assert.rejects(
+    () => exchangeManifestCode("CODE", { fetchImpl }),
+    /manifest conversion failed: 422/,
+  );
+});
+
+for (const [name, json, rx] of [
+  ["no id", { pem: FAKE_PEM }, /no valid App id/],
+  ["non-positive id", { id: 0, pem: FAKE_PEM }, /no valid App id/],
+  ["no pem", { id: 5 }, /no private key/],
+  ["pem isn't a key", { id: 5, pem: "not-a-key" }, /no private key/],
+]) {
+  test(`manifest: exchangeManifestCode rejects a response with ${name}`, async () => {
+    const fetchImpl = async () => fakeResponse({ json });
+    await assert.rejects(() => exchangeManifestCode("CODE", { fetchImpl }), rx);
+  });
+}
+
+test("manifest: runManifestFlow drives the real loopback to the conversion", async (t) => {
+  setNoBrowser(t, "1"); // openBrowser is a no-op; our `open` drives instead.
+  let conversion;
+  const fetchImpl = async (url, init) => {
+    conversion = { url: String(url), init };
+    return fakeResponse({
+      json: {
+        id: 42,
+        slug: "made",
+        name: "Made",
+        html_url: "h",
+        pem: FAKE_PEM,
+      },
+    });
+  };
+  const app = await runManifestFlow({
+    name: "claude-guard-x",
+    url: "https://example.com",
+    permissions: APP_PERMISSIONS,
+    fetchImpl,
+    open: (localUrl) => void driveBrowser(localUrl, { code: "LOOPCODE" }),
+  });
+  assert.equal(app.id, 42);
+  assert.match(conversion.url, /\/app-manifests\/LOOPCODE\/conversions$/);
+});
+
+test("manifest: runManifestFlow rejects when the callback state is forged", async (t) => {
+  setNoBrowser(t, "1");
+  let exchanged = false;
+  await assert.rejects(
+    () =>
+      runManifestFlow({
+        name: "claude-guard-x",
+        url: "https://example.com",
+        permissions: APP_PERMISSIONS,
+        fetchImpl: async () => {
+          exchanged = true;
+          return fakeResponse({ json: { id: 1, pem: FAKE_PEM } });
+        },
+        open: (localUrl) => void driveBrowser(localUrl, { badState: "forged" }),
+      }),
+    /state did not match/,
+  );
+  // A forged callback never reaches the conversion exchange.
+  assert.equal(exchanged, false);
+});
+
+test("manifest: runManifestFlow times out a callback that never arrives", async (t) => {
+  setNoBrowser(t, "1");
+  setEnv(t, "CLAUDE_GH_APP_MANIFEST_TIMEOUT_MS", "20");
+  let exchanged = false;
+  await assert.rejects(
+    () =>
+      runManifestFlow({
+        name: "claude-guard-x",
+        url: "https://example.com",
+        permissions: APP_PERMISSIONS,
+        fetchImpl: async () => {
+          exchanged = true;
+          return fakeResponse({ json: { id: 1, pem: FAKE_PEM } });
+        },
+        // The "browser" never drives the callback, so only the deadline fires.
+        open: () => {},
+      }),
+    /Timed out waiting for the GitHub App/,
+  );
+  assert.equal(exchanged, false);
+});
+
+// --- manifestFlowAvailable: the manifest-vs-manual decision ---
+
+for (const tc of [
+  {
+    name: "NO_BROWSER=1 forces manual",
+    platform: "darwin",
+    noBrowser: "1",
+    display: undefined,
+    wayland: undefined,
+    expect: false,
+  },
+  {
+    name: "a desktop (darwin) can one-click",
+    platform: "darwin",
+    noBrowser: undefined,
+    display: undefined,
+    wayland: undefined,
+    expect: true,
+  },
+  {
+    name: "headless linux falls back to manual",
+    platform: "linux",
+    noBrowser: undefined,
+    display: undefined,
+    wayland: undefined,
+    expect: false,
+  },
+  {
+    name: "linux with DISPLAY can one-click",
+    platform: "linux",
+    noBrowser: undefined,
+    display: ":0",
+    wayland: undefined,
+    expect: true,
+  },
+  {
+    name: "linux under Wayland can one-click",
+    platform: "linux",
+    noBrowser: undefined,
+    display: undefined,
+    wayland: "wayland-0",
+    expect: true,
+  },
+]) {
+  test(`manifest: manifestFlowAvailable — ${tc.name}`, (t) => {
+    stubPlatform(t, tc.platform);
+    setNoBrowser(t, tc.noBrowser);
+    setEnv(t, "DISPLAY", tc.display);
+    setEnv(t, "WAYLAND_DISPLAY", tc.wayland);
+    assert.equal(manifestFlowAvailable(), tc.expect);
+  });
+}
+
+test("manifest: appName/homepageUrl default and honor overrides", () => {
+  assert.match(appName({}), /^claude-guard-[0-9a-f]{8}$/);
+  assert.equal(appName({ name: "my-app" }), "my-app");
+  assert.equal(
+    homepageUrl({}),
+    "https://github.com/alexander-turner/claude-guard",
+  );
+  assert.equal(
+    homepageUrl({ url: "https://example.com" }),
+    "https://example.com",
+  );
+});
+
+// --- cli: one-click create via the manifest flow (real loopback, fake browser) ---
+
+// A fake xdg-open: a node shim on PATH that, given the loopback URL, fetches the
+// served page, extracts `state`, and GETs the callback like GitHub would. Lets
+// the create subprocess complete the manifest flow without a real browser.
+async function fakeBrowserBin(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fakebrowser-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const script = `#!/usr/bin/env node
+(async () => {
+  const url = process.argv[2];
+  const html = await (await fetch(url)).text();
+  const m = html.match(/state=([0-9a-f]+)/);
+  const base = url.replace(/\\/+$/, "");
+  await fetch(base + "/callback?code=mfcode&state=" + m[1]);
+})().catch((e) => { console.error(e); process.exit(1); });
+`;
+  await fs.writeFile(path.join(dir, "xdg-open"), script, { mode: 0o755 });
+  return dir;
+}
+
+const CONVERSIONS_STUB =
+  `async()=>({ok:true,status:200,statusText:"OK",json:async()=>(` +
+  `{id:99,slug:"made",name:"Made",html_url:"https://github.com/apps/made",` +
+  `pem:"-----BEGIN PRIVATE KEY-----\\nFAKE\\n-----END PRIVATE KEY-----\\n",` +
+  `client_id:"c",client_secret:"s",webhook_secret:"w"}),text:async()=>""})`;
+
+test("cli: create one-click stores only app_id + pem (no client/webhook secret)", async (t) => {
+  const dir = await cliXdg(t);
+  const bin = await fakeBrowserBin(t);
+  const r = await runCli(["create"], {
+    env: {
+      XDG_CONFIG_HOME: dir,
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      DISPLAY: ":99", // makes manifestFlowAvailable() pick the one-click path
+      CLAUDE_GH_APP_NO_BROWSER: "",
+    },
+    fetchStub: CONVERSIONS_STUB,
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /Saved App "made"/);
+  process.env.XDG_CONFIG_HOME = dir;
+  const meta = await storage.readMeta();
+  assert.equal(meta.app_id, 99);
+  assert.equal(meta.app_slug, "made");
+  assert.equal(meta.html_url, "https://github.com/apps/made");
+  // Only app metadata + pem are persisted — never the unused secrets.
+  assert.equal(meta.client_secret, undefined);
+  assert.equal(meta.webhook_secret, undefined);
+  assert.ok((await storage.readPem()).includes("PRIVATE KEY"));
 });

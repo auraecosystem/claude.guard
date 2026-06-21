@@ -1,11 +1,13 @@
 // Dispatcher for `claude-github-app <subcommand>`. See bin/claude-github-app.
 
+import crypto from "node:crypto";
 import readline from "node:readline/promises";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { stdin, stdout, stderr, argv, exit } from "node:process";
 import { openBrowser } from "./browser.mjs";
+import { runManifestFlow } from "./manifest.mjs";
 import {
   mintInstallationToken,
   fetchAppMetadata,
@@ -293,17 +295,26 @@ async function promptForPem(ask, detected) {
   return pem;
 }
 
-// Step-by-step instructions for creating the App by hand on github.com.
-/** @param {string} newAppUrl */
-export function createGuidance(newAppUrl) {
+// The new-App settings page, account- or org-scoped, that the manual
+// walkthrough opens and the manifest flow POSTs to.
+/** @param {string | undefined} org */
+function newAppUrl(org) {
+  return org
+    ? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new`
+    : "https://github.com/settings/apps/new";
+}
+
+// Step-by-step instructions for creating the App by hand on github.com — the
+// fallback shown when the one-click manifest flow isn't available here.
+/** @param {string} url */
+export function createGuidance(url) {
   const perms = APP_PERMISSIONS.map(
     ([label, level]) => `       - ${label}: ${level}`,
   ).join("\n");
   const [wfLabel, wfLevel] = OPTIONAL_WORKFLOWS_PERMISSION;
-  return `Create a GitHub App in your account. GitHub only accepts the App settings
-same-site, so this can't be automated from a loopback page — do it by hand:
+  return `Create a GitHub App in your account by hand:
 
-  1. Open: ${newAppUrl}
+  1. Open: ${url}
   2. Fill in:
        - GitHub App name: any unique name
        - Homepage URL: any URL (e.g. your repo)
@@ -325,20 +336,83 @@ file and paste the key's text straight into the prompt below instead.
 `;
 }
 
-// Walk the user through creating their own GitHub App on github.com, then store
-// the App ID + downloaded private key. Done by hand rather than via a manifest
-// POST: that POST is cross-site to github.com, so the browser strips GitHub's
-// SameSite=Lax session cookie and the request lands logged-out.
+// Persist the App's id + key (+ slug/html_url/name) and point the user at the
+// install step. Shared by the manifest and manual create paths.
+/** @param {{ appId: number, slug: string, html_url: string, name: string, pem: string }} app */
+async function persistApp({ appId, slug, html_url, name, pem }) {
+  await saveAppCreds({
+    meta: { app_id: appId, app_slug: slug, html_url, name },
+    pem,
+  });
+  stderr.write(
+    `Saved App "${slug}" (id=${appId}). Next: claude-github-app install\n`,
+  );
+}
+
+// One-click manifest create needs a browser that can navigate this machine's
+// loopback callback. A headless/SSH/no-DISPLAY host (or CLAUDE_GH_APP_NO_BROWSER)
+// can't, so it falls back to the manual walkthrough instead.
+/** @returns {boolean} */
+export function manifestFlowAvailable() {
+  if (process.env.CLAUDE_GH_APP_NO_BROWSER === "1") return false;
+  if (
+    process.platform === "linux" &&
+    !process.env.DISPLAY &&
+    !process.env.WAYLAND_DISPLAY
+  ) {
+    return false;
+  }
+  return true;
+}
+
+// The App's name (must be globally unique on GitHub) and homepage URL the
+// manifest pre-fills, overridable with --name / --url.
 /** @param {Record<string, string | boolean>} flags */
-async function cmdCreate(flags) {
-  const org = valueFlag(flags, "org");
-  const newAppUrl = org
-    ? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new`
-    : "https://github.com/settings/apps/new";
-  stderr.write(createGuidance(newAppUrl));
+export function appName(flags) {
+  return (
+    valueFlag(flags, "name") ??
+    `claude-guard-${crypto.randomBytes(4).toString("hex")}`
+  );
+}
+/** @param {Record<string, string | boolean>} flags */
+export function homepageUrl(flags) {
+  return (
+    valueFlag(flags, "url") ??
+    "https://github.com/alexander-turner/claude-guard"
+  );
+}
+
+// One-click create via GitHub's App-manifest flow: pre-fill every setting,
+// open the browser to a loopback page that POSTs the manifest to GitHub, and
+// take back the App's id + private key from the conversion. The user's only
+// step is clicking "Create GitHub App". Stores nothing on any failure.
+/** @param {Record<string, string | boolean>} flags */
+async function manifestCreate(flags) {
+  const app = await runManifestFlow({
+    org: valueFlag(flags, "org"),
+    name: appName(flags),
+    url: homepageUrl(flags),
+    permissions: APP_PERMISSIONS,
+  });
+  await persistApp({
+    appId: app.id,
+    slug: app.slug,
+    html_url: app.html_url,
+    name: app.name,
+    pem: app.pem,
+  });
+}
+
+// Walk the user through creating their own GitHub App by hand on github.com,
+// then store the App ID + private key. The fallback for hosts where the
+// one-click manifest flow can't reach the loopback callback.
+/** @param {string | undefined} org */
+async function manualCreate(org) {
+  const url = newAppUrl(org);
+  stderr.write(createGuidance(url));
   const { appId, pem } = await withPrompts(async (ask) => {
     await ask("Press Enter to open the GitHub App creation page...");
-    openBrowser(newAppUrl);
+    openBrowser(url);
     // Validate the App ID before prompting for the key so a typo fails here,
     // cheaply, rather than after reading a file or capturing a pasted block.
     const id = Number((await ask("App ID: ")).trim());
@@ -352,18 +426,26 @@ async function cmdCreate(flags) {
   // ID (a mismatch 401s here, before anything is stored) and yields the slug +
   // html_url the install step needs — no extra prompt.
   const app = await fetchAppMetadata({ appId, pem });
-  await saveAppCreds({
-    meta: {
-      app_id: appId,
-      app_slug: app.slug,
-      html_url: app.html_url,
-      name: app.name,
-    },
+  await persistApp({
+    appId,
+    slug: app.slug,
+    html_url: app.html_url,
+    name: app.name,
     pem,
   });
-  stderr.write(
-    `Saved App "${app.slug}" (id=${appId}). Next: claude-github-app install\n`,
-  );
+}
+
+// Create the App: one-click via the manifest flow where a browser can reach the
+// loopback callback, else the manual walkthrough. A manifest attempt that does
+// start fails loud rather than silently downgrading — only an unavailable flow
+// falls back.
+/** @param {Record<string, string | boolean>} flags */
+async function cmdCreate(flags) {
+  if (manifestFlowAvailable()) {
+    await manifestCreate(flags);
+    return;
+  }
+  await manualCreate(valueFlag(flags, "org"));
 }
 
 // How long to wait for the user to finish the browser install before giving up.
