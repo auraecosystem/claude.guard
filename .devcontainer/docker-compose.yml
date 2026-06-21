@@ -305,17 +305,13 @@ services:
       # path that delivers the guardrail hooks to a FOREIGN workspace that vendors no
       # .claude/settings.json — without the shared volume the hardener's write lands
       # in its own throwaway layer and the app's baked /etc/claude-code stays empty.
+      # Keyed per-session (CLAUDE_VOLUME_ID) so a stale file from a prior session
+      # never leaks: the hardener always regenerates it fresh.
       - managed-settings:/etc/claude-code
       # Writable here so the root hardener can chown/chmod the shared spend volume
       # to root:1000 mode 2770 before the agent's first tool call (entrypoint.bash);
       # the monitor and app mount the same volume rw/ro respectively.
       - monitor-spend:/run/monitor-spend
-      # Writable here so the root hardener can write managed-settings.json into it
-      # (entrypoint.bash → merge-user-settings.sh); the app mounts the same volume
-      # read-only, giving Claude Code the managed hooks without needing to touch its
-      # own read-only rootfs. Keyed per-session (CLAUDE_VOLUME_ID) so a stale file
-      # from a prior session never leaks: the hardener always regenerates it fresh.
-      - managed-settings:/etc/claude-code
       # Mounted here only so the root hardener can chown the persistent MCP-decision
       # volume to the node user before the agent runs (entrypoint.bash); the app
       # mounts the same volume to read/write it.
@@ -720,9 +716,9 @@ services:
       # container only IDLES here (devcontainer overrideCommand) — the agent is exec'd in
       # by the launcher at HANDOVER, never by the app's own command — so a running-but-
       # unhardened app cannot run the agent. The completion gate is re-imposed on the host
-      # BEFORE handover (bin/lib/launch.bash wait_for_hardening_or_abort: it blocks on the
-      # /run/hardening/complete sentinel and fails closed if the hardener exits non-zero or
-      # the sentinel never appears), and the in-container monitor-dispatch hook independently
+      # BEFORE handover (bin/lib/launch.bash await_preflight_then_verify_guardrails: it blocks
+      # on the /run/hardening/complete sentinel and fails closed if the hardener exits non-zero
+      # or the sentinel never appears), and the in-container monitor-dispatch hook independently
       # denies EVERY tool call until that same sentinel exists. So the "agent never runs
       # before hardening completes" invariant holds via two independent gates, while the
       # app's boot no longer waits for the hardener. (started, not "no depends_on": the app
@@ -740,7 +736,7 @@ services:
         # host before handover (bin/lib/launch.bash wait_for_firewall_healthy_or_abort,
         # which blocks until the firewall's healthcheck passes and fails closed on
         # timeout/crash), mirroring how the hardener-completion gate moved host-side
-        # (wait_for_hardening_or_abort). The agent still never runs before the
+        # (await_preflight_then_verify_guardrails). The agent still never runs before the
         # firewall is healthy.
         condition: service_started
       audit:

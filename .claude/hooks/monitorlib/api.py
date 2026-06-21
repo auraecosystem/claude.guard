@@ -350,8 +350,11 @@ def _anthropic_blocks(data: dict) -> list:
     only dict blocks so a malformed block can't raise AttributeError/TypeError,
     which would escape call_api (it only converts RuntimeError) and crash the
     hook — leaving the tool call unmonitored. Anthropic is the default provider,
-    so this guard matters most."""
-    blocks = data.get("content")
+    so this guard matters most. ``data`` itself can be a non-dict too: _request
+    decodes the body with json.loads and a compromised proxy can return a
+    top-level JSON array/scalar (``null``, ``[…]``, ``42``), so guard it here —
+    .get on a non-dict raises the same fail-open AttributeError."""
+    blocks = data.get("content") if isinstance(data, dict) else None
     return blocks if isinstance(blocks, list) else []
 
 
@@ -360,8 +363,10 @@ def _openai_message(data: dict) -> dict:
     ``choices``/``message`` is missing or malformed (a content-filter/upstream
     error can return ``[]`` or ``[None]``). Callers treat {} as an empty
     completion and fail CLOSED rather than letting a raise escape call_api (which
-    only converts RuntimeError) and crash the hook unmonitored."""
-    choices = data.get("choices")
+    only converts RuntimeError) and crash the hook unmonitored. ``data`` itself
+    can be a non-dict (a top-level JSON array/scalar from a compromised proxy),
+    so guard it the same way — see _anthropic_blocks."""
+    choices = data.get("choices") if isinstance(data, dict) else None
     first = choices[0] if isinstance(choices, list) and choices else {}
     message = first.get("message") if isinstance(first, dict) else None
     return message if isinstance(message, dict) else {}
@@ -417,21 +422,24 @@ def _coerce_int(value: Any) -> int:
     """int(value), or 0 on anything non-numeric (a string, list, None).
 
     Defensive like the verdict/text extractors, and for the same reason: parse_usage
-    runs OUTSIDE _request's try/except, so a ValueError/TypeError raised here (e.g.
-    int("abc") from a malformed usage field) would escape call_api — which only
-    converts RuntimeError — and crash the hook fail-OPEN, leaving the tool call
-    unmonitored. Token counts only feed cost accounting, so 0 on garbage is safe."""
+    runs OUTSIDE _request's try/except, so an exception raised here (e.g. int("abc")
+    from a malformed usage field) would escape call_api — which only converts
+    RuntimeError — and crash the hook fail-OPEN, leaving the tool call unmonitored.
+    json.loads accepts Infinity/NaN by default, and int(float("inf")) raises
+    OverflowError (not ValueError), so that is caught too. Token counts only feed
+    cost accounting, so 0 on garbage is safe."""
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
 def _anthropic_usage(data: dict) -> ApiUsage:
     """Normalized token usage from an Anthropic Messages response.
 
-    Tolerates a non-dict ``usage`` or non-numeric token fields (see _coerce_int)."""
-    usage = data.get("usage")
+    Tolerates a non-dict ``usage`` or non-numeric token fields (see _coerce_int),
+    and a non-dict ``data`` (top-level JSON array/scalar — see _anthropic_blocks)."""
+    usage = data.get("usage") if isinstance(data, dict) else None
     usage = usage if isinstance(usage, dict) else {}
     return ApiUsage(
         input_tokens=_coerce_int(usage.get("input_tokens")),
@@ -447,8 +455,9 @@ def _openai_usage(data: dict) -> ApiUsage:
     OpenRouter). OpenRouter returns usage.cost in USD when the request set
     usage.include=true; others omit it (no prompt-cache fields on this wire).
 
-    Tolerates a non-dict ``usage`` or non-numeric token fields (see _coerce_int)."""
-    usage = data.get("usage")
+    Tolerates a non-dict ``usage`` or non-numeric token fields (see _coerce_int),
+    and a non-dict ``data`` (top-level JSON array/scalar — see _anthropic_blocks)."""
+    usage = data.get("usage") if isinstance(data, dict) else None
     usage = usage if isinstance(usage, dict) else {}
     cost = usage.get("cost")
     return ApiUsage(
