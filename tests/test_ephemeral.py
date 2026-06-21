@@ -618,6 +618,10 @@ esac
         # fake docker (whose rubber-stamp ps/inspect would otherwise look like a spare).
         "CLAUDE_GUARD_NO_PREWARM": "1",
         "CLAUDE_NO_PREWARM_REAP": "1",
+        # Not a seed-mode test: pin the classic read-only bind mount so the ephemeral
+        # /workspace, auth, resume, and teardown paths under test aren't reshaped by the
+        # now-default seed/extract round-trip (covered by the seed suites + the gVisor e2e).
+        "CLAUDE_GUARD_NO_WORKTREE_SEED": "1",
         **env_overrides,
     }
     r = subprocess.run(
@@ -713,6 +717,10 @@ esac
         # fake docker (whose rubber-stamp ps/inspect would otherwise look like a spare).
         "CLAUDE_GUARD_NO_PREWARM": "1",
         "CLAUDE_NO_PREWARM_REAP": "1",
+        # Not a seed-mode test: pin the classic read-only bind mount so the ephemeral
+        # /workspace, auth, resume, and teardown paths under test aren't reshaped by the
+        # now-default seed/extract round-trip (covered by the seed suites + the gVisor e2e).
+        "CLAUDE_GUARD_NO_WORKTREE_SEED": "1",
     }
     for k in ("DANGEROUSLY_SKIP_SANDBOX", "DEVCONTAINER", "CLAUDE_CODE_OAUTH_TOKEN"):
         env.pop(k, None)
@@ -928,6 +936,10 @@ esac
         # fake docker (whose rubber-stamp ps/inspect would otherwise look like a spare).
         "CLAUDE_GUARD_NO_PREWARM": "1",
         "CLAUDE_NO_PREWARM_REAP": "1",
+        # Not a seed-mode test: pin the classic read-only bind mount so the ephemeral
+        # /workspace, auth, resume, and teardown paths under test aren't reshaped by the
+        # now-default seed/extract round-trip (covered by the seed suites + the gVisor e2e).
+        "CLAUDE_GUARD_NO_WORKTREE_SEED": "1",
     }
     env.pop("DANGEROUSLY_SKIP_SANDBOX", None)
     env.pop("DEVCONTAINER", None)
@@ -978,6 +990,10 @@ def _run_wrapper(
         # fake docker (whose rubber-stamp ps/inspect would otherwise look like a spare).
         "CLAUDE_GUARD_NO_PREWARM": "1",
         "CLAUDE_NO_PREWARM_REAP": "1",
+        # Not a seed-mode test: pin the classic read-only bind mount so the ephemeral
+        # /workspace, auth, resume, and teardown paths under test aren't reshaped by the
+        # now-default seed/extract round-trip (covered by the seed suites + the gVisor e2e).
+        "CLAUDE_GUARD_NO_WORKTREE_SEED": "1",
     }
     for k in ("DANGEROUSLY_SKIP_SANDBOX", "DEVCONTAINER", "CLAUDE_CODE_OAUTH_TOKEN"):
         env.pop(k, None)

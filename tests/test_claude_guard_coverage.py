@@ -27,6 +27,7 @@ from tests._helpers import (
     SQUID_EGRESS_MIXED,
     audit_volume_name,
     egress_volume_name,
+    init_test_repo,
     mirror_path_excluding,
     run_capture,
     run_pty,
@@ -405,6 +406,12 @@ def _container_env(tmp_path: Path, **overrides: str) -> tuple[Path, Path, dict]:
         # controlled fake docker to exercise adoption/replenish/reap explicitly.
         "CLAUDE_GUARD_NO_PREWARM": "1",
         "CLAUDE_NO_PREWARM_REAP": "1",
+        # Seed mode is the shipped default in a git checkout, but it changes the whole
+        # workspace-delivery shape (named-volume /workspace, seed/extract round-trip). The
+        # many launcher tests here are about other concerns (auth, guardrails, monitor),
+        # so the shared harness pins the classic read-only bind mount; the seed-specific
+        # tests below opt back into the default by overriding this to "".
+        "CLAUDE_GUARD_NO_WORKTREE_SEED": "1",
         # The interactive (pty) launches below would otherwise hit the automatic
         # stay-current check (a real `git fetch` of the install checkout); pin it
         # off so these tests stay hermetic. self-update is covered on its own in
@@ -1172,25 +1179,25 @@ def _seed_repo(tmp_path: Path) -> None:
 
 
 def test_container_worktree_seed_mode_remaps_workspace(tmp_path: Path) -> None:
-    """CLAUDE_GUARD_WORKTREE_SEED=1 (EXPERIMENTAL workspace-agnostic boot) writes the
-    seed-mode session override that re-points /workspace to the empty `workspace-seed`
-    named volume, stages this checkout's tracked working tree as a seed tar (exported via
-    CLAUDE_GUARD_SEED_TAR), and at teardown extracts the in-sandbox repo onto a reviewable
-    claude/seed-* host branch — which must exist after the launch completes."""
+    """Seed mode is the resolved default in a git checkout (no opt-in flag): the launch
+    writes the seed-mode session override that re-points /workspace to the empty
+    `workspace-seed` named volume, stages this checkout's tracked working tree as a seed tar
+    (exported via CLAUDE_GUARD_SEED_TAR), and at teardown extracts the in-sandbox repo onto
+    a reviewable claude/seed-* host branch — which must exist after the launch completes."""
     _seed_repo(tmp_path)
     _write_settings(tmp_path, {})
     cache = tmp_path / "xdgcache"
     trace = tmp_path / "trace.jsonl"
     _, _, env = _container_env(
         tmp_path,
-        CLAUDE_GUARD_WORKTREE_SEED="1",
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",  # opt back into the default seed mode
         XDG_CACHE_HOME=str(cache),
         CLAUDE_GUARD_TRACE="info",
         CLAUDE_GUARD_TRACE_FILE=str(trace),
     )
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert "CLAUDE_GUARD_WORKTREE_SEED=1" in r.stderr
+    assert "seed mode" in r.stderr
     assert "claude/seed-* branch" in r.stderr
     assert "LAUNCHED-CLAUDE" in r.stdout
     assert "the agent's work is on branch claude/seed-" in r.stderr
@@ -1220,13 +1227,209 @@ def test_container_worktree_seed_mode_keeps_volume_when_extract_fails(
     _seed_repo(tmp_path)
     _write_settings(tmp_path, {})
     _, _, env = _container_env(
-        tmp_path, CLAUDE_GUARD_WORKTREE_SEED="1", FAKE_SEED_EXTRACT_FAIL="1"
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="", FAKE_SEED_EXTRACT_FAIL="1"
     )
     r = _run_container(tmp_path, env)
     assert r.returncode != 0
     assert "LAUNCHED-CLAUDE" in r.stdout  # the session ran before teardown failed
     assert "could not extract the agent's work" in r.stderr
     assert "KEEPING this session's volume" in r.stderr
+
+
+def _overmount_override(cache: Path) -> str:
+    """The single per-session compose override the launch rendered under `cache`."""
+    overrides = list(cache.glob("claude-monitor/devcontainer/*/overmounts.yml"))
+    assert len(overrides) == 1, overrides
+    return overrides[0].read_text()
+
+
+def _assert_bind_mode(r: object, cache: Path, tmp_path: Path) -> None:
+    """A launch that chose the classic read-only bind mount: no seed override, no claude/seed
+    branch, and the session still reached claude."""
+    assert r.returncode == 0, r.stderr  # type: ignore[attr-defined]
+    assert "LAUNCHED-CLAUDE" in r.stdout  # type: ignore[attr-defined]
+    assert "workspace-seed:/workspace" not in _overmount_override(cache)
+    branches = subprocess.run(
+        ["git", "-C", str(tmp_path), "branch", "--list", "claude/seed-*"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert branches.strip() == "", branches
+
+
+def test_container_opt_out_uses_bind_mount(tmp_path: Path) -> None:
+    """CLAUDE_GUARD_NO_WORKTREE_SEED=1 opts a git checkout back into the classic read-only
+    bind mount: the seed override is not written and no claude/seed-* branch is created."""
+    _seed_repo(tmp_path)
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="1", XDG_CACHE_HOME=str(cache)
+    )
+    _assert_bind_mode(_run_container(tmp_path, env), cache, tmp_path)
+
+
+def test_container_non_git_dir_falls_back_to_bind(tmp_path: Path) -> None:
+    """No git checkout ⇒ nothing coherent to seed, so the launch falls back to the bind
+    mount even with seed mode enabled (the default)."""
+    work = tmp_path / "plain"  # NOT a git repo
+    work.mkdir()
+    _write_settings(work, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="", XDG_CACHE_HOME=str(cache)
+    )
+    r = _run_container(work, env)  # not a git repo, so no seed branch to check
+    assert r.returncode == 0, r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    assert "workspace-seed:/workspace" not in _overmount_override(cache)
+
+
+def test_container_repo_without_commit_falls_back_to_bind(tmp_path: Path) -> None:
+    """A fresh `git init` with nothing committed (no HEAD) can't anchor the seed/extract
+    round-trip, so the launch falls back to the direct mount instead of dying on
+    `git rev-parse HEAD`."""
+    init_test_repo(tmp_path)  # git init, no commit → unborn HEAD
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="", XDG_CACHE_HOME=str(cache)
+    )
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    assert "workspace-seed:/workspace" not in _overmount_override(cache)
+
+
+def test_container_subtree_workspace_falls_back_to_bind(tmp_path: Path) -> None:
+    """CLAUDE_WORKSPACE pointing at a sub-tree (workspace != repo root) falls back to the
+    bind mount: seeding the whole repo would mount the wrong tree."""
+    _seed_repo(tmp_path)
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    (sub / "f.txt").write_text("x\n")
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path,
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",
+        CLAUDE_WORKSPACE=str(sub),
+        XDG_CACHE_HOME=str(cache),
+    )
+    _assert_bind_mode(_run_container(tmp_path, env), cache, tmp_path)
+
+
+def test_container_explicit_worktree_request_falls_back_to_bind(tmp_path: Path) -> None:
+    """CLAUDE_WORKTREE=1 is an explicit per-session bind-path isolation request, so the
+    launch honours it with the bind mount rather than silently ignoring it under seed mode."""
+    _seed_repo(tmp_path)
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path,
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",
+        CLAUDE_WORKTREE="1",
+        XDG_CACHE_HOME=str(cache),
+    )
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "workspace-seed:/workspace" not in _overmount_override(cache)
+
+
+def test_container_seed_mode_survives_deleted_tracked_file(tmp_path: Path) -> None:
+    """A tracked file the user deleted on disk (plain `rm`, not `git rm`) is listed by
+    `git ls-files` but can't be tar'd. Since seed is the default, the seed-tar build
+    must DROP it rather than abort — otherwise a routine `rm` aborts the whole launch.
+    The launch completes and the reviewable branch still lands on the host."""
+    _seed_repo(tmp_path)
+    (tmp_path / "doomed.txt").write_text("delete me\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "add"], check=True)
+    (tmp_path / "doomed.txt").unlink()  # tracked, but gone from disk at launch
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="", XDG_CACHE_HOME=str(cache)
+    )
+    r = _run_container(tmp_path, env)
+    # The routine deletion no longer aborts the launch.
+    assert r.returncode == 0, r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    assert "workspace-seed:/workspace" in _overmount_override(cache)
+    branches = subprocess.run(
+        ["git", "-C", str(tmp_path), "branch", "--list", "claude/seed-*"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "claude/seed-" in branches, branches
+
+
+def test_container_seed_mode_from_subdir_maps_cwd_and_extracts(tmp_path: Path) -> None:
+    """Launched from a sub-directory of the repo (cwd != repo root): seed mode still
+    resolves (workspace_folder is the repo root), the container starts at the matching
+    /workspace/<subdir>, and the agent's work is extracted onto a reviewable branch
+    anchored at the repo root — not the subdir."""
+    _seed_repo(tmp_path)
+    sub = tmp_path / "pkg" / "inner"
+    sub.mkdir(parents=True)
+    (sub / "f.txt").write_text("x\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "sub"], check=True)
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, log, env = _container_env(
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="", XDG_CACHE_HOME=str(cache)
+    )
+    r = _run_container(sub, env)  # run from the sub-directory
+    assert r.returncode == 0, r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    assert "workspace-seed:/workspace" in _overmount_override(cache)
+    # The handover `docker exec -w <cwd>` maps the host subdir to /workspace/<relpath>,
+    # not the repo root — proving cwd resolution is relative to the seeded workspace root.
+    assert "-w /workspace/pkg/inner " in log.read_text()
+    # The reviewable branch lands on the repo (anchored at the toplevel, not the subdir).
+    branches = subprocess.run(
+        ["git", "-C", str(tmp_path), "branch", "--list", "claude/seed-*"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "claude/seed-" in branches, branches
+
+
+def test_container_seed_mode_two_launches_make_distinct_branches(
+    tmp_path: Path,
+) -> None:
+    """Two seed-mode sessions in the SAME repo must not collide: each ephemeral session
+    gets its own throwaway volume and lands its work on a DISTINCT claude/seed-* branch
+    (the branch name is keyed on the launcher pid + timestamp), so concurrent agents in
+    one repo never overwrite each other's extracted work."""
+    _seed_repo(tmp_path)
+    _write_settings(tmp_path, {})
+    cache = tmp_path / "xdgcache"
+    _, _, env = _container_env(
+        tmp_path, CLAUDE_GUARD_NO_WORKTREE_SEED="", XDG_CACHE_HOME=str(cache)
+    )
+    assert _run_container(tmp_path, env).returncode == 0
+    assert _run_container(tmp_path, env).returncode == 0
+    branches = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "branch",
+            "--list",
+            "claude/seed-*",
+            "--format=%(refname:short)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert len(branches) == 2, branches  # two distinct branches, no collision
+    assert len(set(branches)) == 2, branches
 
 
 def test_container_aborts_when_guardrail_writable(tmp_path: Path) -> None:
