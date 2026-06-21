@@ -134,7 +134,7 @@ uninstall_managed_settings() {
   # Find backup files created by merge-user-settings.sh (newest-first via sort -r).
   # Command substitution + here-string (not `< <(find …)`): a process substitution
   # runs in a subshell kcov's DEBUG trap can't trace, so the find line never counts.
-  local oldest_backup='' all_backups=() found
+  local oldest_backup='' all_backups=() found line bak
   found="$(find "$(dirname "$out")" -maxdepth 1 -name "$(basename "$out").bak.*" 2>/dev/null | sort -r)"
   while IFS= read -r line; do [[ -n "$line" ]] && all_backups+=("$line"); done <<<"$found"
   [[ ${#all_backups[@]} -gt 0 ]] && oldest_backup="${all_backups[${#all_backups[@]} - 1]}"
@@ -221,7 +221,7 @@ purge_images_and_volumes() {
 
   # Assign to a var first, then feed via here-string (not `< <(...)`): a process
   # substitution runs in a subshell kcov's DEBUG trap can't trace.
-  local removed_images=0 removed_volumes=0 ref vol images vols
+  local removed_images=0 removed_volumes=0 ref vol images vols shared
   images="$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)"
   while IFS= read -r ref; do
     [[ -n "$ref" ]] || continue
@@ -256,6 +256,7 @@ purge_images_and_volumes() {
 run_uninstall() {
   status "Uninstalling claude-guard..."
 
+  local script
   # Wrapper symlinks (only ours).
   for script in "${WRAPPER_SCRIPTS[@]}"; do
     remove_repo_symlink "$HOME/.local/bin/$script" "$script"
