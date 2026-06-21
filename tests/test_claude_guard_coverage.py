@@ -1072,7 +1072,7 @@ def test_ephemeral_resume_tip_absent_on_first_launch(tmp_path: Path) -> None:
 
 def test_ephemeral_resume_tip_shows_on_second_launch(tmp_path: Path) -> None:
     """Once the first-launch ephemerality notice is acknowledged, the next
-    ephemeral launch surfaces the resume/persist tip — the user has finished one
+    ephemeral launch surfaces the resume tip — the user has finished one
     session and is now positioned to want it back."""
     _init_repo(tmp_path)
     _, _log, env = _container_env(tmp_path)  # ephemeral default
@@ -1081,7 +1081,8 @@ def test_ephemeral_resume_tip_shows_on_second_launch(tmp_path: Path) -> None:
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
     assert "To continue a previous conversation" in r.stderr
-    assert "--resume" in r.stderr and "CLAUDE_PERSIST=1" in r.stderr
+    assert "--resume" in r.stderr and "--continue" in r.stderr
+    assert "CLAUDE_PERSIST=1" not in r.stderr
 
 
 def test_non_ephemeral_audit_archive_runs(tmp_path: Path) -> None:

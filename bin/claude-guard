@@ -1047,7 +1047,7 @@ run_orientation() {
     # Withholding it on the first launch keeps the "your state is gone" surprise
     # from arriving before there is any state to have lost.
     if orientation_seen ephemeral-sessions; then
-      orientation_notice ephemeral-resume "Starting a fresh ephemeral session. To continue a previous conversation, relaunch with --resume (choose a session) or --continue (the most recent one). To keep per-session state — login, shell history, installed packages — across sessions, set CLAUDE_PERSIST=1; your /workspace files always persist either way."
+      orientation_notice ephemeral-resume "Starting a fresh ephemeral session. To continue a previous conversation, relaunch with --resume (choose a session) or --continue (the most recent one). Your /workspace files always persist."
     fi
     orientation_notice ephemeral-sessions "Sessions are ephemeral — per-session volumes (login, installed packages, shell history) are discarded at exit; your /workspace files persist on the host."
     orientation_notice auth-anthropic "Anthropic login is automated — your host Claude credential is captured once and reused each session, so you don't re-login every launch. Repeated login prompts? Run: claude-guard setup-token"
