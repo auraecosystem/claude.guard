@@ -227,6 +227,34 @@ def test_auto_mint_cache_ttl_zero_disables_reuse(tmp_path: Path) -> None:
     assert args_file.exists()
 
 
+def test_cache_read_ttl_boundary_is_inclusive(tmp_path: Path) -> None:
+    """A cache exactly TTL seconds old still HITs (`<=`); one second older MISSes.
+    Pins the boundary so a `<=`→`<` off-by-one is caught. A fake `date` fixes the
+    read's "now" so the boundary is exact, not racy on wall-clock seconds."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    write_exe(shim / "date", "#!/usr/bin/env bash\necho 1000000\n")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    cache = runtime / "claude-guard-gh-token"
+    env = {"PATH": f"{shim}:{current_path()}", "XDG_RUNTIME_DIR": str(runtime)}
+    ttl = 90  # the default CLAUDE_GH_TOKEN_CACHE_TTL
+
+    cache.write_text(f"{1000000 - ttl}\nthe-repo\nedge-token\n")  # delta == ttl
+    hit = _source("_gh_token_cache_read the-repo", cwd=tmp_path, env=env)
+    assert hit.returncode == 0, hit.stderr
+    assert hit.stdout.strip() == "edge-token"
+
+    cache.write_text(f"{1000000 - ttl - 1}\nthe-repo\nedge-token\n")  # delta == ttl+1
+    miss = _source(
+        "if _gh_token_cache_read the-repo; then echo HIT; else echo MISS; fi",
+        cwd=tmp_path,
+        env=env,
+    )
+    assert miss.returncode == 0, miss.stderr
+    assert miss.stdout.strip() == "MISS"
+
+
 def test_auto_mint_malformed_cache_is_a_miss_not_a_crash(tmp_path: Path) -> None:
     """A truncated/garbage cache file is treated as a miss (re-mint), never a crash
     that aborts the launch."""
