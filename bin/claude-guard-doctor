@@ -2101,6 +2101,26 @@ def print_verdict() -> None:
     sys.exit(info.code)
 
 
+def _print_verdict_and_bundle(write_bundle: bool) -> None:
+    """Print the verdict and exit; when --bug-report is set, write the scrubbed
+    diagnostics bundle (and print its path) first. try/finally so the bundle is
+    written even though print_verdict() exits, with the verdict's code preserved."""
+    try:
+        print_verdict()
+    finally:
+        if write_bundle:
+            report = console.export_text() + errs.export_text()
+            bundle = write_bug_report(report)
+            console.print()
+            console.print(f"Bug-report bundle written to: {bundle}", soft_wrap=True)
+            console.print(
+                "Secrets are scrubbed; skim it anyway, then file a report (its "
+                "sections match the form's fields):\n"
+                f"{NEW_ISSUE_URL}",
+                soft_wrap=True,
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="claude-guard doctor",
@@ -2155,7 +2175,7 @@ def main() -> None:
         report_launch_plan()
         if args.monitor_test:
             report_monitor_auth()
-        print_verdict()
+        _print_verdict_and_bundle(args.bug_report)
     report_container_runtime()
     report_required_tools()
     report_docker_daemon()
@@ -2176,22 +2196,7 @@ def main() -> None:
     report_panic_snapshots()
     report_prebuilt_image()
     report_sandbox_claude_version()
-    # try/finally so the bundle is written (and its path printed) even though
-    # print_verdict() exits the process; the verdict's exit code is preserved.
-    try:
-        print_verdict()
-    finally:
-        if args.bug_report:
-            report = console.export_text() + errs.export_text()
-            bundle = write_bug_report(report)
-            console.print()
-            console.print(f"Bug-report bundle written to: {bundle}", soft_wrap=True)
-            console.print(
-                "Secrets are scrubbed; skim it anyway, then file a report (its "
-                "sections match the form's fields):\n"
-                f"{NEW_ISSUE_URL}",
-                soft_wrap=True,
-            )
+    _print_verdict_and_bundle(args.bug_report)
 
 
 if __name__ == "__main__":

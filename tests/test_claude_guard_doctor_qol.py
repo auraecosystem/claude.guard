@@ -412,3 +412,44 @@ def test_report_monitor_auth_no_key_skips(monkeypatch) -> None:
     rows, doctor = _drive_report_monitor_auth(monkeypatch, "NO_KEY", "no key")
     assert "skipped" in rows["auth"]
     assert doctor.degraded == []
+
+
+# ── Verdict + bug-report bundling (shared by --plan and the full report) ─────
+
+
+def test_verdict_and_bundle_writes_bundle_despite_exit(monkeypatch, tmp_path) -> None:
+    """print_verdict() exits the process, but with --bug-report the bundle must still
+    be written and its path printed — the finally clause runs before the SystemExit
+    propagates, and the verdict's exit code is preserved."""
+    doctor = load_doctor()
+    written: list[str] = []
+    bundle = tmp_path / "bundle.md"
+    monkeypatch.setattr(doctor, "unprotected", [])
+    monkeypatch.setattr(doctor, "degraded", ["something is off"])
+    monkeypatch.setattr(doctor, "error_boxes", [])
+
+    def fake_write(report: str):
+        written.append(report)
+        return bundle
+
+    monkeypatch.setattr(doctor, "write_bug_report", fake_write)
+    with pytest.raises(SystemExit) as exc:
+        doctor._print_verdict_and_bundle(True)
+    assert exc.value.code == doctor.Verdict.DEGRADED.value.code
+    assert len(written) == 1
+
+
+def test_verdict_and_bundle_skips_bundle_when_unset(monkeypatch) -> None:
+    """Without --bug-report, no bundle is written — print_verdict() still exits."""
+    doctor = load_doctor()
+    monkeypatch.setattr(doctor, "unprotected", [])
+    monkeypatch.setattr(doctor, "degraded", [])
+    monkeypatch.setattr(doctor, "error_boxes", [])
+
+    def must_not_write(_report):
+        raise AssertionError("write_bug_report must not run without --bug-report")
+
+    monkeypatch.setattr(doctor, "write_bug_report", must_not_write)
+    with pytest.raises(SystemExit) as exc:
+        doctor._print_verdict_and_bundle(False)
+    assert exc.value.code == doctor.Verdict.PROTECTED.value.code
