@@ -1380,6 +1380,25 @@ def test_no_sudo_unreachable_docker_fails_loud(tmp_path: Path) -> None:
     assert "merge stub" not in (r.stdout + r.stderr)
 
 
+def test_no_sudo_macos_skips_linux_docker_preflight(tmp_path: Path) -> None:
+    """On macOS the no-sudo docker-reachability preflight is Linux-specific
+    (docker-group/systemctl advice doesn't fit OrbStack-in-a-VM), so an
+    unreachable daemon must NOT trip that FATAL — it's handled later by
+    setup_macos_sandbox with the right 'start OrbStack' advice."""
+    repo = _make_minimal_repo(tmp_path)
+    env = _make_env(tmp_path, repo, extra={"CLAUDE_GUARD_NO_SUDO": "1"})
+    stub_dir = Path(env["PATH"].split(":")[0])
+    # macOS: uname reports Darwin (so IS_MAC=true) and `docker info` fails.
+    write_exe(
+        stub_dir / "uname",
+        '#!/bin/bash\ncase "${1:-}" in -m) echo arm64 ;; *) echo Darwin ;; esac\n',
+    )
+    write_exe(stub_dir / "docker", "#!/bin/bash\nexit 1\n")
+    r = run_capture(["bash", str(repo / "setup.bash")], env=env, cwd=str(repo))
+    assert "Docker is not reachable" not in r.stderr, (r.stdout, r.stderr)
+    assert "usermod -aG docker" not in r.stderr, (r.stdout, r.stderr)
+
+
 def test_no_sudo_hooks_only_fails_loud(tmp_path: Path) -> None:
     """--hooks-only's only job is the root-owned /etc merge — impossible without
     sudo — so it must fail loud instead of silently accomplishing nothing."""

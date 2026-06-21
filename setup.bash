@@ -443,8 +443,11 @@ if "$NO_SUDO" && ! "$UNINSTALL"; then
   fi
   # docker_daemon_reachable is the plain 'docker info' probe — it returns non-zero
   # on permission-denied (unlike wait_for_docker_daemon_up, which treats that as
-  # "up"). In no-sudo mode a permission-denied is exactly the unfixable case.
-  if ! docker_daemon_reachable; then
+  # "up"). In no-sudo mode a permission-denied is exactly the unfixable case. This
+  # docker-group/systemctl advice is Linux-specific; on macOS the daemon is OrbStack
+  # in a VM, so an unreachable Docker is handled with the right advice by
+  # setup_macos_sandbox below — skip this Linux guidance there.
+  if ! "$IS_MAC" && ! docker_daemon_reachable; then
     warn "FATAL: Docker is not reachable for this user, and without sudo setup can't add you to the 'docker' group or start the daemon."
     warn "  Ask an administrator to run:  sudo usermod -aG docker ${USER:-$(id -un)}   (then log out and back in),"
     warn "  and ensure the daemon is running:  sudo systemctl start docker"
