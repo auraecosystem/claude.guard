@@ -229,8 +229,13 @@ logs)
     echo "  /workspace/.env (contains a secret)"
     echo "Consider removing them or mounting a narrower workspace."
     echo "================================================================"
-    printf 'CREDSCAN_FINDING\tsecret\t/workspace/.env\t%s\n' \
+    printf 'CREDSCAN_FINDING\tsecret\t/workspace/.env\t%s' \
       "${FAKE_CRED_HASH:-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef}"
+    # An invalid-base64 preview field (5th tab-field) makes secret-ignore.py's
+    # planner raise, so a test can drive the wrapper's fail-loud "surface the raw
+    # findings" path without depending on a now-tolerated corrupt ignore file.
+    [ -n "${FAKE_CRED_BAD_PREVIEW:-}" ] && printf '\tabc'
+    printf '\n'
   fi
   exit 0 ;;
 image | pull)
@@ -1932,19 +1937,18 @@ def test_cold_start_credential_warning_suppressed_when_all_ignored(
 def test_cold_start_credential_warning_surfaces_raw_on_plan_error(
     tmp_path: Path,
 ) -> None:
-    """A corrupt ignore file makes the planner crash. Rather than silently drop a
-    security-relevant warning (mistaking the error for 'all ignored'), the wrapper
-    fails loud: it notes the failure and re-emits the raw findings."""
+    """A planner crash (here: a malformed finding) must not be mistaken for the
+    silent 'all ignored' case, which would drop a security-relevant warning.
+    Rather, the wrapper fails loud: it notes the failure and re-emits the raw
+    findings. (A corrupt ignore *file* is now tolerated — see test_secret_ignore —
+    so the crash is driven through a malformed CREDSCAN finding instead.)"""
     _init_repo(tmp_path)
-    cfg = tmp_path / "cfg"
-    (cfg / "claude").mkdir(parents=True)
-    (cfg / "claude" / "secret-ignore.json").write_text("{ this is not json")
     _, _, env = _container_env(
         tmp_path,
         FAKE_COLD="1",
         FAKE_HARDENER=str(tmp_path),
         FAKE_CRED_WARNING="1",
-        XDG_CONFIG_HOME=str(cfg),
+        FAKE_CRED_BAD_PREVIEW="1",
     )
     r = _run_container(tmp_path, env)
     assert r.returncode == 0, r.stderr
