@@ -107,6 +107,12 @@ MCP_APPROVE_CONFIRM_KEYS="${MCP_E2E_APPROVE_CONFIRM_KEYS:-$'\r'}"
 # twice is Claude Code's "exit now" chord; override if a release changes it.
 MCP_EXIT_KEYS="${MCP_E2E_EXIT_KEYS:-$'\x03\x03'}"
 
+# Persist-probe (diagnostic only): keep the session's per-workspace volumes alive past
+# teardown so the probe below can mount them and find which file CC actually persisted
+# the approval to — the live container is gone after exit, and the grant flushes only on
+# exit, so a post-exit volume read is the one way to observe it.
+[[ "${MCP_E2E_PERSIST_PROBE:-}" == "1" ]] && export CLAUDE_PERSIST=1
+
 # Scratch repo with an origin remote (so project_identity keys on the URL, stable
 # across worktrees) and TWO linked worktrees standing in for two web/CLI sessions.
 ROOT="$(realpath "$(mktemp -d /tmp/claude-mcp-e2e.XXXXXX)")"
@@ -407,6 +413,22 @@ while ((SECONDS < deadline)); do
   send_approve_keys
   sleep 5
 done
+if [[ "${MCP_E2E_PERSIST_PROBE:-}" == "1" ]]; then
+  echo "==> PERSIST PROBE: live poll approval_path='${approval_path:-<none>}'. Exiting the session, then scanning persisted volumes for where CC wrote the '$PROBE_SERVER' grant." >&2
+  hangup_and_wait || true
+  echo "----- PROBE: every .claude.json / settings.local.json across persisted docker volumes -----" >&2
+  while IFS= read -r v; do
+    out="$(docker run --rm -v "$v":/v busybox sh -c '
+      find /v \( -name ".claude.json" -o -name "settings.local.json" \) 2>/dev/null | while IFS= read -r f; do
+        echo "== '"$v"':$f =="; cat "$f" 2>/dev/null; echo
+      done' 2>/dev/null || true)"
+    [[ -z "$out" ]] && continue
+    [[ "$out" == *"$PROBE_SERVER"* ]] && echo "### GRANT for $PROBE_SERVER FOUND in volume $v ###" >&2
+    printf '%s\n' "$out" >&2
+  done < <(docker volume ls -q 2>/dev/null || true)
+  echo "==> PERSIST PROBE complete." >&2
+  exit 0
+fi
 if [[ -z "$approval_path" ]]; then
   echo "----- DIAG: settings the harness wrote (none matched $approval_needle) -----" >&2
   docker exec -u node "$APP1" sh -c \
