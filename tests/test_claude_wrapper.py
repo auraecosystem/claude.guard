@@ -32,13 +32,20 @@ REPO_ROOT = Path(
 WRAPPER = REPO_ROOT / "bin" / "claude-guard"
 COMPOSE_FILE = REPO_ROOT / ".devcontainer" / "docker-compose.yml"
 
-# Volumes deliberately shared across all projects (not per-workspace), so they
-# are exempt from per-project isolation and the workspace GC label: the GitHub
-# /meta IP-range cache (global, non-sensitive), the MCP-decision store (keyed
-# internally by project dir, must survive an ephemeral teardown), and the
-# version-keyed claude-code-update cache (a host-synced claude-code binary
-# reused across sessions on the same version).
-GLOBAL_VOLUMES = {"gh-meta-cache", "mcp-decisions", "claude-code-update"}
+# Volumes deliberately shared across all projects (not per-workspace), so they are
+# exempt from per-project isolation and the workspace GC label: the GitHub /meta
+# IP-range cache (global, non-sensitive), the MCP-decision store (keyed internally by
+# project dir, must survive an ephemeral teardown), the version-keyed claude-code-update
+# cache (a host-synced claude-code binary reused across sessions on the same version),
+# and the content-addressed pnpm store (shared, integrity-gated, reused to keep installs warm).
+GLOBAL_VOLUMES = {"gh-meta-cache", "mcp-decisions", "claude-code-update", "pnpm-store"}
+
+# Persistent BUT per-workspace external volumes: keyed on the workspace path (not the
+# session) so a cold launch reuses the prior session's tree, excluded from the session-role
+# SSOT so the ephemeral reaper leaves them, and GC'd by gc-volumes.bash via a workspace label
+# applied at `docker volume create` time (compose ignores labels on external volumes, so the
+# label is NOT in the compose stanza — unlike the session-keyed volumes).
+PERSISTENT_WORKSPACE_VOLUMES = {"workspace-node-modules"}
 
 
 def _make_fake_claude(dir_: Path) -> Path:
@@ -296,6 +303,14 @@ def test_volumes_use_per_project_isolation() -> None:
                 f"global volume {name!r} should not be keyed by CLAUDE_VOLUME_ID"
             )
             continue
+        if name in PERSISTENT_WORKSPACE_VOLUMES:
+            # Per-WORKSPACE (not per-session): keyed on the workspace-path volume the
+            # launcher exports, with a session-keyed fallback for bind mode.
+            assert "${CLAUDE_GUARD_NODE_MODULES_VOL:-" in vol_name, (
+                f"persistent workspace volume {name!r} name {vol_name!r} is not "
+                "keyed on CLAUDE_GUARD_NODE_MODULES_VOL"
+            )
+            continue
         assert "${CLAUDE_VOLUME_ID:-" in vol_name, (
             f"volume {name!r} name {vol_name!r} does not use CLAUDE_VOLUME_ID"
         )
@@ -315,8 +330,8 @@ def test_per_project_volumes_match_session_role_ssot() -> None:
     compose = yaml.safe_load(COMPOSE_FILE.read_text())
     compose_roles = set()
     for name, cfg in compose.get("volumes", {}).items():
-        if name in GLOBAL_VOLUMES:
-            continue
+        if name in GLOBAL_VOLUMES or name in PERSISTENT_WORKSPACE_VOLUMES:
+            continue  # external + absent from the session SSOT (the reaper leaves them)
         vol_name = cfg["name"]  # e.g. "vol-${CLAUDE_VOLUME_ID:-shared}-config"
         role = vol_name.removeprefix("vol-${CLAUDE_VOLUME_ID:-shared}-")
         compose_roles.add(role)
@@ -330,12 +345,34 @@ def test_volumes_labeled_with_workspace_for_gc() -> None:
     the volume untouched."""
     compose = yaml.safe_load(COMPOSE_FILE.read_text())
     for name, cfg in compose.get("volumes", {}).items():
-        if name in GLOBAL_VOLUMES:
-            continue  # global cache is not per-project; GC doesn't track it
+        # Global caches are not per-project; the persistent node_modules volume IS
+        # GC-labeled, but at `docker volume create` time (compose ignores labels on
+        # external volumes) — asserted separately below.
+        if name in GLOBAL_VOLUMES or name in PERSISTENT_WORKSPACE_VOLUMES:
+            continue
         labels = cfg.get("labels", {})
         assert labels.get("com.secure-claude.workspace") == (
             "${CLAUDE_DEVCONTAINER_WORKSPACE:-}"
         ), f"volume {name!r} missing the com.secure-claude.workspace GC label"
+
+
+def test_persistent_node_modules_volume_created_with_gc_label() -> None:
+    """The persistent per-workspace node_modules volume is external, so compose ignores a
+    `labels:` stanza on it — the workspace GC label that lets gc-volumes.bash reclaim it
+    once the project dir is deleted MUST therefore be applied at `docker volume create`
+    time in the launcher. Pin that, and that the stanza is external with no compose label."""
+    compose = yaml.safe_load(COMPOSE_FILE.read_text())
+    stanza = compose["volumes"]["workspace-node-modules"]
+    assert stanza.get("external") is True
+    assert (
+        "labels" not in stanza
+    )  # external ⇒ compose would ignore it; applied at create
+    wrapper = WRAPPER.read_text()
+    assert (
+        'docker volume create --label "com.secure-claude.workspace=$workspace_folder"'
+        in wrapper
+    )
+    assert '"$CLAUDE_GUARD_NODE_MODULES_VOL"' in wrapper
 
 
 def test_code_update_cache_is_external_and_version_keyed() -> None:

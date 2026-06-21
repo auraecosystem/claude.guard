@@ -879,13 +879,22 @@ def _discover_compose_up_sites() -> list[Path]:
 
 
 def test_external_volumes_helper_matches_compose(compose: dict) -> None:
-    """The SSOT helper (bin/lib/external-volumes.bash) must list exactly the volumes
-    compose declares ``external: true``. This is the structural tie that makes the
+    """The SSOT helper (bin/lib/external-volumes.bash) must list exactly the SHARED
+    volumes compose declares ``external: true``. This is the structural tie that makes the
     per-site guard below sufficient: a new external volume added to compose forces the
     helper to grow (or this fails), and every up-site routes through the helper, so the
-    new volume reaches all creators at once — no per-site edit, no drift."""
+    new volume reaches all creators at once — no per-site edit, no drift.
+
+    The per-workspace ``workspace-node-modules`` volume is also ``external: true`` but is
+    created by the launcher with a GC label (not the shared SSOT set), so it is excluded
+    here — test_pnpm_store_mounted_hardener_only_and_external and the seed-mode create
+    tests cover it separately."""
     names = {
-        _resolve_compose_version_default(n) for n in _external_volume_names(compose)
+        _resolve_compose_version_default(spec["name"])
+        for key, spec in compose["volumes"].items()
+        if isinstance(spec, dict)
+        and spec.get("external")
+        and key != "workspace-node-modules"
     }
     assert len(names) >= 2  # at least the gh-meta cache and the MCP-decision store
     assert _helper_external_volume_names() == names, (
@@ -924,6 +933,29 @@ def test_claude_code_update_readonly_in_app_writable_in_hardener(compose: dict) 
     assert f"claude-code-update:{mount}:ro" in app_vols
     assert f"claude-code-update:{mount}:ro" not in hardener_vols
     assert f"claude-code-update:{mount}" in hardener_vols
+
+
+def test_pnpm_store_mounted_hardener_only_and_external(compose: dict) -> None:
+    """The persistent shared pnpm store backs the hardener's `pnpm install` so a from-empty
+    node_modules rebuild links from a warm store instead of refetching. It is mounted ONLY on
+    the hardener (rw) — the app runs no pnpm, so giving it the store would be dead surface —
+    and the hardener carries CLAUDE_GUARD_PNPM_STORE_DIR so deps-install.bash points pnpm at
+    it. It must be declared external (like claude-code-update) so compose neither owns nor
+    reaps it; the launcher creates it before `up`."""
+    mount = "/opt/pnpm-store"
+    hardener_vols = compose["services"]["hardener"]["volumes"]
+    assert f"pnpm-store:{mount}" in hardener_vols
+    for svc in ("app", "monitor", "firewall"):
+        assert "pnpm-store" not in _vol_sources(
+            compose["services"][svc].get("volumes", [])
+        )
+    assert (
+        compose["services"]["hardener"]["environment"]["CLAUDE_GUARD_PNPM_STORE_DIR"]
+        == mount
+    )
+    vol = compose["volumes"]["pnpm-store"]
+    assert vol["external"] is True
+    assert vol["name"] == "claude-guard-pnpm-store"
 
 
 def test_managed_settings_readonly_in_app_writable_in_hardener(compose: dict) -> None:
@@ -1622,13 +1654,24 @@ class TestEntrypointHardening:
         # The CALL (last occurrence, after the def) must precede the scan and the install.
         call = c.rindex("seed_workspace_from_tar")
         assert call < c.index("run_credential_scan &")
-        assert c.index("run_credential_scan &") < c.index('install_deps "$WORKSPACE"')
+        assert c.index("run_credential_scan &") < c.index(
+            'install_deps_serialized "$WORKSPACE"'
+        )
 
     def test_seed_chown_is_node_owned_not_root(self) -> None:
         """The seed chown hands /workspace to node (the agent owns its workspace), never
         root — and it is safe precisely because seed-mode /workspace is a NAMED VOLUME
-        with no host inode, unlike the bind path the chown-lock ban above protects."""
-        assert 'chown -R node:node "$WORKSPACE"' in self.content
+        with no host inode, unlike the bind path the chown-lock ban above protects. The
+        seed tree is chowned with `-xdev` so it does NOT recurse into the persistent
+        node_modules sub-volume (O(node_modules) of dead work); that mount gets only its
+        O(1) mountpoint chowned (a fresh volume is root-owned), and .claude — re-seeded
+        each session — is still chowned recursively."""
+        assert 'find "$WORKSPACE" -xdev -exec chown -h node:node {} +' in self.content
+        assert 'chown -R node:node "$WORKSPACE/.claude"' in self.content
+        assert 'chown node:node "$WORKSPACE/node_modules"' in self.content
+        # The blanket recursive chown of the whole tree (which would descend the
+        # persistent node_modules every launch) is gone.
+        assert 'chown -R node:node "$WORKSPACE"\n' not in self.content
 
     def test_installs_deps_as_node(self) -> None:
         """node_modules is installed as the node user so it stays node-owned (no root
