@@ -459,16 +459,17 @@ discover_hf_cdn_host() {
   host="${loc#*://}" # strip scheme
   host="${host%%/*}" # strip path/query
   host="${host%%:*}" # strip any :port
-  # Pin to the KNOWN HF CDN host families, not an open `*.hf.co` suffix. The blob
-  # CDN only ever lives under three fixed multi-label suffixes — `*.aws.cdn.hf.co`
-  # (region-sharded: us/eu/...), `cas-bridge.xethub.hf.co` (Xet bridge), and the
-  # legacy `cdn-lfs*.hf.co` — so the region/shard label is the only thing that
-  # varies. A bare `*.hf.co` test would auto-widen egress to ANY hf.co host a
-  # redirect named (a non-CDN service, a future user-controllable subdomain),
-  # which is exactly what this best-effort widener must not do. valid_domain_name
-  # still rejects a syntactically malformed label that slips the family regex.
-  local hf_cdn_re='^([a-z0-9-]+\.aws\.cdn\.hf\.co|cas-bridge\.xethub\.hf\.co|cdn-lfs(-[a-z0-9-]+)?\.hf\.co)$'
-  [[ "$host" =~ $hf_cdn_re ]] || return 0
+  # Accept any host under hf.co. KEEP THIS BROAD — do NOT narrow it to a fixed
+  # per-family regex (`*.aws.cdn.hf.co` / `cas-bridge.xethub.hf.co` / `cdn-lfs*`).
+  # The CDN family set is open-ended and unknowable from a single vantage (see the
+  # header above): HF adds regions and renames families (cdn-lfs-* -> *.aws.cdn.hf.co),
+  # so a pinned regex silently stops widening to a legitimate, newly-named blob host
+  # and quietly breaks large-file downloads — the exact rot this redirect-reading
+  # widener exists to avoid. The trust boundary is huggingface.co itself: we only
+  # ever emit a host it named in a 302 Location, and that host is still resolved +
+  # ipset-gated downstream, so accepting the whole hf.co suffix hands control to no
+  # outside party. valid_domain_name still rejects a syntactically malformed label.
+  [[ "$host" == *.hf.co ]] || return 0
   valid_domain_name "$host" || return 0
   printf '%s\n' "$host"
 }
