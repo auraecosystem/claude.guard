@@ -271,6 +271,12 @@ download_release_binary() {
     warn "No asset named $asset in the latest $repo release"
     return 1
   }
+  # Fail closed BEFORE the (slow) download, like install_kata_static: a missing or
+  # non-sha256 digest means the asset can't be verified, so we never fetch + run it.
+  if [[ "$digest" != sha256:* ]]; then
+    warn "No sha256 digest published for $asset — refusing to install an unverifiable binary"
+    return 1
+  fi
   local tmpdir file
   tmpdir="$(mktemp -d)" || {
     warn "Failed to create a temp directory for the $asset download"
@@ -282,17 +288,21 @@ download_release_binary() {
     rm -rf "$tmpdir"
     return 1
   fi
-  if [[ "$digest" != sha256:* ]]; then
-    warn "No sha256 digest published for $asset — refusing to install an unverifiable binary"
-    rm -rf "$tmpdir"
-    return 1
-  fi
   if ! _sha256_verify "${digest#sha256:}" "$file"; then
     warn "$asset checksum mismatch — refusing to install a tampered or corrupt download"
     rm -rf "$tmpdir"
     return 1
   fi
-  mkdir -p "$(dirname "$dest")"
+  # Verify the destination dir EXISTS (don't trust mkdir -p's exit status — it
+  # returns 0 on a dangling symlink under BSD/macOS, then `install` dies cryptically).
+  local destdir
+  destdir="$(dirname "$dest")"
+  mkdir -p "$destdir" 2>/dev/null || true
+  if [[ ! -d "$destdir" ]]; then
+    warn "Cannot install $asset: $destdir is not a directory (a broken symlink?) — fix it, then re-run setup."
+    rm -rf "$tmpdir"
+    return 1
+  fi
   if ! install -m 0755 "$file" "$dest"; then
     warn "Failed to install $asset to $dest"
     rm -rf "$tmpdir"

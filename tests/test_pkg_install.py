@@ -414,17 +414,21 @@ _BIN_BYTES = "fake-release-binary-payload"
 _GOOD_SHA = hashlib.sha256(_BIN_BYTES.encode()).hexdigest()
 
 # A curl serving the release API JSON for the metadata query and writing the
-# fixed binary bytes for the `-o <file>` download — one stub, keyed on `-o`.
+# fixed binary bytes for the `-o <file>` download — one stub, keyed on `-o`. It
+# honors $CURL_API_FAIL / $CURL_DL_FAIL so a test can drive the query/download
+# failure branches without a second stub.
 _CURL_RELEASE_STUB = (
     "#!/bin/bash\n"
     'out=""; prev=""\n'
     'for a in "$@"; do [[ "$prev" == "-o" ]] && out="$a"; prev="$a"; done\n'
-    'if [[ -n "$out" ]]; then printf "%s" "$BIN_BYTES" > "$out"\n'
-    'else cat "$CURL_API_JSON"; fi\n'
+    'if [[ -n "$out" ]]; then [[ -n "${CURL_DL_FAIL:-}" ]] && exit 1; printf "%s" "$BIN_BYTES" > "$out"\n'
+    'else [[ -n "${CURL_API_FAIL:-}" ]] && exit 1; cat "$CURL_API_JSON"; fi\n'
 )
 
 # uname: -m → x86_64 (→ amd64/x64), -s → Linux.
 _UNAME_LINUX_X86 = '#!/bin/bash\ncase "${1:-}" in\n-m) echo x86_64 ;;\n-s) echo Linux ;;\n*) echo Linux ;;\nesac\n'
+# uname: -m → aarch64 (→ arm64), -s → Linux.
+_UNAME_LINUX_ARM = '#!/bin/bash\ncase "${1:-}" in\n-m) echo aarch64 ;;\n-s) echo Linux ;;\n*) echo Linux ;;\nesac\n'
 
 
 def _release_json(
@@ -442,23 +446,37 @@ def _run_release(
     *,
     api_json: str,
     uname_stub: str = _UNAME_LINUX_X86,
+    extra_stubs: dict[str, str] | None = None,
+    omit: tuple[str, ...] = (),
+    env: dict[str, str] | None = None,
 ):
     """Source the lib with curl + uname stubbed (jq/sha256sum/install real) and
-    run `snippet`. HOME points at tmp_path so ~/.local/bin writes are observable."""
+    run `snippet`. HOME points at tmp_path so ~/.local/bin writes are observable.
+
+    `extra_stubs` adds/overrides stubs (e.g. a failing `mktemp`); `omit` drops a
+    real binary from PATH by shadowing the stub dir as the *only* PATH entry for
+    that name — used for the curl/jq-missing branches; `env` adds env vars."""
     bindir = Path(tempfile.mkdtemp(dir=tmp_path))
-    write_exe(bindir / "curl", _CURL_RELEASE_STUB)
-    write_exe(bindir / "uname", uname_stub)
+    stubs = {"curl": _CURL_RELEASE_STUB, "uname": uname_stub}
+    stubs.update(extra_stubs or {})
+    for name in omit:
+        stubs.pop(name, None)
+    for name, body in stubs.items():
+        write_exe(bindir / name, body)
     api_file = Path(tempfile.mkstemp(dir=tmp_path, suffix=".json")[1])
     api_file.write_text(api_json)
-    return run_capture(
-        [BASH, "-c", f"source '{LIB}'; {snippet}"],
-        env={
-            "PATH": f"{bindir}:/usr/bin:/bin",
-            "BIN_BYTES": _BIN_BYTES,
-            "CURL_API_JSON": str(api_file),
-            "HOME": str(tmp_path),
-        },
-    )
+    # To make a real tool "missing", shadow it with a stub dir that comes first and
+    # a system PATH that is empty — only the stubs resolve. Otherwise system PATH is
+    # appended so jq/sha256sum/install/mktemp are the real binaries.
+    path = str(bindir) if omit else f"{bindir}:/usr/bin:/bin"
+    base_env = {
+        "PATH": path,
+        "BIN_BYTES": _BIN_BYTES,
+        "CURL_API_JSON": str(api_file),
+        "HOME": str(tmp_path),
+    }
+    base_env.update(env or {})
+    return run_capture([BASH, "-c", f"source '{LIB}'; {snippet}"], env=base_env)
 
 
 def test_download_release_binary_installs_when_digest_matches(tmp_path: Path) -> None:
@@ -593,3 +611,169 @@ def test_pnpm_pinned_version_reads_package_manager(tmp_path: Path) -> None:
 
     assert _version({"packageManager": "pnpm@11.5.2"}) == "11.5.2"
     assert _version({"name": "x"}) == ""
+
+
+def test_pnpm_pinned_version_without_jq_returns_empty(tmp_path: Path) -> None:
+    """No jq on PATH → return non-zero with no version, rather than crashing."""
+    bindir = Path(tempfile.mkdtemp(dir=tmp_path))
+    proj = Path(tempfile.mkdtemp(dir=tmp_path))
+    (proj / "package.json").write_text(json.dumps({"packageManager": "pnpm@11.5.2"}))
+    r = run_capture(
+        [BASH, "-c", f"source '{LIB}'; pnpm_pinned_version '{proj}'"],
+        env={"PATH": str(bindir)},  # jq absent
+    )
+    assert r.returncode != 0
+    assert r.stdout.strip() == ""
+
+
+# --- download_release_binary error branches (kept at 100% line coverage) -----
+
+
+def _good_json() -> str:
+    return _release_json("tool", digest=f"sha256:{_GOOD_SHA}")
+
+
+def test_download_release_binary_curl_missing_fails(tmp_path: Path) -> None:
+    """No curl on PATH → fail loudly before touching the network."""
+    r = _run_release(
+        "download_release_binary o/r latest tool '/x/tool'",
+        tmp_path,
+        api_json=_good_json(),
+        omit=("curl",),
+    )
+    assert r.returncode != 0
+    assert "curl is required" in r.stderr
+
+
+def test_download_release_binary_jq_missing_fails(tmp_path: Path) -> None:
+    """curl present but jq absent → fail loudly (can't verify without jq)."""
+    r = _run_release(
+        "download_release_binary o/r latest tool '/x/tool'",
+        tmp_path,
+        api_json=_good_json(),
+        omit=("jq",),  # restricted PATH; curl stub stays, jq is gone
+    )
+    assert r.returncode != 0
+    assert "jq is required" in r.stderr
+
+
+def test_download_release_binary_uses_github_token_header(tmp_path: Path) -> None:
+    """A GITHUB_TOKEN in the environment is sent as an Authorization header
+    (exercises the auth-header branch); the install still succeeds."""
+    dest = tmp_path / "out" / "tool"
+    r = _run_release(
+        f"download_release_binary o/r latest tool '{dest}'",
+        tmp_path,
+        api_json=_good_json(),
+        env={"GITHUB_TOKEN": "ghp_dummy"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert dest.exists()
+
+
+def test_download_release_binary_release_query_failure_fails(tmp_path: Path) -> None:
+    """The release-metadata curl failing → fail loudly, no download attempted."""
+    r = _run_release(
+        "download_release_binary o/r latest tool '/x/tool'",
+        tmp_path,
+        api_json=_good_json(),
+        env={"CURL_API_FAIL": "1"},
+    )
+    assert r.returncode != 0
+    assert "Failed to query" in r.stderr
+
+
+def test_download_release_binary_mktemp_failure_fails(tmp_path: Path) -> None:
+    """A failing mktemp → fail loudly rather than writing to a guessed path."""
+    r = _run_release(
+        "download_release_binary o/r latest tool '/x/tool'",
+        tmp_path,
+        api_json=_good_json(),
+        extra_stubs={"mktemp": "#!/bin/bash\nexit 1\n"},
+    )
+    assert r.returncode != 0
+    assert "temp directory" in r.stderr
+
+
+def test_download_release_binary_download_failure_fails(tmp_path: Path) -> None:
+    """The asset download curl failing → fail loudly."""
+    dest = tmp_path / "out" / "tool"
+    r = _run_release(
+        f"download_release_binary o/r latest tool '{dest}'",
+        tmp_path,
+        api_json=_good_json(),
+        env={"CURL_DL_FAIL": "1"},
+    )
+    assert r.returncode != 0
+    assert "Download failed" in r.stderr
+    assert not dest.exists()
+
+
+def test_download_release_binary_destdir_not_a_directory_fails(tmp_path: Path) -> None:
+    """When the destination's parent can't be a directory (a regular file sits
+    where it should be) → fail loudly per the dangling-symlink doctrine, not a
+    cryptic install: error."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir")
+    dest = blocker / "sub" / "tool"  # mkdir -p under a regular file can't succeed
+    r = _run_release(
+        f"download_release_binary o/r latest tool '{dest}'",
+        tmp_path,
+        api_json=_good_json(),
+    )
+    assert r.returncode != 0
+    assert "not a directory" in r.stderr
+
+
+def test_download_release_binary_install_failure_fails(tmp_path: Path) -> None:
+    """`install` failing (after a valid dest dir) → fail loudly. Stubbed to exit 1
+    since perms can't force a failure when the suite runs as root."""
+    dest = tmp_path / "out" / "tool"
+    r = _run_release(
+        f"download_release_binary o/r latest tool '{dest}'",
+        tmp_path,
+        api_json=_good_json(),
+        extra_stubs={"install": "#!/bin/bash\nexit 1\n"},
+    )
+    assert r.returncode != 0
+    assert "Failed to install" in r.stderr
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize("scheme,expected", [("gnu", "arm64"), ("node", "arm64")])
+def test_release_arch_label_arm64(scheme, expected, tmp_path: Path) -> None:
+    """aarch64 maps to arm64 under both naming schemes."""
+    r = _run_release(
+        f"release_arch_label {scheme}",
+        tmp_path,
+        api_json="{}",
+        uname_stub=_UNAME_LINUX_ARM,
+    )
+    assert r.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    "available,expected_rc,needle",
+    [
+        ("shasum", 0, ""),  # sha256sum absent, shasum present → shasum branch
+        ("", 1, "no sha256 tool"),  # neither present → fail loud
+    ],
+)
+def test_sha256_verify_tool_fallback(
+    available, expected_rc, needle, tmp_path: Path
+) -> None:
+    """_sha256_verify uses shasum when sha256sum is absent, and fails loudly when
+    no sha256 tool exists at all."""
+    bindir = Path(tempfile.mkdtemp(dir=tmp_path))
+    f = tmp_path / "f"
+    f.write_text("data")
+    if available == "shasum":
+        # A shasum that accepts `-a 256 -c -` and exits 0 (verification "passes").
+        write_exe(bindir / "shasum", "#!/bin/bash\ncat >/dev/null\nexit 0\n")
+    r = run_capture(
+        [BASH, "-c", f"source '{LIB}'; _sha256_verify deadbeef '{f}'"],
+        env={"PATH": str(bindir)},  # no sha256sum; only what we wrote
+    )
+    assert r.returncode == expected_rc, r.stderr
+    if needle:
+        assert needle in r.stderr
