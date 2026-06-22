@@ -56,13 +56,15 @@ def _stub_dir(tmp_path: Path, *, systemctl_exit: int | None = None) -> Path:
     write_exe(
         stub / "uname", '#!/bin/bash\n[[ "$1" == -m ]] && echo x86_64 || echo Linux\n'
     )
-    # restart_docker post-checks the daemon with `docker info`; stub it green so a
-    # successful restart (systemctl_exit=0) reports "Restarted docker" deterministically
-    # regardless of whether a real daemon is up on the CI runner. A FAILED restart
-    # (systemctl_exit=1) returns before the probe, so this never masks that branch.
-    write_exe(stub / "docker", "#!/bin/bash\nexit 0\n")
     if systemctl_exit is not None:
         write_exe(stub / "systemctl", f"#!/bin/bash\nexit {systemctl_exit}\n")
+        # restart_docker post-checks the daemon with `docker info`; stub it green so a
+        # successful restart (systemctl_exit=0) reports "Restarted docker"
+        # deterministically regardless of whether a real daemon is up on the CI runner.
+        # A FAILED restart (systemctl_exit=1) returns before the probe, so this never
+        # masks that branch. Only the restart-driving paths get a `docker` stub, so the
+        # no-docker purge test (which needs docker genuinely absent) is unaffected.
+        write_exe(stub / "docker", "#!/bin/bash\nexit 0\n")
     return stub
 
 
