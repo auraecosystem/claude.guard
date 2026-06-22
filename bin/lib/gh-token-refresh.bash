@@ -144,6 +144,12 @@ gh_token_refresh_session_start() {
   # Prefer the memory-backed runtime dir (tmpfs, never persistent disk) for the live token,
   # mirroring the token cache; fall back to TMPDIR where there is none (e.g. macOS).
   dir="$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/claude-guard-gh-token.XXXXXX")" || return 0
+  # 0700 dir + 0600 file (publish's umask), both host-owned: least exposure on the host.
+  # The container reads it as uid 1000 (node) via the SAME host-uid==1000 bind-mount mapping
+  # /workspace already requires (the agent writes /workspace as uid 1000) — so this adds no
+  # new precondition. On a uid mismatch the in-container `[ -r ]` test skips and the static
+  # launch token still covers the first hour; we deliberately don't widen the mode to reach
+  # a foreign uid, since that would expose the credential to other host users.
   chmod 700 "$dir" 2>/dev/null || true
   _GH_TOKEN_REFRESH_SESSION_DIR="$dir"
   export CLAUDE_GH_TOKEN_DIR="$dir"
