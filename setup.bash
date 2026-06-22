@@ -876,10 +876,9 @@ if [[ -f "$NTFY_CONF" ]]; then
 elif [[ -t 0 ]] && [[ "${CLAUDE_GUARD_ASSUME_YES:-}" != 1 ]]; then
   echo ""
   status "Push notifications not configured for monitor ASK alerts."
-  echo "   ntfy.sh is a free service that sends push alerts to your phone — here,"
-  echo "   so you can approve or deny when the safety monitor pauses on a risky action."
   # Defaults to Yes (the user is mid-setup); an explicit No, Esc, or Ctrl-D all
   # decline to the same skip — cg_confirm folds the cancel into a No.
+  # setup-ntfy.bash prints the full ntfy explanation before prompting.
   if cg_confirm "   Set up ntfy.sh now?" y; then
     bash "$SCRIPT_DIR/bin/setup-ntfy.bash"
   else
