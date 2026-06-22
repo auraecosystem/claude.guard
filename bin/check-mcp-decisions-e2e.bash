@@ -57,6 +57,11 @@ done
 # enough that a hook that never fires surfaces its diagnostic fast instead of burning
 # the whole job timeout. Override for a from-scratch local build (no pre-build step).
 BOOT_TIMEOUT="${MCP_E2E_BOOT_TIMEOUT:-600}"
+# CC writes the MCP grant synchronously the instant the modal is answered, so the approval
+# poll needs only enough headroom for the modal to render and our keystrokes to land — NOT
+# the full boot budget. If the grant has not appeared in this window the keystroke automation
+# is not answering the modal; polling longer just burns the job.
+MCP_APPROVE_TIMEOUT="${MCP_E2E_APPROVE_TIMEOUT:-90}"
 LOG_DIR="${MCP_E2E_LOG_DIR:-/tmp}"
 # The shared, external decision store, and the path the hook writes inside it
 # (CLAUDE_GUARD_MCP_DECISIONS=/var/cache/claude-mcp/decisions.json over a volume
@@ -377,7 +382,7 @@ else
 fi
 echo "==> Answering the modal; re-sending until CC records the grant in settings.local.json..."
 approved=false
-approve_deadline=$((SECONDS + BOOT_TIMEOUT))
+approve_deadline=$((SECONDS + MCP_APPROVE_TIMEOUT))
 while ((SECONDS < approve_deadline)); do
   send_approve_keys
   sleep 2
@@ -394,9 +399,20 @@ done
 if [[ "$approved" != true ]]; then
   # STDOUT, not stderr: this pty-heavy step's stderr is unreliable in the CI log (the
   # launched TUI's terminal escapes overwrite it), while the plain echoes above survive.
+  # A modal that visibly shows a ✔ yet leaves settings.local.json empty has two causes that
+  # this probe separates BEFORE teardown destroys the container: (a) the agent cannot write
+  # .claude (the seed-mode read-only overmount drops CC's synchronous grant write), or (b)
+  # the keystroke never committed the choice. Report whether node-on-app can write .claude,
+  # and surface any settings.local.json CC did manage to write anywhere under the worktree.
   echo "----- DIAG: live $SETTINGS_IN_CONTAINER (no grant recorded) -----"
   docker exec -u node "$APP1" sh -c 'cat '"$SETTINGS_IN_CONTAINER"' 2>&1' || true
-  dump_log_and_fail "FAIL: the MCP trust modal never recorded the approval in $SETTINGS_IN_CONTAINER within ${BOOT_TIMEOUT}s. The keystroke automation did not answer the live modal (its TUI may have changed between releases; tune MCP_E2E_APPROVE*_KEYS)." "$LOG1"
+  echo "----- DIAG: can the agent (node) write /workspace/.claude? -----"
+  docker exec -u node "$APP1" sh -c \
+    'd=/workspace/.claude; if touch "$d/.e2e-write-probe" 2>/dev/null; then echo WRITABLE; rm -f "$d/.e2e-write-probe"; else echo "READ-ONLY (mount: $(grep -m1 " $d " /proc/mounts || echo unknown))"; fi' 2>&1 || true
+  echo "----- DIAG: every settings.local.json CC wrote under /workspace -----"
+  docker exec -u node "$APP1" sh -c \
+    'find /workspace -name settings.local.json -printf "%p: " -exec cat {} \; 2>/dev/null || echo "(none found)"' 2>&1 || true
+  dump_log_and_fail "FAIL: the MCP trust modal never recorded the approval in $SETTINGS_IN_CONTAINER within ${MCP_APPROVE_TIMEOUT}s. See the DIAG probes above: a READ-ONLY .claude means the seed overmount drops the grant write (capture-of-fresh-approval can't work in seed mode); WRITABLE means the keystroke automation never committed the modal (tune MCP_E2E_APPROVE*_KEYS)." "$LOG1"
 fi
 echo "==> Approval recorded in-session; hanging up to trigger SessionEnd + a real ephemeral teardown..."
 hangup_and_wait ||
