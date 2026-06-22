@@ -71,18 +71,24 @@ export let matchesSecretHint;
    suppress path. */
 // Stryker disable all
 try {
+  // The cheap Layer-1 primitives and the cheap Layer-2/3 regex gates both come
+  // from the package ROOT, which re-exports them from the dependency-free
+  // `gates.mjs`/`invisible.mjs` WITHOUT eagerly loading the remark/rehype/unified
+  // graph (~120ms of module-load time). Importing `/html` here instead would drag
+  // that graph onto every importer of this module — including the pre-tool hook,
+  // which only reaches this file (via rehydrate-redacted) for `applyLayer1`. The
+  // heavy parser loads lazily, only when a payload needs it, via
+  // `_applyMarkdownPipeline`'s `await import("agent-input-sanitizer/html")` below.
   ({
     stripInvisibleWithReport,
     isSgrOnly,
     LONG_RUN_RE: LONG_RUN,
-  } = await import("agent-input-sanitizer/invisible"));
-  ({
     HTML_TAG_PRESENT,
     MD_LINK_HINT,
     matchesSecretHint,
     SECRET_HINT,
     SECRET_HINT_EXT,
-  } = await import("agent-input-sanitizer/html"));
+  } = await import("agent-input-sanitizer"));
 } catch {
   // Leave bindings undefined; the Layer-1 call throws into the fail-closed catch,
   // which suppresses the tool output rather than passing it unsanitized.
