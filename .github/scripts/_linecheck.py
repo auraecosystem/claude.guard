@@ -1,6 +1,6 @@
 """Shared machinery for the line-oriented pre-commit lints under this directory.
 
-The four ``check-{exit-suppression,stderr-suppression,pinned-downloads,
+The ``check-{exit-suppression,stderr-suppression,flock-fixed-fd,pinned-downloads,
 pinned-base-images}.py`` scripts each scan a list of paths given on argv, read
 each file as UTF-8 (skipping anything unreadable), run a per-script detector over
 the text, and print ``<path>:<lineno>: <message>`` to stderr for every hit —
@@ -23,9 +23,12 @@ from pathlib import Path
 
 # Lines whose first word only prints text — a command quoted inside them is an
 # example or hint, not executed code. Shared by the stderr- and download-pinning
-# checks. MESSAGE_PREFIX_CG additionally excuses the project's `cg_*` status
-# helpers; the exit-suppression and open-coded-flock checks use that variant.
+# checks.
 MESSAGE_PREFIX = re.compile(r"^(?:echo|printf|warn|status|die|log|:)\b")
+
+# As MESSAGE_PREFIX, plus the project's `cg_*` status-message helpers. The checks
+# that scan repo bash (exit-suppression, flock-fixed-fd, open-coded-flock) use this;
+# the generic-shell checks use the bare MESSAGE_PREFIX.
 MESSAGE_PREFIX_CG = re.compile(r"^(?:echo|printf|warn|status|die|log|cg_\w+|:)\b")
 
 

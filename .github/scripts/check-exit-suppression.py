@@ -30,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _linecheck import (  # noqa: E402,I001  # pylint: disable=wrong-import-position
-    MESSAGE_PREFIX_CG,
+    MESSAGE_PREFIX_CG as _MESSAGE_PREFIX,
     run_line_checks,
 )
 
@@ -102,7 +102,7 @@ def violations(text: str) -> list[int]:
         if not m:
             continue
         stripped = logical.lstrip()
-        if stripped.startswith("#") or MESSAGE_PREFIX_CG.match(stripped):
+        if stripped.startswith("#") or _MESSAGE_PREFIX.match(stripped):
             continue
         if _ALLOW in logical:
             continue
