@@ -1037,10 +1037,12 @@ export function mergeDecisionSources(...sources) {
  * the dump's mere existence proves SessionEnd actually fired on teardown (the failure the
  * unit tests can't see). The dump records what capture saw: the keys under ~/.claude.json
  * `projects` (a project-key mismatch shows here), this project's user-store decisions, and
- * the captured record — only path keys and MCP approve/reject server NAMES, never a token
+ * the captured record, plus the field NAMES Claude Code wrote under projects[projectDir]
+ * (never their values) — only path keys and MCP approve/reject server NAMES, never a token
  * or credential value. So it distinguishes "SessionEnd never fired" (no file) from "fired
  * but the approval lived under a different projects key" (file present, keys mismatch) from
- * "fired and captured nothing" (file present, empty record).
+ * "fired but CC recorded the approval under no/another field" (entry present, no
+ * enabledMcpjsonServers) from "fired and captured nothing" (file present, empty record).
  * @param {string} decisionsPath
  * @param {string} projectDir
  * @param {NodeJS.ProcessEnv} env
@@ -1052,19 +1054,28 @@ function writeCaptureDebug(decisionsPath, projectDir, env, userStore, record) {
   if (!existsSync(join(dir, ".mcp-capture-debug-on"))) return;
   const home = env.HOME || homedir();
   let userJsonProjectsKeys;
+  let userJsonProjectFields;
   try {
     const parsed = JSON.parse(
       readFileSync(join(home, ".claude.json"), "utf-8"),
     );
-    userJsonProjectsKeys = Object.keys(parsed?.projects ?? {});
+    const projects = parsed?.projects ?? {};
+    userJsonProjectsKeys = Object.keys(projects);
+    // The FIELD NAMES Claude Code wrote under projects[projectDir] — key names only,
+    // never values (a project entry holds the session's prompt history). When
+    // enabledMcpjsonServers is absent here but the entry exists, CC recorded the
+    // trust-prompt approval somewhere other than where #24657 says, or not at all.
+    userJsonProjectFields = Object.keys(projects[projectDir] ?? {});
   } catch {
     userJsonProjectsKeys = ["<unreadable>"];
+    userJsonProjectFields = ["<unreadable>"];
   }
   const debug = {
     ranAt: new Date().toISOString(),
     projectDir,
     home,
     userJsonProjectsKeys,
+    userJsonProjectFields,
     userStoreForProjectDir: userStore,
     capturedServers: Object.keys(record.servers),
     enableAll: record.enableAll === true,

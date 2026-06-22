@@ -1142,24 +1142,31 @@ describe("mcp-tripwire: writeCaptureDebug (capture diagnostic)", () => {
     ]);
     assert.deepEqual(dump.capturedServers, ["srv"]);
     assert.equal(dump.enableAll, true);
+    // The FIELD NAMES CC wrote under projects[projectDir] (names only, no values).
+    assert.deepEqual(dump.userJsonProjectFields, [
+      "enableAllProjectMcpServers",
+    ]);
     assert.equal(typeof dump.ranAt, "string");
   });
 
-  it("reports empty project keys and no blanket grant for a null ~/.claude.json", () => {
+  it("reports empty project keys and fields and no blanket grant for a null ~/.claude.json", () => {
     armMarker();
     writeFileSync(join(dir, ".claude.json"), "null");
     captureSessionEnd({ cwd: project }, deps());
     const dump = readDebug();
     assert.deepEqual(dump.userJsonProjectsKeys, []);
+    assert.deepEqual(dump.userJsonProjectFields, []);
     assert.equal(dump.enableAll, false);
     assert.deepEqual(dump.capturedServers, []);
   });
 
-  it("marks the project keys unreadable when ~/.claude.json is missing or malformed", () => {
+  it("marks the project keys and fields unreadable when ~/.claude.json is missing or malformed", () => {
     armMarker();
     // No ~/.claude.json in HOME at all → readFileSync throws → "<unreadable>".
     captureSessionEnd({ cwd: project }, deps());
-    assert.deepEqual(readDebug().userJsonProjectsKeys, ["<unreadable>"]);
+    const dump = readDebug();
+    assert.deepEqual(dump.userJsonProjectsKeys, ["<unreadable>"]);
+    assert.deepEqual(dump.userJsonProjectFields, ["<unreadable>"]);
   });
 
   it("falls back to os.homedir() when env carries no HOME", () => {
