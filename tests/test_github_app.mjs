@@ -1322,26 +1322,26 @@ test("manifest: maps APP_PERMISSIONS to snake_case write keys", () => {
 });
 
 test("manifest: buildManifest is the exact pre-filled App spec", () => {
-  assert.deepEqual(
-    buildManifest({
-      name: "claude-guard-x",
-      url: "https://example.com",
-      redirectUrl: "http://127.0.0.1:5000/callback",
-      permissions: APP_PERMISSIONS,
-    }),
-    {
-      name: "claude-guard-x",
-      url: "https://example.com",
-      public: false,
-      hook_attributes: { active: false },
-      default_permissions: {
-        contents: "write",
-        issues: "write",
-        pull_requests: "write",
-      },
-      redirect_url: "http://127.0.0.1:5000/callback",
+  const manifest = buildManifest({
+    name: "claude-guard-x",
+    url: "https://example.com",
+    redirectUrl: "http://127.0.0.1:5000/callback",
+    permissions: APP_PERMISSIONS,
+  });
+  assert.deepEqual(manifest, {
+    name: "claude-guard-x",
+    url: "https://example.com",
+    public: false,
+    default_permissions: {
+      contents: "write",
+      issues: "write",
+      pull_requests: "write",
     },
-  );
+    redirect_url: "http://127.0.0.1:5000/callback",
+  });
+  // hook_attributes is omitted on purpose: GitHub requires hook_attributes.url
+  // whenever the object is present, so "no webhook" means leaving it out.
+  assert.equal("hook_attributes" in manifest, false);
 });
 
 test("manifest: action URL is account- or org-scoped and carries state", () => {

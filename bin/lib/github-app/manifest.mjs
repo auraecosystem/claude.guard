@@ -69,10 +69,12 @@ export function manifestActionUrl({ org, state }) {
 }
 
 /**
- * Build the App manifest. No webhook (hook_attributes.active=false), private,
- * least-privilege permissions, and a loopback redirect_url GitHub bounces the
- * code back to. redirect_url MUST be the already-bound loopback URL so it
- * matches exactly — build the manifest only after the port is known.
+ * Build the App manifest: private, least-privilege permissions, and a loopback
+ * redirect_url GitHub bounces the code back to. `hook_attributes` is omitted on
+ * purpose — GitHub requires a `hook_attributes.url` whenever that object is
+ * present, so the way to get *no* webhook is to leave it out entirely.
+ * redirect_url MUST be the already-bound loopback URL so it matches exactly —
+ * build the manifest only after the port is known.
  * @param {{ name: string, url: string, redirectUrl: string, permissions: string[][] }} params
  * @returns {Record<string, any>}
  */
@@ -81,7 +83,6 @@ export function buildManifest({ name, url, redirectUrl, permissions }) {
     name,
     url,
     public: false,
-    hook_attributes: { active: false },
     default_permissions: manifestPermissions(permissions),
     redirect_url: redirectUrl,
   };
