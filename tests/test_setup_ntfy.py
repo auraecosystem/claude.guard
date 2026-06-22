@@ -50,13 +50,21 @@ def _conf_exists(home) -> bool:
     return (home / ".config" / "claude-monitor" / "ntfy.conf").exists()
 
 
-def _run_topic_in_use(home, stdin: str) -> subprocess.CompletedProcess:
-    """Run with a curl shim that always reports cached traffic, so topic_in_use
-    returns true (the topic is "already in use") for every poll."""
+def _run_topic_in_use(
+    home, stdin: str, expect: str = "/json?poll=1"
+) -> subprocess.CompletedProcess:
+    """Run with a curl shim that reports cached traffic (so topic_in_use returns
+    true) ONLY when `expect` appears in curl's args — otherwise it exits non-zero,
+    which topic_in_use reads as "free". This pins that the poll is aimed at the
+    correctly-interpolated `${url}/${topic}/json?...` endpoint, not just that the
+    branch ran: a broken URL/topic interpolation makes the shim miss and the test
+    fail."""
     shim = home / "shim"
     shim.mkdir()
     curl = shim / "curl"
-    curl.write_text("#!/bin/sh\necho 'cached-message'\n")
+    curl.write_text(
+        f'#!/bin/sh\ncase "$*" in\n*{expect}*) echo cached-message ;;\n*) exit 22 ;;\nesac\n'
+    )
     curl.chmod(0o755)
     return subprocess.run(
         ["bash", str(SETUP_NTFY)],
@@ -112,9 +120,12 @@ def test_generated_topic_collision_exhausts_and_fails_loud(tmp_path):
 
 
 def test_user_supplied_topic_in_use_is_declined(tmp_path):
-    # The topic polls as in-use; the "Use it anyway?" confirm defaults to No in a
-    # non-TTY run, so the script declines and writes nothing.
-    r = _run_topic_in_use(tmp_path, f"{DEAD_URL}\ntaken-topic\n")
+    # The topic polls as in-use (the shim matches only when "taken-topic" is in the
+    # poll URL, pinning topic interpolation); the "Use it anyway?" confirm defaults
+    # to No in a non-TTY run, so the script declines and writes nothing.
+    r = _run_topic_in_use(
+        tmp_path, f"{DEAD_URL}\ntaken-topic\n", expect="/taken-topic/json"
+    )
     assert r.returncode == 0, r.stderr
     assert "already has traffic" in r.stderr
     assert not _conf_exists(tmp_path)
