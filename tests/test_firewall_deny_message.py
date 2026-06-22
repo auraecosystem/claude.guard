@@ -326,3 +326,46 @@ def test_squid_config_is_parse_validated_loudly() -> None:
     assert "squid -k parse 2>/dev/null" not in src, "parse errors must not be hidden"
     assert "squid -k parse 2>&1" in src
     assert "squid config parse failed" in src
+
+
+def _write_ro_domains(tmp_path, domains: list[str]) -> list[str]:
+    """Run write_ro_domains over `domains` and return the rendered ACL lines."""
+    out = tmp_path / "ro.txt"
+    quoted = " ".join(f"'{d}'" for d in domains)
+    subprocess.run(
+        ["bash", "-c", f'source "{FIREWALL_LIB}"; write_ro_domains "{out}" {quoted}'],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.read_text().splitlines()
+
+
+def test_write_ro_domains_emits_every_input_domain(tmp_path) -> None:
+    """Every read-only domain MUST get its own `.domain` dstdomain line. squid's
+    config ends with `http_access allow all`, so a host matching no readonly_domains
+    entry gets full methods — an omitted ro line is a silent write hole. In
+    particular a child of an already-listed parent (sub.example.com under
+    example.com) must NOT be suppressed: the old parent-suppression dropped it."""
+    inputs = [
+        "example.com",
+        "sub.example.com",  # child of example.com — must survive
+        "a.b.sub.example.com",  # deep descendant — must survive
+        "other.org",
+        "co.uk",  # bare TLD-like parent of the next
+        "service.co.uk",
+    ]
+    lines = _write_ro_domains(tmp_path, inputs)
+    for d in inputs:
+        assert f".{d}" in lines, f"ro domain {d} produced no dstdomain line"
+
+
+def test_write_ro_domains_dedups_and_sorts(tmp_path) -> None:
+    """Duplicate inputs collapse to one line and output is sorted (byte-stable
+    regeneration), but no distinct domain is ever dropped."""
+    lines = _write_ro_domains(tmp_path, ["b.com", "a.com", "b.com"])
+    assert lines == [".a.com", ".b.com"]
+
+
+def test_write_ro_domains_empty_yields_empty_file(tmp_path) -> None:
+    assert _write_ro_domains(tmp_path, []) == []

@@ -459,9 +459,16 @@ discover_hf_cdn_host() {
   host="${loc#*://}" # strip scheme
   host="${host%%/*}" # strip path/query
   host="${host%%:*}" # strip any :port
-  # Only ever emit a syntactically valid hf.co host: a redirect that points
-  # somewhere else must NOT auto-widen egress to that domain.
-  [[ "$host" == *.hf.co ]] || return 0
+  # Pin to the KNOWN HF CDN host families, not an open `*.hf.co` suffix. The blob
+  # CDN only ever lives under three fixed multi-label suffixes — `*.aws.cdn.hf.co`
+  # (region-sharded: us/eu/...), `cas-bridge.xethub.hf.co` (Xet bridge), and the
+  # legacy `cdn-lfs*.hf.co` — so the region/shard label is the only thing that
+  # varies. A bare `*.hf.co` test would auto-widen egress to ANY hf.co host a
+  # redirect named (a non-CDN service, a future user-controllable subdomain),
+  # which is exactly what this best-effort widener must not do. valid_domain_name
+  # still rejects a syntactically malformed label that slips the family regex.
+  local hf_cdn_re='^([a-z0-9-]+\.aws\.cdn\.hf\.co|cas-bridge\.xethub\.hf\.co|cdn-lfs(-[a-z0-9-]+)?\.hf\.co)$'
+  [[ "$host" =~ $hf_cdn_re ]] || return 0
   valid_domain_name "$host" || return 0
   printf '%s\n' "$host"
 }

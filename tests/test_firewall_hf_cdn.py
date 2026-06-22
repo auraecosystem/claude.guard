@@ -100,13 +100,21 @@ def test_discover_handles_http1_header_casing(tmp_path: Path) -> None:
         "https://hf.co.evil.com/x",  # hf.co as a label, not the suffix
         "https://-bad-.hf.co/x",  # suffix IS hf.co but the host is syntactically malformed
         "not-a-url",  # malformed Location
+        # hf.co hosts that are NOT a CDN family: an open `*.hf.co` test would have
+        # auto-widened to these; the family pin rejects them.
+        "https://huggingface.co/x",  # the apex site, not a blob CDN
+        "https://internal.hf.co/x",  # arbitrary hf.co service
+        "https://us.aws.cdn.hf.co.evil.com/x",  # CDN family as a prefix, real suffix evil.com
+        "https://cas-bridge.xethub.hf.co.attacker.net/x",  # look-alike with extra suffix
+        "https://notcdn-lfs.hf.co/x",  # cdn-lfs as a substring, not the family prefix
     ],
 )
 def test_discover_emits_nothing_for_non_hf_co_targets(
     tmp_path: Path, location: str
 ) -> None:
-    """Only a syntactically valid host whose suffix is hf.co is ever emitted: a
-    redirect anywhere else must not silently widen egress to that domain."""
+    """Only a host matching a known HF CDN family is ever emitted: a redirect
+    anywhere else — including a non-CDN hf.co host — must not silently widen
+    egress to that domain."""
     r = _run(_env(tmp_path, location), "discover_hf_cdn_host")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == ""

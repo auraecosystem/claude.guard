@@ -70,24 +70,19 @@ prepare_squid_log_dir() {
 write_ro_domains() {
   local outfile="$1"
   shift
-  local ro=()
-  [[ $# -gt 0 ]] && mapfile -t ro < <(printf '%s\n' "$@" | sort -u)
   : >"$outfile"
-  local domain parent skip other
-  for domain in "${ro[@]+"${ro[@]}"}"; do
-    parent="${domain#*.}"
-    skip=false
-    while [[ "$parent" == *.* ]]; do
-      for other in "${ro[@]+"${ro[@]}"}"; do
-        if [[ "$other" == "$parent" ]]; then
-          skip=true
-          break 2
-        fi
-      done
-      parent="${parent#*.}"
-    done
-    "$skip" || echo ".$domain" >>"$outfile"
-  done
+  [[ $# -eq 0 ]] && return 0
+  # Emit EVERY read-only domain as its own `.domain` dstdomain line. An earlier
+  # version dropped a child whenever an ancestor was already in the ro list, on the
+  # theory that `.parent` already covers `.child`. That parent-suppression could
+  # open a WRITE hole: squid's config ends with `http_access allow all`
+  # (write_squid_conf), so any host matching NO readonly_domains entry gets full
+  # methods (POST/exfil). A suppressed child whose "ancestor" wasn't actually a
+  # rendered ro line would silently fall through to that allow-all and lose its
+  # method restriction. squid de-duplicates overlapping dstdomain entries
+  # harmlessly, so emitting all of them costs nothing and removes the chance of an
+  # accidental hole. Sorted for byte-stable regeneration.
+  printf '.%s\n' "$@" | sort -u >>"$outfile"
 }
 
 # write_rw_domains OUTFILE [RW_DOMAIN...] — render squid's dstdomain ACL for
