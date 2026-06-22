@@ -59,6 +59,8 @@ run_selection "$native_repo" "native ext4"
 
 # DrvFs: pin --basetemp onto the Windows drive so the tmp_path fixtures the tests
 # build their trees in actually land on DrvFs. Without this, pytest's default
-# basetemp (/tmp, ext4) would make this run a duplicate of the native one.
-drvfs_tmp="${drvfs_repo}/.pytest-drvfs-tmp"
+# basetemp (/tmp, ext4) would make this run a duplicate of the native one. Place
+# it beside the checkout (still on DrvFs) rather than inside it, so the run never
+# litters the working tree.
+drvfs_tmp="$(dirname "$drvfs_repo")/cg-pytest-drvfs-tmp"
 run_selection "$drvfs_repo" "DrvFs (Windows drive)" --basetemp="$drvfs_tmp"

@@ -120,8 +120,9 @@ jobs:
       - uses: ./.github/actions/report-job-result
         with:
           run: ${{ needs.decide.outputs.run }}
-          # One required check covers all legs: success only if both the
-          # Linux/macOS matrix and the WSL2 job succeeded. (When decide=false
-          # both work jobs are skipped, but the reporter short-circuits on
-          # run != 'true' before consulting this value.)
+          # One required check covers all legs: 'success' only if both the
+          # Linux/macOS matrix and the WSL2 job succeeded, else 'failure' — which
+          # collapses a cancelled/failed leg to a definitive red (never a hang).
+          # When decide=false both work jobs are skipped, but the reporter
+          # short-circuits on run != 'true' before consulting this value.
           result: ${{ (needs.cross-platform-run.result == 'success' && needs.windows-wsl-run.result == 'success') && 'success' || 'failure' }}
