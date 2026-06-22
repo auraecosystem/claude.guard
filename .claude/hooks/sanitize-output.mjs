@@ -9,7 +9,7 @@
  * Layer 4: Redact API keys/secrets via detect-secrets (24 detectors, served by the
  *          long-lived redactor daemon — see lib-redactor-client.mjs).
  *
- * Layers 2 & 3 live in sanitize-output-markdown.mjs and are lazy-loaded only
+ * Layers 2 & 3 live in llm-text-sanitizer/html and are lazy-loaded only
  * when the cheap regex gates below match: the remark/rehype/unified graph costs
  * ~200ms to import, but plain-text tool output (the overwhelmingly common case)
  * needs only Layers 1 & 4, so it must not pay that cost on every call. Layer 2
@@ -33,24 +33,26 @@ import {
   stripInvisibleWithReport,
   isSgrOnly,
   LONG_RUN_RE as LONG_RUN,
-} from "./invisible-chars.mjs";
+} from "llm-text-sanitizer/invisible";
 import {
   HTML_TAG_PRESENT,
   MD_LINK_HINT,
   matchesSecretHint,
-} from "./sanitize-output-gates.mjs";
+} from "llm-text-sanitizer/html";
 import { trace, TraceEvent } from "./lib-trace.mjs";
 
-// Re-exported from the shared gate module so existing importers
+// Re-exported from the llm-text-sanitizer gate module so existing importers
 // (sanitize-output.test.mjs, the orchestrator/fuzz property suites) keep their
-// `from "./sanitize-output.mjs"` path; the regexes themselves live in
-// sanitize-output-gates.mjs, the SSOT both this module and the Layer-3 URL
-// inspector (sanitize-output-markdown.mjs) read.
+// `from "./sanitize-output.mjs"` path; the regexes themselves are the package's
+// single source of truth, shared by this module's pre-gate and its Layer-3 URL
+// inspector. The cross-repo invariant that SECRET_HINT stays a superset of what
+// redact-secrets.py catches is enforced by sanitize-output.test.mjs reading
+// SECRET_HINT through this re-export.
 export {
   SECRET_HINT,
   SECRET_HINT_EXT,
   matchesSecretHint,
-} from "./sanitize-output-gates.mjs";
+} from "llm-text-sanitizer/html";
 
 const HOOK_NAME = "sanitize-output";
 
@@ -134,8 +136,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const VENV_BIN = join(__dirname, "..", "..", ".venv", "bin");
 
 // The cheap detect-secrets pre-gate (SECRET_HINT / SECRET_HINT_EXT /
-// matchesSecretHint) now lives in sanitize-output-gates.mjs and is re-exported at
-// the top of this file; redactSecrets calls the imported matchesSecretHint below.
+// matchesSecretHint) lives in llm-text-sanitizer/html and is re-exported at the
+// top of this file; redactSecrets calls the imported matchesSecretHint below.
 
 // The inference-provider key env vars (whose literal values are redacted) and
 // the placeholder floor are the single source of truth in inference-key-vars.json
@@ -584,8 +586,7 @@ async function _applyMarkdownPipeline(inputText, toolName) {
   let cleaned = inputText;
   if (!isUntrustedIngress(toolName) || !needsMarkdownPipeline(cleaned))
     return { cleaned, warnings, modified };
-  const { sanitizeHtml, detectExfil } =
-    await import("./sanitize-output-markdown.mjs");
+  const { sanitizeHtml, detectExfil } = await import("llm-text-sanitizer/html");
   // Layer 2 — web ingress only: strips what a rendered page would not show
   // (comments, hidden elements), scripting/resource tags preserved+reported.
   // Skipped for MCP output, which is structured JSON/text the task needs

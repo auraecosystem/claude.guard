@@ -11,7 +11,7 @@ import {
   stripInvisible,
   stripInvisibleWithReport,
   BLANK_NON_CF,
-} from "./invisible-chars.mjs";
+} from "llm-text-sanitizer/invisible";
 import { createHmac } from "node:crypto";
 import {
   applyLayer1,

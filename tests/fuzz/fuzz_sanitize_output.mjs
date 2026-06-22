@@ -1,6 +1,6 @@
 /**
  * Coverage-guided fuzz harness (@jazzer.js/core) for the output sanitizer's
- * pure-JS layers (sanitize-output-markdown.mjs: HTML sanitize + markdown/URL
+ * pure-JS layers (llm-text-sanitizer/html: HTML sanitize + markdown/URL
  * exfil detection).
  *
  * Runs ONLY in the scheduled fuzz.yaml workflow (cron + manual), never per-PR.
@@ -24,10 +24,7 @@
  *   npx jazzer tests/fuzz/fuzz_sanitize_output.mjs \
  *       tests/fuzz/corpus/sanitize-output -- -max_total_time=120 -max_len=4096
  */
-import {
-  sanitizeHtml,
-  detectExfil,
-} from "../../.claude/hooks/sanitize-output-markdown.mjs";
+import { sanitizeHtml, detectExfil } from "llm-text-sanitizer/html";
 
 /**
  * @param {Buffer} data
