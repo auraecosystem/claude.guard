@@ -46,7 +46,7 @@ import { trace, TraceEvent } from "./lib-trace.mjs";
 // into the CLI's fail-closed catch, which suppresses the output.
 /** @type {(text: string) => { cleaned: string, found: string[] }} */
 let stripInvisibleWithReport;
-/** @type {Readonly<Record<string, string>>} */
+/** @type {typeof import("agent-input-sanitizer").CATEGORY} */
 let CATEGORY;
 /** @type {Readonly<Record<string, string>>} */
 let CATEGORY_LABELS;

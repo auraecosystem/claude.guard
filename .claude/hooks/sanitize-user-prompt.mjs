@@ -33,7 +33,7 @@ import {
 // which main()'s guard turns into a fail-closed block.
 /** @type {Array<[string, RegExp]>} */
 let CHECKS;
-/** @type {Readonly<Record<string, string>>} */
+/** @type {typeof import("agent-input-sanitizer/invisible").CATEGORY} */
 let CATEGORY;
 /** @type {Readonly<Record<string, string>>} */
 let CATEGORY_LABELS;
