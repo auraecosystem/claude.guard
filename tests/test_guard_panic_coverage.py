@@ -720,9 +720,12 @@ def test_snapshot_dir_and_artifacts_are_owner_only(sandbox) -> None:
     snap = _latest_snapshot(panic_dir)
     # Several artifacts must have landed so the assertion is non-vacuous.
     artifacts = [p for p in snap.iterdir() if p.is_file()]
-    assert {"audit.jsonl", "outgoing-traffic.log", "monitor.log", "panic-report.md"} <= {
-        p.name for p in artifacts
-    }, (
+    assert {
+        "audit.jsonl",
+        "outgoing-traffic.log",
+        "monitor.log",
+        "panic-report.md",
+    } <= {p.name for p in artifacts}, (
         f"expected the standard artifacts under {snap}, got {[p.name for p in artifacts]}"
     )
     assert (snap.stat().st_mode & 0o777) == 0o700, (

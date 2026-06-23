@@ -801,11 +801,17 @@ def test_setup_ntfy_dispatch_execs_sibling(tmp_path: Path) -> None:
     empty.mkdir()
     r = run_capture(
         [str(WRAPPER), "setup-ntfy"],
-        env={**os.environ, "PATH": str(empty) + ":" + os.environ["PATH"], "HOME": str(tmp_path / "h")},
+        env={
+            **os.environ,
+            "PATH": str(empty) + ":" + os.environ["PATH"],
+            "HOME": str(tmp_path / "h"),
+        },
         cwd=tmp_path,
         stdin=subprocess.DEVNULL,
     )
-    assert "ntfy.sh is a free push-notification service" in (r.stdout + r.stderr), r.stderr
+    assert "ntfy.sh is a free push-notification service" in (r.stdout + r.stderr), (
+        r.stderr
+    )
 
 
 def test_orientation_subcommand_reprints_all_notices(tmp_path: Path) -> None:
@@ -828,7 +834,9 @@ def test_orientation_subcommand_reprints_all_notices(tmp_path: Path) -> None:
     before = sorted(p.name for p in marker_dir.iterdir())
     empty = tmp_path / "p"
     empty.mkdir()
-    r = _run_guard(tmp_path, ["orientation"], empty, XDG_STATE_HOME=str(state), NO_COLOR="1")
+    r = _run_guard(
+        tmp_path, ["orientation"], empty, XDG_STATE_HOME=str(state), NO_COLOR="1"
+    )
     assert r.returncode == 0, r.stderr
     # Every notice replays despite all markers being present.
     assert "Sessions are ephemeral" in r.stderr
@@ -845,7 +853,9 @@ def test_orientation_uses_user_facing_terminology(tmp_path: Path) -> None:
     state = tmp_path / "state"
     empty = tmp_path / "p"
     empty.mkdir()
-    r = _run_guard(tmp_path, ["orientation"], empty, XDG_STATE_HOME=str(state), NO_COLOR="1")
+    r = _run_guard(
+        tmp_path, ["orientation"], empty, XDG_STATE_HOME=str(state), NO_COLOR="1"
+    )
     assert r.returncode == 0, r.stderr
     low = r.stderr.lower()
     assert "egress" not in low, r.stderr
