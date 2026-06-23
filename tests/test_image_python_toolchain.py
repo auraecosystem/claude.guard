@@ -37,8 +37,8 @@ PIN_RE = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)(?P<spec>==\d+\.\d+(?:\.\d+)?)\s
 
 def _pins() -> dict[str, str]:
     pins: dict[str, str] = {}
-    for line in REQUIREMENTS.read_text().splitlines():
-        line = line.strip()
+    for raw in REQUIREMENTS.read_text().splitlines():
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
         m = PIN_RE.match(line)
@@ -73,9 +73,12 @@ def test_dependabot_tracks_the_image_python_tools() -> None:
     pip_updates = [
         u
         for u in config["updates"]
-        if u.get("package-ecosystem") == "pip" and u.get("directory") == "/.devcontainer"
+        if u.get("package-ecosystem") == "pip"
+        and u.get("directory") == "/.devcontainer"
     ]
-    assert len(pip_updates) == 1, "expected exactly one pip ecosystem for /.devcontainer"
+    assert len(pip_updates) == 1, (
+        "expected exactly one pip ecosystem for /.devcontainer"
+    )
     allowed = {entry["dependency-name"] for entry in pip_updates[0].get("allow", [])}
     for name in _pins():
         assert name in allowed, (
