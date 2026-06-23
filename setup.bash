@@ -546,13 +546,14 @@ if ! command_exists pnpm; then
     # from the npm registry, sidestepping the GitHub API entirely.
     corepack enable --install-directory "$HOME/.local/bin" pnpm 2>/dev/null || true
   fi
-  # A distro Node package often ships no corepack, so pnpm may still be missing.
-  # Install the pinned standalone binary into ~/.local/bin (verified against the
-  # release sha256) rather than sending the user to pnpm.io to finish by hand.
+  # A distro Node often ships no corepack (Debian/Ubuntu strip it), so pnpm may
+  # still be missing. Fall back to npm, installing the pinned pnpm into the
+  # user-writable ~/.local prefix (no root). install_pnpm_via_npm fails loud if npm
+  # is absent too, so the user installs npm (or pnpm) rather than setup limping on.
   if ! command_exists pnpm; then
     _pnpm_pinned="$(pnpm_pinned_version "$SCRIPT_DIR")" || _pnpm_pinned=""
     [[ -n "$_pnpm_pinned" ]] &&
-      run_quiet "Installing pnpm ${_pnpm_pinned}..." install_pnpm_standalone "$_pnpm_pinned" ||
+      run_quiet "Installing pnpm ${_pnpm_pinned} via npm..." install_pnpm_via_npm "$_pnpm_pinned" ||
       true # allow-exit-suppress: best-effort fallback; pnpm presence is re-checked below
   fi
 fi
