@@ -305,7 +305,7 @@ export const envToggles = [
   },
   {
     name: "CLAUDE_GUARD_NO_WORKTREE_SEED=1",
-    desc: "mount your checkout directly instead of seed mode (the default: /workspace is a fresh copy of your tracked tree and the agent's commits return on a reviewable claude/seed-* branch you merge yourself)",
+    desc: "mount your checkout directly instead of seed mode (the default: /workspace is a fresh copy of your tracked tree and the agent's commits return on a reviewable claude/* branch you merge yourself)",
     man: true,
   },
   {

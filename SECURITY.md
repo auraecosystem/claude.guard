@@ -515,7 +515,7 @@ remove is reported, and the launcher exits nonzero.
 per-session throwaway named volume seeded fresh from your tracked working tree,
 so an agent-written payload does **not** survive into the next session's
 `/workspace`, and the agent's changes reach your real checkout only as a
-reviewable `claude/seed-*` branch you merge yourself — never written to the host
+reviewable `claude/*` branch you merge yourself — never written to the host
 behind your back. The cross-session **workspace** blind spot therefore applies to
 the **direct-mount** path (`CLAUDE_GUARD_NO_WORKTREE_SEED=1`, or the automatic
 fallback for a non-repo / sub-tree / `CLAUDE_WORKTREE` launch): there `/workspace`
@@ -525,7 +525,7 @@ session N and run via `Bash(./script.bash)` in session N+1 still exploits the
 monitor's cross-session blind spot. Either way the payload is bounded by the
 egress firewall (layer 2), the audit log, and the sandbox (no host access beyond
 `/workspace`), and it shows up in your VCS diff — but ephemerality is not what
-contains it. Review agent-authored changes — the `claude/seed-*` branch, or your
+contains it. Review agent-authored changes — the `claude/*` branch, or your
 working tree under direct mount — before trusting them. `CLAUDE_PERSIST=1` /
 `CLAUDE_SHARED_AUTH=1` deliberately reopen the cross-session window for the
 throwaway volumes too.
@@ -794,7 +794,7 @@ Read these first. Each matters for the security boundary, not the UX.
    stays ephemeral (re-seeded each session). The rest (`.devcontainer`, `CLAUDE.md`,
    `AGENTS.md`) are writable in the
    volume: their integrity is carried by the **pre-host review gate** — the agent's
-   edits surface on the reviewable `claude/seed-*` branch before they can reach the
+   edits surface on the reviewable `claude/*` branch before they can reach the
    host — plus the SessionStart instruction-file scan, not by a mount. Their job was
    only cross-session / host protection, which review now covers; an _in-session_
    boundary (`node_modules`) stays kernel-ro because its damage lands before review.
