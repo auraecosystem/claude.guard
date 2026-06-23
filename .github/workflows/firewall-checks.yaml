@@ -18,6 +18,7 @@ on:
       - .devcontainer/init-firewall.bash
       - .devcontainer/firewall-lib.bash
       - .devcontainer/squid-config.bash
+      - .devcontainer/seccomp-firewall.json
       - .devcontainer/Dockerfile
       - bin/check-firewall-caps.bash
       - .github/workflows/firewall-checks.yaml
@@ -28,6 +29,7 @@ on:
       - .devcontainer/init-firewall.bash
       - .devcontainer/firewall-lib.bash
       - .devcontainer/squid-config.bash
+      - .devcontainer/seccomp-firewall.json
       - .devcontainer/Dockerfile
       - bin/check-firewall-caps.bash
       - .github/workflows/firewall-checks.yaml
