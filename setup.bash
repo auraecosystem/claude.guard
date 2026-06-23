@@ -402,9 +402,11 @@ _prereqs=(jq curl)
 # zstd unpacks the Kata static release (*.tar.zst) on the Linux sandbox path;
 # macOS uses the OrbStack VM and never extracts it, so it is Linux-only here.
 "$IS_MAC" || _prereqs+=(zstd)
+# One transaction for all the missing ones (one `apt-get update`, one install)
+# rather than a round trip per package; then warn about any that still aren't there.
+offer_install_missing "${_prereqs[@]}" || true # allow-exit-suppress: best-effort install; each still-missing prereq is warned about below
 for _prereq in "${_prereqs[@]}"; do
-  offer_install "$_prereq" "$_prereq" "$_prereq" ||
-    command_exists "$_prereq" ||
+  command_exists "$_prereq" ||
     warn "$_prereq not found and not installed — later steps that need it will fail."
 done
 
@@ -412,7 +414,7 @@ done
 # helpers (redact-debug-stream.py, secret-ignore.py). A minimal host can lack it;
 # install it now rather than letting a later launch or `claude-guard doctor` die
 # with a bare `env: python3: not found`. Its package name varies, so it is not in
-# the uniform-name loop above.
+# the uniform-name batch above.
 command_exists python3 ||
   offer_install Python python3 "$(python_pkg_name)" ||
   command_exists python3 ||
@@ -876,10 +878,9 @@ if [[ -f "$NTFY_CONF" ]]; then
 elif [[ -t 0 ]] && [[ "${CLAUDE_GUARD_ASSUME_YES:-}" != 1 ]]; then
   echo ""
   status "Push notifications not configured for monitor ASK alerts."
-  echo "   ntfy.sh is a free service that sends push alerts to your phone — here,"
-  echo "   so you can approve or deny when the safety monitor pauses on a risky action."
   # Defaults to Yes (the user is mid-setup); an explicit No, Esc, or Ctrl-D all
   # decline to the same skip — cg_confirm folds the cancel into a No.
+  # setup-ntfy.bash prints the full ntfy explanation before prompting.
   if cg_confirm "   Set up ntfy.sh now?" y; then
     bash "$SCRIPT_DIR/bin/setup-ntfy.bash"
   else

@@ -47,7 +47,16 @@ if ! declare -F run_priv >/dev/null 2>&1; then
     if [[ $EUID -eq 0 ]]; then
       "$@" # root-only arm
     elif command_exists sudo; then
-      sudo "$@"
+      # The first install is usually the run's first sudo of any kind, so warm the
+      # credential here (sudo-helpers.bash) to spare every later step a re-prompt.
+      # Guarded: standalone callers that don't source sudo-helpers degrade to the
+      # current per-call behaviour rather than erroring on a missing function.
+      local _rc=0
+      sudo "$@" || _rc=$?
+      if [[ "$_rc" -eq 0 ]] && declare -F start_sudo_keepalive >/dev/null 2>&1; then
+        start_sudo_keepalive
+      fi
+      return "$_rc"
     else
       warn "need root or sudo to run: $*"
       return 1
@@ -220,6 +229,28 @@ offer_install() {
   # still returns 1 rather than sudo-installing unbidden. sudo still authenticates.
   [[ "${CLAUDE_GUARD_ASSUME_YES:-}" == 1 || -t 0 ]] || return 1
   _pg_run_quiet "Installing $name..." pkg_run_install "$pm" "$@"
+}
+
+# Batch form of offer_install for uniformly-named packages (binary == package
+# name, e.g. jq/curl/zstd): install every requested one not already on PATH in a
+# SINGLE manager transaction — one `apt-get update`, one install — instead of a
+# round trip per package. Same gates as offer_install (a manager must exist, and
+# the run must be interactive or have opted in via CLAUDE_GUARD_ASSUME_YES); with
+# all packages already present it is a no-op. Returns the install's exit status
+# (or 1 when it cannot install), so the caller re-checks and warns per package.
+offer_install_missing() {
+  local missing=() p
+  for p in "$@"; do
+    command_exists "$p" || missing+=("$p")
+  done
+  [[ "${#missing[@]}" -eq 0 ]] && return 0
+
+  local pm
+  pm="$(detect_pkg_manager)"
+  [[ -n "$pm" ]] || return 1
+
+  [[ "${CLAUDE_GUARD_ASSUME_YES:-}" == 1 || -t 0 ]] || return 1
+  _pg_run_quiet "Installing ${missing[*]}..." pkg_run_install "$pm" "${missing[@]}"
 }
 
 # _sha256_verify <hex> <file> — verify <file>'s sha256 equals <hex>. Uses
