@@ -241,5 +241,5 @@ seed_branch_name() {
 # never touches the host branch (the user reviews and merges on their own terms).
 worktree_print_merge_hint() {
   cg_ok "Claude's changes are on branch $1."
-  printf '    git merge %s\n    git branch -d %s\n' "$1" "$1" >&2
+  printf '    git merge %s && git branch -d %s\n' "$1" "$1" >&2
 }

@@ -828,8 +828,8 @@ def test_print_merge_hint_reports_branch_and_does_not_merge(
     r = _sourced(_HINT, branch)
     assert r.returncode == 0, r.stderr
     assert b"Claude's changes are on branch claude/x" in r.stderr
-    assert b"git merge claude/x" in r.stderr
-    assert b"git branch -d claude/x" in r.stderr
+    # The delete is chained after the merge with && so it only runs if the merge succeeds.
+    assert b"git merge claude/x && git branch -d claude/x" in r.stderr
     # The current branch was left untouched — the agent's file is not on main.
     assert not (repo / "agent.txt").exists()
     assert _git(repo, "log", "--oneline", "main").count("\n") == 0  # one commit
