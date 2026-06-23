@@ -7,6 +7,7 @@ assemble-changelog.mjs is exercised) against throwaway git repos.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,6 +19,12 @@ from tests._helpers import REPO_ROOT, git_env, init_test_repo
 
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "check-changelog-fragment.mjs"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "changelog-fragment.yaml"
+
+# The carve-out members are the SSOT the script reads at runtime; driving the
+# per-member test from the same file means adding a member auto-adds its case.
+INTERNAL_PATHS = json.loads((REPO_ROOT / "config" / "internal-paths.json").read_text())[
+    "patterns"
+]
 
 
 def _commit(repo: Path, message: str) -> str:
@@ -121,51 +128,26 @@ def test_invalid_fragment_name_does_not_count(repo: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "rel",
-    [
-        "tests/test_x.py",
-        "docs/x.md",
-        "changelog.d/README.md",
-        ".github/workflows/x.yaml",
-        ".hooks/pre-commit",
-        "CHANGELOG.md",
-        "CLAUDE.md",
-        "LICENSE",
-        ".pre-commit-config.yaml",
-        ".shellcheckrc",
-        ".hadolint.yaml",
-        ".prettierrc.json",
-        ".prettierignore",
-        ".editorconfig",
-        "eslint.config.js",
-        ".eslintrc.json",
-        ".eslintignore",
-        "tsconfig.json",
-        "tsconfig.build.json",
-        ".c8rc.json",
-        ".gitleaks.toml",
-        ".gitleaksignore",
-        "config/javascript/commitlint.config.js",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        ".npmrc",
-        ".nvmrc",
-        ".python-version",
-        ".gitignore",
-        ".gitattributes",
-        ".mailmap",
-        ".template-version",
-        "scripts/x.test.mjs",
-        "tests/x_test.py",
-    ],
+    "entry",
+    INTERNAL_PATHS,
+    ids=[e["pattern"] for e in INTERNAL_PATHS],
 )
-def test_each_internal_pattern_member_is_exempt(repo: Path, rel: str) -> None:
-    """Every alternative in INTERNAL_RE is exercised on its own, so dropping one
-    member can't pass unnoticed (a single matching input wouldn't catch that)."""
-    _write(repo, rel, "x\n")
-    _commit(repo, f"touch {rel}")
+def test_each_internal_pattern_member_is_exempt(
+    repo: Path, entry: dict[str, str]
+) -> None:
+    """Every member of the SSOT (config/internal-paths.json) is exercised via its
+    own example path, so a member that doesn't actually exempt its file — or a
+    half-added member missing its example — fails here. Cases are derived from
+    the SSOT, so adding a member can't slip in without a test."""
+    example = entry["example"]
+    # The example must match its own pattern, or the entry is malformed.
+    assert re.search(entry["pattern"], example), (
+        f"example {example!r} does not match pattern {entry['pattern']!r}"
+    )
+    _write(repo, example, "x\n")
+    _commit(repo, f"touch {example}")
     result = _run(repo)
-    assert result.returncode == 0, f"{rel}: {result.stderr}"
+    assert result.returncode == 0, f"{example}: {result.stderr}"
 
 
 def test_missing_base_sha_fails_loud(repo: Path) -> None:
@@ -181,34 +163,6 @@ def test_missing_base_sha_fails_loud(repo: Path) -> None:
     )
     assert result.returncode != 0
     assert "BASE_SHA" in result.stderr
-
-
-def test_internal_re_matches_ssot() -> None:
-    """INTERNAL_RE in the script must be regenerated from config/internal-paths.json.
-
-    Running the generator must produce no change — catching any hand-edit that
-    drifts the script away from the SSOT before it reaches CI.
-    """
-    script = REPO_ROOT / ".github" / "scripts" / "check-changelog-fragment.mjs"
-    gen = REPO_ROOT / "scripts" / "gen-internal-re.mjs"
-    original = script.read_text()
-
-    try:
-        result = subprocess.run(
-            ["node", str(gen)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, result.stderr
-        regenerated = script.read_text()
-        assert original == regenerated, (
-            "INTERNAL_RE has drifted from config/internal-paths.json. "
-            "Run: node scripts/gen-internal-re.mjs"
-        )
-    finally:
-        # Always restore: if the generator changed the file (drift detected),
-        # we don't want to leave the repo in a modified state after the test.
-        script.write_text(original)
 
 
 def test_workflow_is_a_reporting_required_check() -> None:

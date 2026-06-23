@@ -12,6 +12,8 @@
 // Reads BASE_SHA (the PR base commit) and LABELS (a JSON array of label names)
 // from the env; diffs BASE_SHA...HEAD for the changed files.
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -28,44 +30,15 @@ const FRAGMENT_DIR = "changelog.d/";
 // developer-tooling config at the repo root — linters, formatters, editor and
 // git metadata, lockfiles — whose changes are never visible to a tool user.
 //
-// GENERATED — do not edit by hand. Edit config/internal-paths.json instead,
-// then run: node scripts/gen-internal-re.mjs
+// The member list is the SSOT in config/internal-paths.json, read at load time
+// so this regex and the per-member tests both derive from one source and can't
+// drift. Add a file type there, not here.
+const here = dirname(fileURLToPath(import.meta.url));
+const INTERNAL_PATHS = JSON.parse(
+  readFileSync(join(here, "..", "..", "config", "internal-paths.json"), "utf8"),
+);
 export const INTERNAL_RE = new RegExp(
-  [
-    "^tests/", // test files
-    "^docs/", // documentation
-    "^changelog\\.d/", // fragments + their README
-    "^\\.github/", // GitHub metadata + CI
-    "^\\.hooks/", // git hook scripts (lint/format enforcement)
-    "^CHANGELOG\\.md$", // assembled changelog (generated from fragments)
-    "^CLAUDE\\.md$", // contributor/dev instructions, not a tool-user-facing change
-    "^LICENSE$", // license file
-    "^\\.pre-commit-config\\.yaml$", // pre-commit framework config
-    "^\\.shellcheckrc$", // shell linter config
-    "^\\.hadolint\\.yaml$", // Dockerfile linter config
-    "^\\.prettierrc(\\..+)?$", // code formatter config
-    "^\\.prettierignore$", // formatter exclusions
-    "^\\.editorconfig$", // editor settings
-    "^eslint\\.config\\.[cm]?js$", // ESLint config (new flat format)
-    "^\\.eslintrc(\\..+)?$", // ESLint config (legacy)
-    "^\\.eslintignore$", // ESLint exclusions
-    "^tsconfig(\\..+)?\\.json$", // TypeScript compiler config
-    "^\\.c8rc\\.json$", // code coverage tool config
-    "^\\.gitleaks\\.toml$", // secret scanning config
-    "^\\.gitleaksignore$", // secret scanning exclusions
-    "^config/javascript/", // commitlint + other JS tool configs
-    "^pnpm-lock\\.yaml$", // package manager lockfile
-    "^pnpm-workspace\\.yaml$", // monorepo workspace config
-    "^\\.npmrc$", // npm config
-    "^\\.nvmrc$", // Node version pinning
-    "^\\.python-version$", // Python version pinning
-    "^\\.gitignore$", // git exclusions
-    "^\\.gitattributes$", // git text handling
-    "^\\.mailmap$", // git author identity mapping
-    "^\\.template-version$", // internal template tracking
-    "\\.test\\.(mjs|js|ts)$", // test file suffix (.test.mjs/js/ts)
-    "_test\\.py$" // Python test file suffix
-  ].join("|"),
+  INTERNAL_PATHS.patterns.map((entry) => entry.pattern).join("|"),
 );
 
 // Labels that explicitly declare "this PR needs no changelog fragment": a
