@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Provision the pre-commit toolchain, auto-fix what's fixable, push the fix as a
-# NEW commit (never an amend/rebase — that would orphan on a shallow clone and
-# close the PR), then re-run pre-commit so any non-autofixable violation surfaces
-# as the job's verdict. Invoked by .github/workflows/pre-commit.yaml.
+# Provision the pre-commit toolchain, auto-fix what's fixable, and commit the
+# result LOCALLY (the workflow pushes it in a separate, token-scoped step so no
+# push credential is in the environment while this runs PR-author-controlled hook
+# code). The commit is a NEW commit, never an amend/rebase — that would orphan on
+# a shallow clone and close the PR. Invoked by .github/workflows/pre-commit.yaml.
 set -euo pipefail
 
 export CLAUDE_PROJECT_DIR="${GITHUB_WORKSPACE:-$PWD}"
@@ -11,6 +12,13 @@ export CLAUDE_PROJECT_DIR="${GITHUB_WORKSPACE:-$PWD}"
 # (the one binary the `language: system` hooks shell out to), the node + python deps
 # the generator hooks need, and pre-warms the pinned hook environments with retries.
 bash .claude/hooks/session-setup.sh
+# Carry the provisioned toolchain to later workflow steps (PATH exports don't span
+# steps); the verify step re-runs pre-commit and needs these on PATH.
+{
+  echo "$HOME/.local/bin"
+  echo "$HOME/.cargo/bin"
+  echo "$CLAUDE_PROJECT_DIR/.venv/bin"
+} >>"$GITHUB_PATH"
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$CLAUDE_PROJECT_DIR/.venv/bin:$PATH"
 
 command -v pre-commit >/dev/null 2>&1 || {
@@ -23,22 +31,16 @@ command -v pre-commit >/dev/null 2>&1 || {
 pre-commit run --all-files --color always || true
 
 # --porcelain (not `git diff --quiet`) so we catch every shape of change: the
-# whitespace/format hooks modify the working tree (unstaged), while the gen-*
-# hooks `git add` their regenerated output (staged) — a working-tree-only check
-# would silently skip the latter.
-if [[ -n "$(git status --porcelain)" ]]; then
-  git config user.name "github-actions[bot]"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-  git add -A
-  # --no-verify: the local pre-commit/lint-staged git hooks would re-run this whole
-  # suite recursively. We just ran pre-commit, so the tree is already clean — the
-  # verification pass below re-proves it before the job's exit code is set.
-  git commit --no-verify -m "style: apply pre-commit autofixes"
-  # Push to the PR's head branch. GITHUB_TOKEN-authored pushes do NOT retrigger
-  # workflows, so this cannot loop.
-  git push origin "HEAD:${GITHUB_HEAD_REF}"
-fi
+# whitespace/format hooks modify the working tree (unstaged), while the gen-* hooks
+# `git add` their regenerated output (staged) — a working-tree-only check would
+# silently skip the latter.
+[[ -n "$(git status --porcelain)" ]] || exit 0
 
-# Verification pass over the now-clean tree: autofixers make no further changes, so
-# a non-zero here means a genuine, non-autofixable violation the author must fix.
-pre-commit run --all-files --color always
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git add -A
+# --no-verify: the local pre-commit/lint-staged git hooks would re-run this whole
+# suite recursively. The autofix pass above already produced this content; the
+# workflow's verify step re-proves the tree is clean after the push.
+git commit --no-verify -m "style: apply pre-commit autofixes"
+echo "committed=true" >>"$GITHUB_OUTPUT"
