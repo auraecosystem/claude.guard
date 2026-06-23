@@ -4,13 +4,16 @@
 //   * it adds a valid changelog.d/<id>.<category>.md fragment (the category set
 //     is the SSOT in assemble-changelog.mjs — no second copy here);
 //   * it carries an exemption label (a maintainer's explicit "needs none");
+//   * it was opened by an automated dependency bot, which can't author a
+//     fragment for its own bump;
 //   * every file it changes is internal (tests, docs, CI, the fragment dir) —
 //     the same "internal churn gets no fragment" carve-out the README states.
 // Otherwise it touches user-facing surface with no entry, and we fail loud with
 // the offending paths and the valid categories.
 //
-// Reads BASE_SHA (the PR base commit) and LABELS (a JSON array of label names)
-// from the env; diffs BASE_SHA...HEAD for the changed files.
+// Reads BASE_SHA (the PR base commit), LABELS (a JSON array of label names), and
+// PR_AUTHOR (the PR's author login) from the env; diffs BASE_SHA...HEAD for the
+// changed files.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -48,6 +51,12 @@ export const INTERNAL_RE = new RegExp(
 // (e.g. a comment-only source edit), and the release PR that consumes fragments.
 export const EXEMPT_LABELS = ["no-changelog", "release"];
 
+// PR authors whose automated dependency bumps can't carry a hand-written
+// fragment. Matched against the event-payload PR author (github.event
+// .pull_request.user.login) — GitHub sets it and a fork PR can't forge it;
+// github.actor would be spoofable.
+export const EXEMPT_AUTHORS = ["dependabot[bot]"];
+
 /**
  * Parse `git diff --name-status` output into {added, path} records, taking the
  * destination path for renames (the trailing field).
@@ -69,10 +78,10 @@ export function parseNameStatus(raw) {
 
 /**
  * Decide whether the PR satisfies the changelog policy.
- * @param {{changed: {added: boolean, path: string}[], labels: string[]}} input
+ * @param {{changed: {added: boolean, path: string}[], labels: string[], author?: string}} input
  * @returns {{ok: boolean, reason: string, external?: string[]}}
  */
-export function classify({ changed, labels }) {
+export function classify({ changed, labels, author }) {
   const addedFragment = changed.some(
     (f) =>
       f.added &&
@@ -81,6 +90,9 @@ export function classify({ changed, labels }) {
   );
   if (addedFragment)
     return { ok: true, reason: "valid changelog fragment added" };
+
+  if (EXEMPT_AUTHORS.includes(author))
+    return { ok: true, reason: `exempt author '${author}'` };
 
   const label = labels.find((l) => EXEMPT_LABELS.includes(l));
   if (label) return { ok: true, reason: `exempt via '${label}' label` };
@@ -123,11 +135,12 @@ export function main({
   const base = env.BASE_SHA;
   if (!base) throw new Error("BASE_SHA is not set (the PR base commit).");
   const labels = JSON.parse(env.LABELS || "[]");
+  const author = env.PR_AUTHOR || "";
   const changed = parseNameStatus(
     exec(["diff", "--name-status", `${base}...HEAD`]),
   );
 
-  const result = classify({ changed, labels });
+  const result = classify({ changed, labels, author });
   if (result.ok) {
     console.log(`changelog check: ${result.reason}.`);
     return 0;
