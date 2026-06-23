@@ -308,7 +308,13 @@ drive_teardown_and_wait() {
     sleep 1
     waited=$((waited + 1))
   done
-  kill -0 "$pid" 2>/dev/null && fail "$label did not finish teardown within ${TEARDOWN_TIMEOUT}s."
+  # An `if`, not `kill -0 … && fail`: on the success path (launcher gone) `kill -0`
+  # returns non-zero, which as the function's LAST command would become its return
+  # value and trip the caller's `set -e` — aborting the run with no message even though
+  # teardown succeeded. The `if` returns 0 when the launcher is gone.
+  if kill -0 "$pid" 2>/dev/null; then
+    fail "$label did not finish teardown within ${TEARDOWN_TIMEOUT}s."
+  fi
 }
 
 # ── Positive path: seed → locks hold → agent commits → extract to host branch ──
