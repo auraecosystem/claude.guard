@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   dnsmasq \
   squid-openssl \
   ssl-cert \
-  && pip3 install --break-system-packages 'detect-secrets==1.5.0'
+  && pip3 install --break-system-packages 'detect-secrets==1.5.0' 'uv==0.8.17'
 
 # Generate a throwaway CA cert for squid ssl_bump. This CA is only
 # trusted inside the container — it lets squid inspect HTTPS to
