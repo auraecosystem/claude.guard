@@ -1216,6 +1216,7 @@ def test_container_worktree_seed_mode_remaps_workspace(tmp_path: Path) -> None:
     assert "LAUNCHED-CLAUDE" in r.stdout
     assert "Claude's changes are on branch claude/" in r.stderr
     assert "git merge claude/" in r.stderr
+    assert "git branch -d claude/" in r.stderr
     overrides = list(cache.glob("claude-monitor/devcontainer/*/overmounts.yml"))
     assert len(overrides) == 1, overrides
     assert "workspace-seed:/workspace" in overrides[0].read_text()
