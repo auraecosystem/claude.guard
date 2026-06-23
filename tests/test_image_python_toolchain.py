@@ -115,20 +115,26 @@ def test_every_ecosystem_groups_into_one_pr() -> None:
 
 
 def test_dependabot_prs_auto_merge_only_when_green() -> None:
-    """The auto-merge workflow must (a) act only on Dependabot-authored PRs and
-    (b) use `--auto`, which queues the merge behind the required status checks
-    rather than merging immediately — so a bump that breaks CI never lands."""
+    """The auto-merge workflow must (a) be guarded to Dependabot-authored PRs via
+    an unspoofable signal (the event payload's PR author, not github.actor — see
+    zizmor bot-conditions), (b) use `--auto`, which queues the merge behind the
+    required status checks rather than merging immediately, and (c) hold major
+    version bumps for manual review."""
     workflow = REPO_ROOT / ".github" / "workflows" / "dependabot-auto-merge.yaml"
     config = yaml.safe_load(workflow.read_text())
     jobs = config["jobs"]
     assert len(jobs) == 1, "expected a single auto-merge job"
     (job,) = jobs.values()
-    assert job["if"] == "github.actor == 'dependabot[bot]'", (
-        "auto-merge must be guarded to Dependabot-authored PRs only"
+    assert job["if"] == "github.event.pull_request.user.login == 'dependabot[bot]'", (
+        "auto-merge must be guarded by the event-payload PR author (unspoofable), "
+        "not github.actor"
     )
     run_steps = [s.get("run", "") for s in job["steps"]]
     merge = next((r for r in run_steps if "gh pr merge" in r), None)
     assert merge is not None, "workflow must call `gh pr merge`"
     assert "--auto" in merge, (
         "must use `gh pr merge --auto` so the merge waits for required checks"
+    )
+    assert "version-update:semver-major" in merge, (
+        "must gate on the semver bump type so major bumps are held for review"
     )
