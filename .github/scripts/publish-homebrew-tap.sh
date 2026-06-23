@@ -25,9 +25,22 @@ if [[ -z "$HOMEBREW_TAP_TOKEN" ]]; then
   exit 0
 fi
 
-# Optional explicit remote (tests point this at a local bare repo); production
-# passes none and the token-authenticated tap URL is used.
-tap_remote="${2:-https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git}"
+# Optional explicit remote (tests point this at a local bare repo, which needs no
+# auth); production passes none and uses the token-free tap URL below.
+tap_remote="${2:-https://github.com/${TAP_REPO}.git}"
+
+# Auth rides an HTTP header out-of-band from the URL — a token in URL userinfo is
+# written verbatim into the clone's .git/config, persisting a short-lived
+# credential to disk. GIT_CONFIG_* applies only to the git calls we spawn and is
+# copied into no clone (same shape as bin/persist-perf-history.sh). Skipped for
+# an explicit local remote.
+if [[ -z "${2:-}" ]]; then
+  basic="$(printf 'x-access-token:%s' "$HOMEBREW_TAP_TOKEN" | base64 | tr -d '\n')"
+  n="${GIT_CONFIG_COUNT:-0}"
+  export "GIT_CONFIG_KEY_${n}=http.https://github.com/.extraheader"
+  export "GIT_CONFIG_VALUE_${n}=AUTHORIZATION: basic ${basic}"
+  export GIT_CONFIG_COUNT=$((n + 1))
+fi
 
 formula="$REPO_ROOT/packaging/homebrew/claude-guard.rb"
 [[ -f "$formula" ]] || {
@@ -38,8 +51,6 @@ formula="$REPO_ROOT/packaging/homebrew/claude-guard.rb"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Token rides in the remote URL (Actions masks the secret in logs) and lives only
-# in this throwaway clone's config, which the trap removes.
 if ! retry_cmd 4 2 git clone --depth 1 "$tap_remote" "$work/tap"; then
   echo "Error: failed to clone $TAP_REPO" >&2
   exit 1
