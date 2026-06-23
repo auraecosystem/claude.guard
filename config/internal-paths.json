@@ -32,6 +32,11 @@
       "comment": "Claude-agent workflow skills — contributor tooling, never shipped to CLI users (unlike .claude/hooks/, which carry security boundaries and stay outside)"
     },
     {
+      "pattern": "^\\.claude/dev-notes",
+      "example": ".claude/dev-notes",
+      "comment": "design-rationale notes for contributors — never shipped to CLI users (unlike .claude/hooks/, which carry security boundaries and stay outside)"
+    },
+    {
       "pattern": "^CHANGELOG\\.md$",
       "example": "CHANGELOG.md",
       "comment": "assembled changelog (generated from fragments)"
