@@ -550,21 +550,31 @@ if [[ "$gh_ranges" = "" ]]; then
   echo "WARNING: Skipping GitHub CIDR augmentation. GitHub remains reachable via the DNS-resolved allowlist entries (github.com, *.githubusercontent.com, etc.)." >&2
 else
   echo "Processing GitHub IPs..."
-  # Bound each octet to 0-255 and the prefix to /16../32. We aggregate only
-  # `.web + .api + .git` (GitHub's narrow anycast edge ranges, published as /20-/22
-  # and individual /32s — never broader), so /16 is 16x looser than the broadest
-  # real range yet rejects a poisoned/spoofed api.github.com/meta response that
-  # tries to widen the allowlist ipset with a broad block. A floor of /8 (the prior
-  # bound) still admitted a 16M-address range from a single spoofed line; /16 caps
-  # the worst case at 64K and `0.0.0.0/0` was, and stays, rejected. The floor also
-  # binds AFTER `aggregate -q` runs, so merged-but-broad output is caught too.
+  # Two-tier validation of each CIDR from the (attacker-influenceable) meta response.
+  # We aggregate only `.web + .api + .git` — GitHub's narrow anycast edge ranges,
+  # published as /20-/22 and individual /32s — so anything broader than /16 is either
+  # a spoof or a surprise we don't want in the ipset.
+  #   gh_shape_re — structurally valid IPv4 CIDR (octets 0-255, prefix 0-32).
+  #   gh_cidr_re  — additionally no broader than the /16 floor: the set we ADD.
+  # A structurally CORRUPT entry (octet >255, prefix >32) signals a garbage/non-meta
+  # response and still fails the firewall loud. But a WELL-FORMED yet over-broad entry
+  # (prefix < /16) is SKIPPED with a warning, NOT a hard abort: GitHub stays reachable
+  # via the DNS-resolved allowlist entries, so a single surprising-but-legitimate broad
+  # range (or a spoofed one) can't brick every launch — it just isn't added, which
+  # fails closed (narrows egress), the safe direction. The floor binds AFTER
+  # `aggregate -q`, so a merged-but-broad result is caught the same way.
   gh_octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  gh_shape_re="^${gh_octet}\.${gh_octet}\.${gh_octet}\.${gh_octet}/(3[0-2]|[12][0-9]|[0-9])$"
   gh_cidr_re="^${gh_octet}\.${gh_octet}\.${gh_octet}\.${gh_octet}/(1[6-9]|2[0-9]|3[0-2])$"
   gh_batch="$(mktemp)"
   while read -r cidr; do
-    if [[ ! "$cidr" =~ $gh_cidr_re ]]; then
-      echo "ERROR: invalid or overly-broad CIDR from GitHub meta: $cidr"
+    if [[ ! "$cidr" =~ $gh_shape_re ]]; then
+      echo "ERROR: malformed CIDR from GitHub meta (corrupt or non-meta response): $cidr"
       exit 1
+    fi
+    if [[ ! "$cidr" =~ $gh_cidr_re ]]; then
+      echo "WARNING: skipping over-broad GitHub CIDR '$cidr' (broader than the /16 floor); GitHub stays reachable via the DNS-resolved allowlist entries." >&2
+      continue
     fi
     echo "Adding GitHub range $cidr"
     printf 'add allowed-domains %s\n' "$cidr" >>"$gh_batch"
