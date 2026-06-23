@@ -1,5 +1,5 @@
 {
-  "comment": "SSOT for the changelog-fragment carve-out. .github/scripts/check-changelog-fragment.mjs reads this at runtime to build INTERNAL_RE, and tests/test_check_changelog_fragment.py drives one per-member case from it — so the regex and its tests cannot drift from this list. Add a file type by adding an entry: `pattern` is the regex alternative, `example` a path that should match ONLY that member, `comment` the why.",
+  "comment": "SSOT for the changelog-fragment carve-out. .github/scripts/check-changelog-fragment.mjs reads this at runtime to build INTERNAL_RE, and tests/check-changelog-internal-re.test.mjs enumerates the members against that same regex — so the regex and its tests cannot drift from this list. Add a file type by adding an entry: `pattern` is the regex alternative, `example` a path that should match ONLY that member, `comment` the why.",
   "patterns": [
     {
       "pattern": "^tests/",

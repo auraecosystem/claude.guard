@@ -7,7 +7,6 @@ assemble-changelog.mjs is exercised) against throwaway git repos.
 """
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,12 +18,6 @@ from tests._helpers import REPO_ROOT, git_env, init_test_repo
 
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "check-changelog-fragment.mjs"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "changelog-fragment.yaml"
-
-# The carve-out members are the SSOT the script reads at runtime; driving the
-# per-member test from the same file means adding a member auto-adds its case.
-INTERNAL_PATHS = json.loads((REPO_ROOT / "config" / "internal-paths.json").read_text())[
-    "patterns"
-]
 
 
 def _commit(repo: Path, message: str) -> str:
@@ -125,29 +118,6 @@ def test_invalid_fragment_name_does_not_count(repo: Path) -> None:
     _commit(repo, "feat + bad fragment")
     result = _run(repo)
     assert result.returncode == 1
-
-
-@pytest.mark.parametrize(
-    "entry",
-    INTERNAL_PATHS,
-    ids=[e["pattern"] for e in INTERNAL_PATHS],
-)
-def test_each_internal_pattern_member_is_exempt(
-    repo: Path, entry: dict[str, str]
-) -> None:
-    """Every member of the SSOT (config/internal-paths.json) is exercised via its
-    own example path, so a member that doesn't actually exempt its file — or a
-    half-added member missing its example — fails here. Cases are derived from
-    the SSOT, so adding a member can't slip in without a test."""
-    example = entry["example"]
-    # The example must match its own pattern, or the entry is malformed.
-    assert re.search(entry["pattern"], example), (
-        f"example {example!r} does not match pattern {entry['pattern']!r}"
-    )
-    _write(repo, example, "x\n")
-    _commit(repo, f"touch {example}")
-    result = _run(repo)
-    assert result.returncode == 0, f"{example}: {result.stderr}"
 
 
 def test_missing_base_sha_fails_loud(repo: Path) -> None:

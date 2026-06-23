@@ -34,11 +34,13 @@ const FRAGMENT_DIR = "changelog.d/";
 // so this regex and the per-member tests both derive from one source and can't
 // drift. Add a file type there, not here.
 const here = dirname(fileURLToPath(import.meta.url));
-const INTERNAL_PATHS = JSON.parse(
+// The carve-out members ({pattern, example, comment}); exported so the
+// per-member test enumerates them and checks them against the real INTERNAL_RE.
+export const INTERNAL_PATTERNS = JSON.parse(
   readFileSync(join(here, "..", "..", "config", "internal-paths.json"), "utf8"),
-);
+).patterns;
 export const INTERNAL_RE = new RegExp(
-  INTERNAL_PATHS.patterns.map((entry) => entry.pattern).join("|"),
+  INTERNAL_PATTERNS.map((entry) => entry.pattern).join("|"),
 );
 
 // Labels that explicitly declare "this PR needs no changelog fragment": a
