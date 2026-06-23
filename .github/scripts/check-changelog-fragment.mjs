@@ -24,15 +24,45 @@ const FRAGMENT_DIR = "changelog.d/";
 // A PR touching ONLY paths matching this never needs a user-facing entry. Source
 // trees (bin/, .devcontainer/, .claude/, scripts/, setup.bash, package.json, …)
 // deliberately fall outside, so a behavior change there needs a fragment or an
-// explicit label.
+// explicit label. Beyond the test/docs/CI trees, this also exempts the
+// developer-tooling config at the repo root — linters, formatters, editor and
+// git metadata, lockfiles — whose changes are never visible to a tool user.
 export const INTERNAL_RE = new RegExp(
   [
     "^tests/",
     "^docs/",
     "^changelog\\.d/", // fragments + their README
     "^\\.github/",
+    "^\\.hooks/", // git hook scripts (lint/format enforcement)
     "^CHANGELOG\\.md$",
     "^CLAUDE\\.md$", // contributor/dev instructions, not a tool-user-facing change
+    "^LICENSE$",
+    // Lint / format / type-check / coverage tool config (root dotfiles + siblings).
+    "^\\.pre-commit-config\\.yaml$",
+    "^\\.shellcheckrc$",
+    "^\\.hadolint\\.yaml$",
+    "^\\.prettierrc(\\..+)?$",
+    "^\\.prettierignore$",
+    "^\\.editorconfig$",
+    "^eslint\\.config\\.[cm]?js$",
+    "^\\.eslintrc(\\..+)?$",
+    "^\\.eslintignore$",
+    "^tsconfig(\\..+)?\\.json$",
+    "^\\.c8rc\\.json$",
+    "^\\.gitleaks\\.toml$",
+    "^\\.gitleaksignore$",
+    "^config/javascript/", // commitlint + other JS tool configs
+    // Package-manager + toolchain pins and lockfiles.
+    "^pnpm-lock\\.yaml$",
+    "^pnpm-workspace\\.yaml$",
+    "^\\.npmrc$",
+    "^\\.nvmrc$",
+    "^\\.python-version$",
+    // Git / repo metadata.
+    "^\\.gitignore$",
+    "^\\.gitattributes$",
+    "^\\.mailmap$",
+    "^\\.template-version$",
     "\\.test\\.(mjs|js|ts)$",
     "_test\\.py$",
   ].join("|"),
