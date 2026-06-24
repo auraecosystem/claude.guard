@@ -402,7 +402,9 @@ def test_skip_decision_reads_allowlisted_access(tmp_path: Path) -> None:
     escalation and is challenged, while the rw-listed domain is skipped silently.
     A parser that only checked key membership would skip both."""
     allowlist = tmp_path / "value-allowlist.json"
-    allowlist.write_text('{\n  "inference_providers": [],\n  "domains": {\n    "files.example.com": "ro"\n  }\n}\n')
+    allowlist.write_text(
+        '{\n  "inference_providers": [],\n  "domains": {\n    "files.example.com": "ro"\n  }\n}\n'
+    )
     _, _, env = _stub_env(
         tmp_path,
         FAKE_APP_ID="app1",

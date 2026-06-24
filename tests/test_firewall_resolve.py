@@ -991,9 +991,7 @@ _SHIPPED_ALLOWLIST = REPO_ROOT / ".devcontainer" / "domain-allowlist.json"
 
 def _inference_providers() -> set[str]:
     """Read the shipped inference_providers list — the SSOT for the privacy-mode drop set."""
-    return set(
-        json.loads(_SHIPPED_ALLOWLIST.read_text())["inference_providers"]
-    )
+    return set(json.loads(_SHIPPED_ALLOWLIST.read_text())["inference_providers"])
 
 
 def test_privacy_lockdown_drops_non_venice_inference() -> None:
@@ -1014,8 +1012,15 @@ def test_privacy_lockdown_drops_newer_gpu_providers() -> None:
     # --privacy left four non-Venice inference paths open. Verify all four are in
     # inference_providers and get dropped.
     providers = _inference_providers()
-    for host in ("api.runpod.io", "api.modal.com", "cloud.lambdalabs.com", "console.vast.ai"):
-        assert host in providers, f"{host} missing from inference_providers — privacy leak"
+    for host in (
+        "api.runpod.io",
+        "api.modal.com",
+        "cloud.lambdalabs.com",
+        "console.vast.ai",
+    ):
+        assert host in providers, (
+            f"{host} missing from inference_providers — privacy leak"
+        )
 
 
 def test_lockdown_set_is_consistent_with_the_shipped_allowlist() -> None:
@@ -1033,7 +1038,9 @@ def test_lockdown_set_is_consistent_with_the_shipped_allowlist() -> None:
     shipped_rw = {d for d, tier in domains.items() if tier == "rw"}
     assert shipped_rw, "expected a non-empty rw tier in the shipped allowlist"
     for host in shipped_rw:
-        assert host in providers, f"shipped rw host {host} not in inference_providers — privacy leak"
+        assert host in providers, (
+            f"shipped rw host {host} not in inference_providers — privacy leak"
+        )
     for host in providers:
         assert host in domains, f"{host} in inference_providers but not in domains"
     assert "api.venice.ai" in domains
