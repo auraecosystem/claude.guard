@@ -800,14 +800,13 @@ def test_setup_token_subcommand_bails_when_non_interactive(tmp_path: Path) -> No
 
 
 def test_version_subcommand_prints_stack_version(tmp_path: Path) -> None:
-    """`claude-guard version` routes through claude-guard-doctor --version so the
-    version string has one source — it prints the package.json version (vX.Y.Z),
-    not the full doctor report."""
+    """`claude-guard version` prints the package.json version inline (no doctor
+    delegation) — format is `claude-guard X.Y.Z [optional git desc]`."""
     empty = tmp_path / "p"
     empty.mkdir()
     r = _run_guard(tmp_path, ["version"], empty)
     assert r.returncode == 0, r.stderr
-    assert re.match(r"^v\d+\.\d+\.\d+", r.stdout.strip()), r.stdout
+    assert re.match(r"^claude-guard \d+\.\d+\.\d+", r.stdout.strip()), r.stdout
     # It's the short --version path, not the verifying-protection-state report.
     assert "protection state" not in (r.stdout + r.stderr)
 
