@@ -136,9 +136,12 @@ onboarding_capture_setup_token() {
   echo ""
   if [[ -n "$tok" ]]; then
     _ob_persist_token "$tok" "$tok_file"
-  else
-    status "Skipped — store the token 0600 at $tok_file, or export CLAUDE_CODE_OAUTH_TOKEN."
+    return 0
   fi
+  status "Skipped — store the token 0600 at $tok_file, or export CLAUDE_CODE_OAUTH_TOKEN."
+  # An empty capture (Enter/Ctrl-D). fatal => report the no-op so a script detects it.
+  [[ "$fatal" == fatal ]] && return 1
+  return 0
 }
 
 # Offer to capture a host token when none is durably configured. No-ops when a
