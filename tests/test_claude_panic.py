@@ -572,4 +572,4 @@ def test_runnable_via_symlink_chain(absolute: bool) -> None:
     ) as link:
         r = run_capture([str(link), "--help"], env=os.environ.copy())
     assert r.returncode == 0, r.stderr
-    assert "claude-panic" in r.stdout
+    assert "claude-guard panic" in r.stdout
