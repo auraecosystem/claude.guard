@@ -269,7 +269,12 @@ class AuditOnlyHandler(http.server.BaseHTTPRequestHandler):
         err = code = None
         try:
             length = int(self.headers.get("Content-Length", 0))
-            if length > MAX_BODY_SIZE:
+            if length < 0:
+                # A negative length slips under the size cap yet is truthy, so
+                # without this guard `rfile.read(-1)` reads to EOF — an unbounded
+                # pre-auth read that defeats MAX_BODY_SIZE.
+                err, code = "invalid Content-Length", 400
+            elif length > MAX_BODY_SIZE:
                 err, code = "request body too large", 413
             elif length:
                 body = self.rfile.read(length)
