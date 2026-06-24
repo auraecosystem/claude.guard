@@ -1,8 +1,7 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # all variables here are used by sourcing scripts
 # Single source of truth for Docker label keys used across the stack.
 # Sourced by gc-volumes.bash, gc-stacks.bash, ephemeral.bash, and prewarm.bash.
-# docker-compose.yml uses these same strings as YAML keys — see the drift gate in
-# tests/test_docker_labels_ssot.py.
 
 # Workspace label — applied to every volume and container belonging to a workspace;
 # GC scripts use it to find and prune orphaned resources.
