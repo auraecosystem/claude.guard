@@ -131,9 +131,9 @@ while IFS= read -r row; do
   [[ "$(row_field "$row" ready)" == "ready" ]] && continue # prewarm spare: prewarm reaper owns it
   vid="$(row_field "$row" vid)"
   ws="$(row_field "$row" ws)"
-  [[ -n "$vid" && -n "$ws" ]] || continue        # shared-auth / unlabeled: not ours to target
+  [[ -n "$vid" && -n "$ws" ]] || continue                # shared-auth / unlabeled: not ours to target
   [[ -n "$SELF_WS" && "$ws" == "$SELF_WS" ]] && continue # the workspace we're launching
-  session_attach_alive "$ws" && continue         # a launcher is attached right now
+  session_attach_alive "$ws" && continue                 # a launcher is attached right now
 
   # Tier 2: the workspace directory is gone — provably dead, reclaim it.
   if [[ ! -d "$ws" ]]; then
