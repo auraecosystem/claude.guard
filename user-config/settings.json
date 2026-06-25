@@ -143,11 +143,6 @@
       "Bash(helm *)"
     ],
     "deny": [
-<<<<<<< claude/sleepy-knuth-ym3x43
-      "Bash(git push*--force)",
-      "Bash(git push*--force *)",
-      "Bash(git push -f*)"
-=======
       "Bash(*iptables*)",
       "Bash(*ip6tables*)",
       "Bash(*ipset*)",
@@ -189,7 +184,6 @@
       "Bash(*env -u *proxy*)",
       "Bash(*env -u *PROXY*)",
       "Bash(*env -i *)"
->>>>>>> main
     ]
   },
   "_denyHostOnly": [
