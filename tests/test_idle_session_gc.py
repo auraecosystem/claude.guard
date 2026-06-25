@@ -18,6 +18,7 @@ Docker daemon, no real containers.
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -100,6 +101,7 @@ network)
         proj="${arg#label=com.docker.compose.project=}"
       prev="$arg"
     done
+    grep -qxF "$proj" "${GC_NETLS_FAIL:-/dev/null}" 2>/dev/null && exit 1
     stacks ".stacks[\"$proj\"].networks[]?"
     exit 0
     ;;
@@ -148,13 +150,27 @@ def _run(
     self_ws: str | None = None,
     rm_fail: tuple[str, ...] = (),
     stop_fail: tuple[str, ...] = (),
+    netls_fail: tuple[str, ...] = (),
     attach_live_ws: tuple[str, ...] = (),
+    now: int | None = None,
 ) -> tuple[subprocess.CompletedProcess, list[str]]:
     bindir = tmp_path / "bin"
     bindir.mkdir()
     stub = bindir / "docker"
     stub.write_text(DOCKER_STUB)
     stub.chmod(0o755)
+
+    # Freeze `date +%s` so a test can pin the idle comparison at the exact TTL boundary;
+    # any other `date` invocation (maintenance-log's -u timestamp) delegates to the real
+    # binary so the success path still logs normally.
+    if now is not None:
+        real_date = shutil.which("date")
+        date_stub = bindir / "date"
+        date_stub.write_text(
+            f'#!/usr/bin/env bash\n[[ "$1" == "+%s" ]] && {{ printf %s "{now}"; exit 0; }}\n'
+            f'exec {real_date} "$@"\n'
+        )
+        date_stub.chmod(0o755)
 
     # The managed listing the script parses (one JSON object per container, by name).
     rows = tmp_path / "rows.txt"
@@ -190,6 +206,7 @@ def _run(
     calllog.write_text("")
     (tmp_path / "rmfail.txt").write_text("".join(f"{i}\n" for i in rm_fail))
     (tmp_path / "stopfail.txt").write_text("".join(f"{i}\n" for i in stop_fail))
+    (tmp_path / "netlsfail.txt").write_text("".join(f"{i}\n" for i in netls_fail))
 
     attach_dir = tmp_path / "attach"
     for ws in attach_live_ws:
@@ -208,6 +225,7 @@ def _run(
         "GC_PS_EXIT": str(ps_exit),
         "GC_RM_FAIL": str(tmp_path / "rmfail.txt"),
         "GC_STOP_FAIL": str(tmp_path / "stopfail.txt"),
+        "GC_NETLS_FAIL": str(tmp_path / "netlsfail.txt"),
         "GC_EXPECT_LABEL": MANAGED_LABEL,
         "SESSION_ATTACH_DIR": str(attach_dir),
         "XDG_STATE_HOME": str(tmp_path / "state"),
@@ -324,6 +342,27 @@ def test_custom_ttl_makes_a_stack_idle(tmp_path: Path) -> None:
     assert calls == ["stop a"]
 
 
+@pytest.mark.parametrize(
+    "age,expect_stopped",
+    [
+        pytest.param(100, False, id="exactly-ttl-is-spared"),
+        pytest.param(101, True, id="one-past-ttl-is-stopped"),
+    ],
+)
+def test_idle_threshold_is_strictly_greater_than_ttl(
+    tmp_path: Path, age: int, expect_stopped: bool
+) -> None:
+    """The comparison is `NOW - act > TTL`, not `>=`: a stack idle for exactly TTL
+    seconds is spared, one second more is stopped. Pins the boundary by freezing the
+    clock, so a `>`→`>=` mutation flips the exactly-TTL case red."""
+    frozen = 1_000_000_000
+    ws = _existing_ws(tmp_path)
+    s = Stack("claudeedge", ws=ws, running_cids=["a"], app_cid="a", mtime=frozen - age)
+    result, calls = _run(tmp_path, [s], ttl=100, now=frozen)
+    assert result.returncode == 0, result.stderr
+    assert calls == (["stop a"] if expect_stopped else [])
+
+
 def test_stop_failure_warns_but_does_not_fail_pass(tmp_path: Path) -> None:
     ws = _existing_ws(tmp_path)
     s = Stack("claudeidle", ws=ws, running_cids=["a"], app_cid="a", mtime=_idle())
@@ -362,6 +401,18 @@ def test_reclaim_failure_fails_pass_loudly(tmp_path: Path) -> None:
     assert "could not remove container(s) of deleted-workspace stack 'claudedead'" in (
         result.stderr
     )
+    assert _maintenance_log(tmp_path) == ""
+
+
+def test_reclaim_network_prune_failure_fails_pass_loudly(tmp_path: Path) -> None:
+    """Containers remove cleanly but the network listing fails (daemon hiccup) →
+    ephemeral_remove_networks returns non-zero, so the reclaim is incomplete (a
+    leftover network can cause a later subnet overlap). The pass must still exit 1,
+    pinning the `ephemeral_remove_networks ... || rc=1` branch."""
+    s = Stack("claudedead", ws=str(tmp_path / "gone"), all_cids=["a"], networks=["n"])
+    result, calls = _run(tmp_path, [s], netls_fail=("claudedead",))
+    assert result.returncode == 1
+    assert "rm a" in calls  # the containers WERE removed before the network step failed
     assert _maintenance_log(tmp_path) == ""
 
 
