@@ -29,6 +29,7 @@ BASH = shutil.which("bash") or "/bin/bash"
 # both sourced up front in the real script; the slice harness must supply them too.
 _VERSION_GE = slice_bash_function(DOCKER_PLUGINS, "version_ge")
 _RUNNABLE = slice_bash_function(CLAUDE_RESOLVE, "claude_is_runnable")
+_INSTALLED_GLOBAL = slice_bash_function(STACK_LIB, "installed_global_version")
 _INSTALLED_CC = slice_bash_function(STACK_LIB, "installed_claude_version")
 _INSTALLED_CCR = slice_bash_function(STACK_LIB, "installed_ccr_version")
 _CC_SATISFIED = slice_bash_function(STACK_LIB, "claude_code_satisfied")
@@ -36,7 +37,7 @@ _CCR_SATISFIED = slice_bash_function(STACK_LIB, "ccr_stack_satisfied")
 
 _PRELUDE = (
     'command_exists() { command -v "$1" >/dev/null 2>&1; }\n'
-    f"{_VERSION_GE}\n{_RUNNABLE}\n{_INSTALLED_CC}\n{_INSTALLED_CCR}\n"
+    f"{_VERSION_GE}\n{_RUNNABLE}\n{_INSTALLED_GLOBAL}\n{_INSTALLED_CC}\n{_INSTALLED_CCR}\n"
 )
 _HARNESS_CC = _PRELUDE + f'{_CC_SATISFIED}\nclaude_code_satisfied "$1"\n'
 _HARNESS_CCR = _PRELUDE + f'{_CCR_SATISFIED}\nccr_stack_satisfied "$1"\n'

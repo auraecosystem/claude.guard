@@ -27,6 +27,7 @@ DOCKER_PLUGINS = REPO_ROOT / "bin" / "lib" / "docker-plugins.bash"
 BASH = shutil.which("bash") or "/bin/bash"
 
 _VERSION_GE = slice_bash_function(DOCKER_PLUGINS, "version_ge")
+_INSTALLED_GLOBAL = slice_bash_function(STACK_LIB, "installed_global_version")
 _INSTALLED_CC = slice_bash_function(STACK_LIB, "installed_claude_version")
 _INSTALLED_CCR = slice_bash_function(STACK_LIB, "installed_ccr_version")
 _NET_TIMEOUT = slice_bash_function(STACK_LIB, "_pnpm_net_timeout")
@@ -39,7 +40,7 @@ _PRELUDE = (
     "status() { :; }\n"
     'warn() { printf "%s\\n" "$1" >&2; }\n'
     "PNPM_REPORTER_ARGS=()\n"
-    f"{_VERSION_GE}\n{_INSTALLED_CC}\n{_INSTALLED_CCR}\n{_NET_TIMEOUT}\n"
+    f"{_VERSION_GE}\n{_INSTALLED_GLOBAL}\n{_INSTALLED_CC}\n{_INSTALLED_CCR}\n{_NET_TIMEOUT}\n"
 )
 _HARNESS_CC = _PRELUDE + f'{_INSTALL_CC}\ninstall_claude_code "$1"\n'
 _HARNESS_CCR = _PRELUDE + f'{_INSTALL_CCR}\ninstall_ccr_stack "$1"\n'
