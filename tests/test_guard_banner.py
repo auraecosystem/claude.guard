@@ -302,6 +302,24 @@ def test_status_renderable_shows_the_label_without_wrapping():
     assert text.no_wrap is True  # a long build command can't break the live region
 
 
+# Every progress line painted into the transient live region must crop (not wrap) to
+# the terminal width, or a too-narrow terminal scrolls the region and leaves banner
+# residue. Driven from a list so a future third indicator can't silently omit the guard.
+_LIVE_REGION_RENDERABLES = [
+    ("progress bar", lambda: banner.progress_renderable(0.5)),
+    ("build status", lambda: banner.status_renderable("[app 4/9] RUN pnpm install")),
+]
+
+
+@pytest.mark.parametrize(
+    "name,make", _LIVE_REGION_RENDERABLES, ids=[n for n, _ in _LIVE_REGION_RENDERABLES]
+)
+def test_live_region_renderables_never_wrap(name, make):
+    text = make()
+    assert text.no_wrap is True, f"{name} can wrap and scroll the splash live region"
+    assert text.overflow == "ellipsis", f"{name} must crop with an ellipsis"
+
+
 def test_progress_indicator_prefers_the_download_bar(tmp_path):
     # A numeric value is a pull → bar (even though it isn't a build-step label).
     p = tmp_path / "p"
