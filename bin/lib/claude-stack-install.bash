@@ -52,25 +52,31 @@ verify_install_artifacts() {
   return "$ok"
 }
 
-# installed_claude_version
-# Echo the pnpm-global claude-code version (bare X.Y.Z), or nothing when absent or
-# unreadable. Lets install_claude_code skip the pin when a newer release is already
-# present (so the `pnpm add` can't downgrade it).
-installed_claude_version() {
+# installed_global_version <dependency-key>
+# Echo the bare X.Y.Z version of a pnpm-global dependency (e.g.
+# @anthropic-ai/claude-code), or nothing when absent or unreadable. Lets the
+# install steps skip a pin when the package is already present at a satisfying
+# version (so the `pnpm add` can't downgrade or needlessly reinstall it).
+installed_global_version() {
   local list_json
   list_json="$(pnpm list -g --json 2>/dev/null)" || return 0
-  jq -re '.[0].dependencies["@anthropic-ai/claude-code"].version' <<<"$list_json" 2>/dev/null || return 0
+  jq -re --arg k "$1" '.[0].dependencies[$k].version' <<<"$list_json" 2>/dev/null || return 0
+}
+
+# installed_claude_version
+# Echo the pnpm-global claude-code version, or nothing when absent. Lets
+# install_claude_code skip the pin when a newer release is already present (so
+# the `pnpm add` can't downgrade it).
+installed_claude_version() {
+  installed_global_version "@anthropic-ai/claude-code"
 }
 
 # installed_ccr_version
-# Echo the pnpm-global claude-code-router version (bare X.Y.Z), or nothing when
-# absent or unreadable. Lets install_ccr_stack skip the ccr pin when the exact
-# pinned version is already present (so the `pnpm add` doesn't reinstall an
-# unchanged router).
+# Echo the pnpm-global claude-code-router version, or nothing when absent. Lets
+# install_ccr_stack skip the ccr pin when the exact pinned version is already
+# present (so the `pnpm add` doesn't reinstall an unchanged router).
 installed_ccr_version() {
-  local list_json
-  list_json="$(pnpm list -g --json 2>/dev/null)" || return 0
-  jq -re '.[0].dependencies["@musistudio/claude-code-router"].version' <<<"$list_json" 2>/dev/null || return 0
+  installed_global_version "@musistudio/claude-code-router"
 }
 
 # _pnpm_net_timeout — populate the named array with the `timeout` prefix that caps
