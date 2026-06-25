@@ -81,7 +81,9 @@ row_field() { jq -er --arg k "$2" '.[$k] // ""' <<<"$1" 2>/dev/null || true; }
 stack_last_active() {
   local vid="$1" proj="$2" volname cid
   volname="$(session_volume_name "$vid" config)"
-  # kcov-ignore-start  multi-line command substitution: kcov credits it to its closing line, leaving the opener uncovered though the docker-ps probe runs in every Tier-1 test.
+  # Multi-line command substitution: kcov credits it to its closing line, leaving
+  # the opener uncovered though the docker-ps probe runs in every Tier-1 test.
+  # kcov-ignore-start
   cid="$(docker ps -q --filter "label=com.docker.compose.project=$proj" \
     --filter "volume=$volname" 2>/dev/null | head -1)"
   # kcov-ignore-end

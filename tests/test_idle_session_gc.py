@@ -372,6 +372,24 @@ def test_stop_failure_warns_but_does_not_fail_pass(tmp_path: Path) -> None:
     assert _maintenance_log(tmp_path) == ""
 
 
+def test_partial_stop_failure_warns_and_does_not_log(tmp_path: Path) -> None:
+    """A real stack is multi-container (app + monitor + firewall). If even one
+    container fails to stop, `xargs docker stop` returns non-zero, so the whole
+    stop is treated as failed: warn, and do NOT record it as stopped."""
+    ws = _existing_ws(tmp_path)
+    s = Stack(
+        "claudeidle",
+        ws=ws,
+        running_cids=["app", "mon", "fw"],
+        app_cid="app",
+        mtime=_idle(),
+    )
+    result, _ = _run(tmp_path, [s], stop_fail=("mon",))
+    assert result.returncode == 0, result.stderr
+    assert "could not stop idle session stack 'claudeidle'" in result.stderr
+    assert _maintenance_log(tmp_path) == ""
+
+
 # --- Tier 2: reclaim deleted-workspace stacks -------------------------------------
 
 
