@@ -1729,9 +1729,7 @@ def test_launch_manifest_inspect_is_bounded(tmp_path: Path) -> None:
     _fake_git(tmp_path)
     # The manifest inspect sleeps 30s; a 1s ceiling must cut it off. local_present so
     # the post-timeout path is the local-reuse branch (no pull/verify attempted).
-    _fake_docker(
-        tmp_path, manifest_ok=True, manifest_sleep=30, local_present=True
-    )
+    _fake_docker(tmp_path, manifest_ok=True, manifest_sleep=30, local_present=True)
     _fake_cosign(tmp_path, verify_ok=True)
     start = time.monotonic()
     res = _run(tmp_path, {"CLAUDE_GUARD_MANIFEST_TIMEOUT": "1"})

@@ -176,7 +176,10 @@ def test_local_digest_single_distinct_match_is_returned(tmp_path: Path) -> None:
     repo path) is unambiguous: the one distinct digest is returned."""
     binn = _docker(tmp_path, _multi_digest_arms("same"))
     r = _drive(
-        "local_digest", "secure-claude-sandbox:git-x", bin_dir=binn, cache=tmp_path / "c"
+        "local_digest",
+        "secure-claude-sandbox:git-x",
+        bin_dir=binn,
+        cache=tmp_path / "c",
     )
     assert r.returncode == 0, r.stderr
     assert r.stdout == "sha256:beef"
@@ -190,7 +193,10 @@ def test_local_digest_ambiguous_multiple_digests_fails_closed(tmp_path: Path) ->
     re-verifies) and prints no digest rather than guess."""
     binn = _docker(tmp_path, _multi_digest_arms("diff"))
     r = _drive(
-        "local_digest", "secure-claude-sandbox:git-x", bin_dir=binn, cache=tmp_path / "c"
+        "local_digest",
+        "secure-claude-sandbox:git-x",
+        bin_dir=binn,
+        cache=tmp_path / "c",
     )
     assert r.returncode == 1
     assert r.stdout == ""

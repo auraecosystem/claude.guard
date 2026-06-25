@@ -211,7 +211,11 @@ _TLOG_SIGNATURE = {
     "Chain": "-----BEGIN CERTIFICATE-----\nMIIF...stub...==\n-----END CERTIFICATE-----\n",
     "Bundle": {
         "SignedEntryTimestamp": "MEUCIQDstubRekorSet==",
-        "Payload": {"logIndex": 123, "logID": "c0d23d...", "integratedTime": 1700000000},
+        "Payload": {
+            "logIndex": 123,
+            "logID": "c0d23d...",
+            "integratedTime": 1700000000,
+        },
     },
     "RFC3161Timestamp": None,
 }

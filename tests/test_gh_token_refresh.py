@@ -93,7 +93,7 @@ def test_orphan_guard_ppid_read_is_a_bare_integer(tmp_path: Path) -> None:
     child = write_exe(
         tmp_path / "read_ppid.sh",
         "#!/usr/bin/env bash\n"
-        "ppid=\"$(ps -o ppid= -p \"$$\" 2>/dev/null | tr -d '[:space:]')\"\n"
+        'ppid="$(ps -o ppid= -p "$$" 2>/dev/null | tr -d \'[:space:]\')"\n'
         'printf %s "$ppid"\n',
     )
     script = f'printf "PPID=%s\\nPARENT=%s\\n" "$({child})" "$$"\n'
