@@ -9,7 +9,10 @@ start-time gates, and the fail-loud teardown.
 
 # covers: bin/lib/gh-token-refresh.bash
 import os
+import re
 from pathlib import Path
+
+import pytest
 
 from tests._helpers import (
     REPO_ROOT,
@@ -73,6 +76,69 @@ def test_interval_rejects_zero_and_garbage(tmp_path: Path) -> None:
             env={"PATH": current_path(), "CLAUDE_GH_TOKEN_REFRESH_INTERVAL": bad},
         )
         assert r.stdout.strip() == "3000", f"{bad!r} should fall back to default"
+
+
+# ── orphan-guard ppid read ───────────────────────────────────────────────────
+
+
+@pytest.mark.cross_platform
+def test_orphan_guard_ppid_read_is_a_bare_integer(tmp_path: Path) -> None:
+    """The refresh loop's reparent guard compares `ps -o ppid= -p <pid>` (trimmed)
+    against the launcher pid; a spurious mismatch would silently EXIT the loop and
+    drop the credential. Host `ps` differs across GNU/BSD, so assert the exact
+    extraction the loop uses yields a bare integer on this host's ps — and that it
+    equals the known parent pid, proving the read is the real ppid, not noise."""
+    # A child process reads its OWN ppid via the loop's exact extraction; that value
+    # must be a bare integer and equal $$ (the launching bash that is its parent).
+    child = write_exe(
+        tmp_path / "read_ppid.sh",
+        "#!/usr/bin/env bash\n"
+        "ppid=\"$(ps -o ppid= -p \"$$\" 2>/dev/null | tr -d '[:space:]')\"\n"
+        'printf %s "$ppid"\n',
+    )
+    script = f'printf "PPID=%s\\nPARENT=%s\\n" "$({child})" "$$"\n'
+    r = run_capture(["bash", "-c", script], cwd=tmp_path, env={"PATH": current_path()})
+    fields = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    ppid = fields.get("PPID", "")
+    assert re.fullmatch(r"[0-9]+", ppid), f"ppid read was not a bare integer: {ppid!r}"
+    assert ppid == fields["PARENT"], (
+        f"ppid {ppid!r} should equal the parent pid {fields['PARENT']!r}"
+    )
+
+
+def test_loop_keeps_minting_when_ppid_read_is_unparsable(tmp_path: Path) -> None:
+    """An unparsable `ps -o ppid=` read (a header leak, a warning, an empty result if
+    the pid vanished mid-call) must NOT be treated as a reparent: a spurious exit would
+    silently drop the credential a long session depends on. With a `ps` stub that emits
+    a non-integer, the loop must stay alive and keep re-publishing — only a cleanly-read
+    ppid that no longer names the launcher counts as a real reparent."""
+    bin_path = write_exe(tmp_path / "claude-github-app", _RECORDING_APP)
+    # A `ps` stub that emits garbage (never a bare integer) for the loop's reparent
+    # check, shadowing the real ps on PATH.
+    write_exe(tmp_path / "ps", "#!/usr/bin/env bash\necho 'not-a-pid'\n")
+    repo = _git_repo(tmp_path)
+    dir_ = tmp_path / "pub"
+    env = {
+        **_base_env(tmp_path, fake_github_app_dir(tmp_path), tmp_path / "a.txt"),
+        "PATH": f"{tmp_path}:{current_path()}",  # our ps stub first
+        "CLAUDE_GH_TOKEN_REFRESH_INTERVAL": "1",
+    }
+    r = _source(
+        f'gh_token_refresh_start "{bin_path}" "{dir_}"\n'
+        "pid=$_GH_TOKEN_REFRESH_PID\n"
+        # After two intervals the loop has run its post-sleep reparent check at least
+        # twice; if a garbage ppid had been read as a reparent it would have exited.
+        "sleep 2.4\n"
+        'echo "ALIVE=$(kill -0 "$pid" 2>/dev/null && echo yes || echo no)"\n'
+        f'gh_token_refresh_stop "{dir_}" >/dev/null 2>&1 || true\n',
+        cwd=repo,
+        env=env,
+    )
+    assert "ALIVE=yes" in r.stdout, (
+        "the loop self-exited on an unparsable ppid read, dropping the credential: "
+        + r.stdout
+        + r.stderr
+    )
 
 
 # ── publish ─────────────────────────────────────────────────────────────────
