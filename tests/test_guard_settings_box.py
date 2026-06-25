@@ -90,7 +90,10 @@ def _firewall_off(rows: list[str]) -> list[str]:
 # 80-column width guard must hold across.
 ALL_RENDERED_SHAPES = {
     **LAUNCHER_SHAPES,
-    **{f"{name}-firewall-off": _firewall_off(rows) for name, rows in LAUNCHER_SHAPES.items()},
+    **{
+        f"{name}-firewall-off": _firewall_off(rows)
+        for name, rows in LAUNCHER_SHAPES.items()
+    },
 }
 
 # A standard 80-column terminal shows columns 1..80; an 81st glyph wraps. The box
