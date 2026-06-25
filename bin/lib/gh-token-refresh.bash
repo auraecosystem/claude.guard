@@ -71,11 +71,15 @@ _gh_token_refresh_publish_with_retry() {
   local bin="$1" dir="$2" attempt=1
   local max="${CLAUDE_GH_TOKEN_INITIAL_ATTEMPTS:-3}" delay="${CLAUDE_GH_TOKEN_RETRY_DELAY:-2}"
   { [[ "$max" =~ ^[0-9]+$ ]] && ((max > 0)); } || max=3
+  [[ "$delay" =~ ^[0-9]+$ ]] || delay=2 # 0 is a valid "retry without sleeping" value
   while true; do
     _gh_token_refresh_publish "$bin" "$dir" && return 0
     ((attempt >= max)) && return 1
     sleep "$delay" 2>/dev/null || true
-    ((attempt += 1, delay *= 2))
+    # $(( )) assignment (always exit 0), not a bare (( )) command: a (( )) evaluating to
+    # 0 returns exit 1 and would abort the loop under set -e on some bash builds.
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
   done
 }
 

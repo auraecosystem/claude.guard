@@ -344,6 +344,59 @@ def test_retry_attempt_count_falls_back_on_a_bad_override(tmp_path: Path) -> Non
         assert count.read_text().strip() == "3", f"{bad!r} should fall back to 3 attempts"
 
 
+def test_retry_backoff_doubles_between_attempts(tmp_path: Path) -> None:
+    """The delay doubles each retry (2s → 4s). A stub `sleep` records its argument so the
+    backoff is asserted without really sleeping — and this covers the production NON-zero
+    delay path (the other retry tests pin delay=0, which skips the sleep value entirely)."""
+    app = write_exe(tmp_path / "claude-github-app", _FLAKY_APP)
+    repo = _git_repo(tmp_path)
+    pub = tmp_path / "pub"
+    pub.mkdir()
+    sleeps = tmp_path / "sleeps"
+    env = {
+        **_base_env(tmp_path, fake_github_app_dir(tmp_path), tmp_path / "a.txt"),
+        "COUNT_FILE": str(tmp_path / "count"),
+        "FAIL_TIMES": "2",
+        "CLAUDE_GH_TOKEN_INITIAL_ATTEMPTS": "3",
+        "SLEEP_LOG": str(sleeps),  # CLAUDE_GH_TOKEN_RETRY_DELAY unset → default 2
+    }
+    r = _source(
+        'sleep() { echo "$1" >>"$SLEEP_LOG"; }\n'
+        f'_gh_token_refresh_publish_with_retry "{app}" "{pub}" && echo "RC=$?"',
+        cwd=repo,
+        env=env,
+    )
+    assert "RC=0" in r.stdout, r.stderr
+    assert sleeps.read_text().split() == ["2", "4"], "delay must double each retry"
+    assert (pub / "token").read_text() == "refreshed-token"
+
+
+def test_retry_delay_falls_back_on_a_garbage_override(tmp_path: Path) -> None:
+    """A non-numeric delay falls back to the default rather than passing junk to `sleep`;
+    delay=0 stays valid (retry without sleeping), so only non-`^[0-9]+$` is replaced."""
+    app = write_exe(tmp_path / "claude-github-app", _FLAKY_APP)
+    repo = _git_repo(tmp_path)
+    pub = tmp_path / "pub"
+    pub.mkdir()
+    sleeps = tmp_path / "sleeps"
+    env = {
+        **_base_env(tmp_path, fake_github_app_dir(tmp_path), tmp_path / "a.txt"),
+        "COUNT_FILE": str(tmp_path / "count"),
+        "FAIL_TIMES": "1",
+        "CLAUDE_GH_TOKEN_INITIAL_ATTEMPTS": "2",
+        "CLAUDE_GH_TOKEN_RETRY_DELAY": "abc",
+        "SLEEP_LOG": str(sleeps),
+    }
+    r = _source(
+        'sleep() { echo "$1" >>"$SLEEP_LOG"; }\n'
+        f'_gh_token_refresh_publish_with_retry "{app}" "{pub}" && echo "RC=$?"',
+        cwd=repo,
+        env=env,
+    )
+    assert "RC=0" in r.stdout, r.stderr
+    assert sleeps.read_text().split() == ["2"], "garbage delay must fall back to 2, not 'abc'"
+
+
 def test_start_retries_a_transient_initial_failure_without_warning(
     tmp_path: Path,
 ) -> None:
