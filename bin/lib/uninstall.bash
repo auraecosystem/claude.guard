@@ -70,6 +70,7 @@ remove_profile_marked_line() {
   # inserted), without eating genuine user blanks elsewhere. `blank` is a one-line
   # lookbehind: a pending blank is emitted on the next real line but dropped when
   # the marker turns out to follow it.
+  # kcov-ignore-start  multi-line single-quoted awk program; kcov credits the command to its opening `awk` line, leaving these interior lines uncovered though the program runs on every marker-strip (test_uninstall.py drives it)
   awk -v m="$marker" '
     index($0, m){ blank=0; skip=1; next }
     skip>0 { skip--; next }
@@ -77,6 +78,7 @@ remove_profile_marked_line() {
     { if (blank) { print ""; blank=0 } print }
     END { if (blank) print "" }
   ' "$target" >"$tmp"
+  # kcov-ignore-end
   mv -f "$tmp" "$target"
   status "Removed claude-guard $what from $profile"
 }
