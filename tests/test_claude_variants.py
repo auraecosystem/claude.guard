@@ -468,7 +468,9 @@ def test_privacy_tiers_match_wrapper_error_list() -> None:
     the wrapper's error message advertises must be exactly the spec's set."""
     text = CLAUDE_GUARD.read_text()
     m = re.search(r"--privacy must be one of:\s*(?P<list>[^(]+?)\s*\(got", text)
-    assert m, "could not locate the '--privacy must be one of: …' error line in the wrapper"
+    assert m, (
+        "could not locate the '--privacy must be one of: …' error line in the wrapper"
+    )
     wrapper_tiers = sorted(t.strip() for t in m.group("list").split(",") if t.strip())
     assert wrapper_tiers == sorted(SPEC_PRIVACY_TIERS), (
         f"wrapper error tiers {wrapper_tiers} != cli-spec privacyTiers "
