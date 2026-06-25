@@ -319,13 +319,14 @@ def test_record_reservation_cleans_temp_when_move_fails(fake_docker: Path) -> No
     """The temp file is written, but the final `mv -f "$tmp" reservations" fails
     (here `reservations` is a DIRECTORY, so mv refuses). The fix must (a) fail loud
     (non-zero, not the old `&&`-skip that returned success) and (b) leave NO
-    `reservations.<pid>` litter behind — the RETURN trap removes the temp file.
+    `reservations.<pid>` litter behind — the inline `rm -f "$tmp"` on the
+    move-failure path removes the temp file.
 
-    Without the trap, the written `$tmp` survives the skipped mv; without the
-    `|| return 1` post-condition check, the function exits 0 on a failed move.
+    Without the cleanup, the written `$tmp` survives the failed mv; without the
+    explicit `return 1` post-condition check, the function exits 0 on a failed move.
 
-    A `mv` shim that always fails drives the move-failure deterministically. The
-    redirection has already created `$tmp`, so the RETURN trap is what removes it."""
+    A `mv` shim that always fails drives the move-failure deterministically; the
+    redirection has already created `$tmp`, so the failure-path rm is what removes it."""
     reserve = fake_docker.parent / "reserve-mvfail"
     reserve.mkdir()
     mv_shim = fake_docker / "mv"
@@ -341,6 +342,39 @@ def test_record_reservation_cleans_temp_when_move_fails(fake_docker: Path) -> No
         p.name for p in reserve.iterdir() if p.name.startswith("reservations.")
     ]
     assert temp_litter == [], temp_litter  # no reservations.<pid> leaked
+
+
+def test_allocation_under_set_u_does_not_trip_unbound_var(fake_docker: Path) -> None:
+    """The lib is sourced and run under `set -euo pipefail` (the real launcher's
+    mode). A temp-file helper must not leave a function-scoped RETURN trap installed:
+    such a trap re-fires on every LATER function return, where its `$tmp` is unset,
+    so `set -u` aborts the whole allocation at the caller's `return` — surfacing as
+    a bogus "all subnets in use". Assert a clean allocation: no unbound-variable
+    error, and a real subnet chosen."""
+    reserve = fake_docker.parent / "reserve-setu"
+    reserve.mkdir()
+    # `set -u` BEFORE the source, exactly as bin/claude-guard runs it; export_sandbox_subnet
+    # calls _pick_octet -> _record_reservation and then returns, the trap's re-fire point.
+    script = (
+        "set -euo pipefail\n"
+        "cg_error() { echo \"$*\" >&2; }\n"
+        f"source {LIB}\n"
+        'export_sandbox_subnet; echo "$SANDBOX_SUBNET"'
+    )
+    r = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": f"{fake_docker}:{os.environ['PATH']}",
+            "SANDBOX_NET_RESERVE_DIR": str(reserve),
+            "FAKE_NETS": "",
+        },
+        check=False,
+    )
+    assert "unbound variable" not in r.stderr, (r.stdout, r.stderr)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert r.stdout.strip() == "172.30.0.0/24", (r.stdout, r.stderr)
 
 
 # ── per-uid reservation dir default (multi-user / macOS isolation) ──────────

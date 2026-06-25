@@ -131,17 +131,25 @@ _record_reservation() {
   local octet="$1" now="$2" f tmp
   f="$SANDBOX_NET_RESERVE_DIR/reservations"
   tmp="$f.$$"
-  # Remove the temp file on any return path: a failed write (disk full on the
-  # /tmp fallback, _live_reservations erroring) otherwise leaves $f.$$ litter in
-  # the 0700 reserve dir, never read but unbounded across launches.
-  trap 'rm -f "$tmp"' RETURN
-  {
+  # Clean the temp file on every failure path: a failed write (disk full on the
+  # /tmp fallback, _live_reservations erroring) or a failed rename otherwise
+  # leaves $f.$$ litter in the 0700 reserve dir, never read but unbounded across
+  # launches. We rm inline rather than via a RETURN trap: a function-set RETURN
+  # trap is not auto-cleared, so it would re-fire on every later function return
+  # — where $tmp is unset, tripping `set -u` and aborting the whole allocation.
+  if ! {
     _live_reservations "$now" | awk -v o="$octet" '$1 != o'
     printf '%s %s\n' "$octet" "$now"
-  } >"$tmp" || return 1
+  } >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
   # Post-condition is the rename, not the brace block's exit: fail loud rather
   # than leave the reservations file silently unchanged on a write/move error.
-  mv -f "$tmp" "$f"
+  mv -f "$tmp" "$f" || {
+    rm -f "$tmp"
+    return 1
+  }
 }
 
 # _pick_octet — print the first free octet (skipping in-use Docker subnets and
