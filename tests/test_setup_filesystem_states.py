@@ -305,11 +305,11 @@ def _bashrc(home: Path) -> Path:
 def test_persist_writes_single_block_cold(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    r = _persist(home, "coldRunValue42zZ")
+    r = _persist(home, "cold-monitor-key")
     assert r.returncode == 0, r.stderr
     body = _bashrc(home).read_text()
     assert body.count(_MARKER) == 1
-    assert "export MONITOR_API_KEY='coldRunValue42zZ'" in body
+    assert "export MONITOR_API_KEY='cold-monitor-key'" in body
 
 
 def test_persist_rerun_replaces_block_not_stacks(tmp_path: Path) -> None:
@@ -318,13 +318,13 @@ def test_persist_rerun_replaces_block_not_stacks(tmp_path: Path) -> None:
     beneath a second. A duplicate would leave two conflicting export lines."""
     home = tmp_path / "home"
     home.mkdir()
-    assert _persist(home, "firstValue1234aB").returncode == 0
-    assert _persist(home, "secondValue567cD").returncode == 0
+    assert _persist(home, "first-monitor-key").returncode == 0
+    assert _persist(home, "second-monitor-key").returncode == 0
     body = _bashrc(home).read_text()
     assert body.count(_MARKER) == 1, "re-run must not stack a second marker block"
     assert body.count("export MONITOR_API_KEY=") == 1, "exactly one export survives"
-    assert "secondValue567cD" in body
-    assert "firstValue1234aB" not in body, "old key must be gone, not left behind"
+    assert "second-monitor-key" in body
+    assert "first-monitor-key" not in body, "old key must be gone, not left behind"
 
 
 def test_persist_preserves_unrelated_profile_lines(tmp_path: Path) -> None:
