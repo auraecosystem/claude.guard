@@ -321,7 +321,36 @@ ensure_man_page() {
   fi
   man_dir="${XDG_DATA_HOME:-$HOME/.local/share}/man/man1"
   ensure_dir "$man_dir"
-  cp "$src" "$man_dir/claude-guard.1"
-  ln -sf claude-guard.1 "$man_dir/claude.1"
+
+  # Best-effort: a failure here must not abort setup, so warn and skip the success
+  # line rather than letting cp/ln crash out. A broken dest symlink (a dotfiles link
+  # whose target was removed) makes cp follow it and die on the dead destination, so
+  # clear it first (mirrors install_security_claude_md).
+  local dest="$man_dir/claude-guard.1"
+  if [[ -L "$dest" && ! -e "$dest" ]]; then
+    warn "Replacing broken symbolic link $dest (its target $(readlink "$dest") is missing)."
+    rm -f "$dest"
+  fi
+  if ! cp "$src" "$dest"; then
+    warn "Could not install the man page to $dest. Check its permissions, then re-run setup."
+    return 0
+  fi
+
+  # claude.1 is a symlink to claude-guard.1 so `man claude` resolves for the alias.
+  # If it's already our symlink, leave it; if it's a user's own claude.1 (a regular
+  # file or a non-ours symlink for a different `claude` tool), back it up rather than
+  # force-clobbering it (mirrors safe_symlink and remove_man_page's ours-only rule).
+  local dest2="$man_dir/claude.1"
+  if [[ -L "$dest2" && "$(readlink "$dest2")" == claude-guard.1 ]]; then
+    status "Installed man page (man claude-guard / man claude) in $man_dir"
+    return 0
+  fi
+  if [[ -e "$dest2" || -L "$dest2" ]]; then
+    local bak
+    bak="$dest2.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$dest2" "$bak"
+    warn "Backed up existing $dest2 to $bak"
+  fi
+  ln -sf claude-guard.1 "$dest2"
   status "Installed man page (man claude-guard / man claude) in $man_dir"
 }
