@@ -41,9 +41,9 @@ def _secret_glob_members() -> list[str]:
     src = SCRUB_ALLOW_LIB.read_text()
     # The alternation line: `    *token* | *secret* | ... ) ;; # ...`. Capture the
     # run of `*word*` globs up to the `)` that closes the case pattern.
-    m = re.search(r"\n\s*(\*\w+\*(?:\s*\|\s*\*\w+\*)*)\)", src)
+    m = re.search(r"\n\s*(?P<alt>\*\w+\*(?:\s*\|\s*\*\w+\*)*)\)", src)
     assert m, "could not locate the secret-name glob alternation in scrub-allow.bash"
-    members = re.findall(r"\*(\w+)\*", m.group(1))
+    members = re.findall(r"\*(?P<word>\w+)\*", m.group("alt"))
     assert members, "secret-name glob alternation parsed to zero members"
     return members
 
