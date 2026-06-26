@@ -138,12 +138,19 @@ gh_token_refresh_start() {
     cg_warn "claude: warning — initial GitHub token publish failed${_GH_TOKEN_REFRESH_LAST_ERR:+ (${_GH_TOKEN_REFRESH_LAST_ERR})}; long sessions may lose access after ~1h."
   (
     loop_self=$BASHPID
+    local ppid
     # Detach the sleep's stdio: it can outlive the kill in _stop by up to one interval,
     # and an inherited pipe would keep a caller's captured stream open that long.
     while sleep "$interval" >/dev/null 2>&1; do
       # Exit when the launching shell is gone (we got reparented) so a launcher killed
-      # without running _stop can't leave us minting forever.
-      [[ "$(ps -o ppid= -p "$loop_self" | tr -d ' ')" == "$launcher_pid" ]] || exit 0
+      # without running _stop can't leave us minting forever. Validate the ppid is a
+      # bare integer first: GNU and BSD `ps -o ppid=` can diverge (a header leak, a
+      # warning, or an empty read if the pid vanished mid-call), and a spurious exit
+      # would silently DROP the credential a long session depends on. So an unparsable
+      # read keeps the loop alive to re-check next tick — only a cleanly-read ppid that
+      # no longer names the launcher counts as a real reparent.
+      ppid="$(ps -o ppid= -p "$loop_self" 2>/dev/null | tr -d '[:space:]')"
+      [[ "$ppid" =~ ^[0-9]+$ && "$ppid" != "$launcher_pid" ]] && exit 0
       # A transient mint/publish failure must not kill the loop (it retries next tick) and
       # never clobbers the live token (publish guarantees that). Discard its output so the
       # suppression is total — publish writes the token to a file and produces none worth keeping.
