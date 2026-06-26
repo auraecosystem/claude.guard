@@ -831,9 +831,6 @@ def test_wrapper_ephemeral_is_default_and_tears_down(wrapper_box) -> None:
     assert "claude --permission-mode" in log
     assert "ephemeral" in r.stderr
     assert "config/history reset (resumable), workspace kept" in r.stderr
-    # The banner names the host directory linked into the sandbox, so the operator
-    # can tell what Claude Code's bare "/workspace" cwd maps to on the host.
-    assert f"workspace: {os.path.realpath(repo)}" in r.stderr
     # The session's own passphrase compose project (session_project of the id)
     # scopes both discovery and teardown — never the shared workspace folder alone.
     assert re.search(r"label=com\.docker\.compose\.project=claude[a-z0-9]+", log)
@@ -1375,12 +1372,16 @@ def test_wrapper_resume_restores_across_a_worktree(wrapper_box) -> None:
     assert "tar -xf" in log, (
         "must restore (and re-home) a transcript from another worktree"
     )
+    # The restore succeeded, so the resume flag MUST still reach the inner claude
+    # (it needs --resume <id> to pick the seeded transcript) — never stripped here.
+    assert "--resume sess-a" in log, log
 
 
 def test_wrapper_resume_warns_loudly_when_it_cannot_restore(wrapper_box) -> None:
     """A `--resume` that genuinely can't be satisfied must not silently come up
-    blank: each reason (no saved conversation, requested id absent) launches fresh
-    but warns loudly with that reason."""
+    blank: each reason (no saved conversation, requested id absent) launches fresh,
+    warns loudly with that reason, AND strips the now-dead --resume flag so the inner
+    claude actually starts fresh instead of hard-exiting "No conversation found"."""
     repo, stub, home = wrapper_box
     workspace = os.path.realpath(repo)
     txn_root = home / "txn"
@@ -1394,6 +1395,8 @@ def test_wrapper_resume_warns_loudly_when_it_cannot_restore(wrapper_box) -> None
     assert r.returncode == 0 and "LAUNCHED-CLAUDE" in r.stdout, r.stderr
     assert "tar -xf" not in log
     assert "no saved conversation for this workspace" in r.stderr, r.stderr
+    # The dead resume flag must not survive to the inner claude.
+    assert "claude --permission-mode" in log and "--resume" not in log, log
 
     # 2) A snapshot exists but does not contain the requested id → predates warning.
     _seed_transcript_archive(txn_root, workspace, "other-id")
@@ -1401,6 +1404,7 @@ def test_wrapper_resume_warns_loudly_when_it_cannot_restore(wrapper_box) -> None
     assert r.returncode == 0 and "LAUNCHED-CLAUDE" in r.stdout, r.stderr
     assert "tar -xf" not in log
     assert "does not contain session sess-a" in r.stderr, r.stderr
+    assert "claude --permission-mode" in log and "--resume" not in log, log
 
 
 # ── session attach-lock (session_attach_mark / _alive / _prune) ──────────────

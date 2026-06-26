@@ -402,12 +402,14 @@ restore_resume_transcript() {
   _snap="$(claude_latest_transcript_archive "$_dest" "$_dir")"
   if [[ -z "$_snap" ]]; then
     cg_warn "resume: no saved conversation for this workspace under $_dir — starting a fresh session. (Transcripts are saved only from prior ephemeral sessions in this same directory.)"
+    _resume_fresh_fallback=true
     return 0
   fi
   # `--resume <id>` must restore the snapshot holding that session; if the newest
   # one predates it, start fresh rather than silently resume a different one.
   if [[ -n "${_resume_id:-}" ]] && ! transcript_archive_has_session "$_snap" "$_resume_id"; then
     cg_warn "resume: the saved conversation for this workspace does not contain session $_resume_id (it predates that session) — starting a fresh session instead of resuming a different one."
+    _resume_fresh_fallback=true
     return 0
   fi
   # claude only reads transcripts filed under the CURRENT cwd, but the archive may
@@ -415,8 +417,36 @@ restore_resume_transcript() {
   # not reusing). Seed re-homes them under this session's cwd dir so `claude
   # --resume`/`--continue` actually sees them.
   _proj="$(claude_project_dir_for_cwd "$container_cwd")"
-  transcript_seed_into_config "$container_id" "$_snap" "$_proj" ||
+  transcript_seed_into_config "$container_id" "$_snap" "$_proj" || {
     cg_warn "resume: restoring the saved conversation into the session failed (see the docker error above) — starting fresh."
+    _resume_fresh_fallback=true
+  }
+}
+
+# strip_resume_flags — rebuild the forwarded claude args dropping every resume token
+# (--resume[=id]/-r[ id]/--continue[=id]/-c), into the global _claude_forward_args.
+# Called only on a fresh fallback (see _resume_fresh_fallback): the wrapper warned it
+# would start fresh, so the inner claude must NOT receive a resume flag it can't honor
+# (a bare --resume <unknown-id> makes claude hard-exit "No conversation found").
+strip_resume_flags() {
+  _claude_forward_args=()
+  local _drop_id=false _a
+  for _a in "$@"; do
+    # The token after a bare --resume/-r is its id — drop it too, but only when it is
+    # not itself another flag (a bare --resume with no id is the interactive picker).
+    if "$_drop_id"; then
+      _drop_id=false
+      [[ "$_a" == -* ]] || continue
+    fi
+    case "$_a" in
+    --resume | -r)
+      _drop_id=true
+      continue
+      ;;
+    --continue | -c | --resume=* | --continue=* | -r?*) continue ;;
+    esac
+    _claude_forward_args+=("$_a")
+  done
 }
 
 # restore_resume_audit — companion to restore_resume_transcript: on an ephemeral

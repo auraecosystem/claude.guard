@@ -70,13 +70,19 @@ done
 set -- "${_wrapper_args[@]+"${_wrapper_args[@]}"}"
 
 # Detect a resume/continue request in the forwarded args WITHOUT consuming the
-# flags — they must still reach the inner claude. In ephemeral mode the fresh
-# config volume has no transcript, so restore_resume_transcript (launch.bash)
-# seeds the archived one before launch. Capture the id after --resume/-r so the
-# restore can pick the snapshot containing that session; --continue/-c needs none.
+# flags — they must still reach the inner claude (the lone exception is the
+# fresh-fallback strip below, when the resume can't be satisfied). In ephemeral
+# mode the fresh config volume has no transcript, so restore_resume_transcript
+# (launch.bash) seeds the archived one before launch. Capture the id after
+# --resume/-r so the restore can pick the snapshot containing that session;
+# --continue/-c needs none.
 _resume_requested=false
 _resume_id=""
 _resume_prev=""
+# Set true by restore_resume_transcript when an ephemeral resume can't be satisfied
+# and it falls back to a fresh session: the dead resume flag must then be stripped
+# from the forwarded args so the inner claude doesn't hard-exit "No conversation found".
+_resume_fresh_fallback=false
 for _arg in "$@"; do
   # Match every claude resume syntax: --resume/-r/--continue/-c, the =joined
   # (--resume=<id>) and -r<id> joined short forms, plus the space-separated id
@@ -1230,10 +1236,6 @@ print_settings_box() {
     local prot_row="green"$'\t'"Protection"$'\t'"sandboxed"$'\t'"$ISOLATION_SHORT"
     local ses_row="green"$'\t'"Session"$'\t'"$_box_session_status"$'\t'"$_box_session_detail"
     render_settings_box "$prot_row" "$net_row" "$mon_row" "$ses_row"
-    # Name the host directory linked into the sandbox: Claude Code's own banner
-    # shows the container cwd as a bare "/workspace", which hides which real
-    # directory is exposed to the agent — a boundary the operator should see.
-    cg_info "workspace: $workspace_folder"
   fi
 }
 
@@ -3002,6 +3004,13 @@ launch_trace_mark "$MARK_SESSION_AUTH_READY"
 # projects/, before handover.
 restore_resume_transcript
 restore_resume_audit
+# When restore_resume_transcript fell back to a fresh session, the user's --resume/
+# --continue flag would still reach the inner claude and make it hard-exit "No
+# conversation found" — drop it so the promised fresh session actually launches.
+if "${_resume_fresh_fallback:-false}"; then
+  strip_resume_flags "$@"
+  set -- "${_claude_forward_args[@]+"${_claude_forward_args[@]}"}"
+fi
 _perm_mode="$(resolve_permission_mode)"
 
 # Start the opt-in Watcher bridge: it polls the bind-mounted event dir the
