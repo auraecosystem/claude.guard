@@ -2939,6 +2939,37 @@ class TestDevLifecycleCheck:
         assert "managed-settings.json" in self.check
         assert "not exercised by this lifecycle" in self.check
 
+    def test_check_probes_every_shipped_store_for_writability(self) -> None:
+        """The general invariant behind PR #1193: not just pnpm, but EVERY shipped package
+        manager's store/cache must resolve to a writable path under the read-only rootfs, so
+        a future tool baked onto the immutable layer is caught without the test naming it in
+        advance. Pin that the sweep drives each tool's own resolve command and probe-writes
+        the result — a unit test of one tool can't catch the next read-only-store bug."""
+        assert "ck_tool_stores_writable" in self.check
+        # The SSOT table is driven, with the resolve command per node package manager.
+        assert '"npm:npm config get cache"' in self.check
+        assert '"pnpm:pnpm store path"' in self.check
+        # It actually probes writability (mkdir + write + remove), not just resolves a path.
+        assert ".cg-store-probe" in self.check
+        # pip is the documented exclusion (intentionally read-only cache), so the sweep must
+        # not silently include it and false-fail on the deliberate ro mount.
+        assert "pip" not in {
+            entry.split(":", 1)[0] for entry in self._store_probe_entries()
+        }
+
+    def test_store_probes_cross_checked_against_shipped_tools(self) -> None:
+        """Adding a node package manager to the image (DOTFILES_TOOLS) without a writability
+        probe must fail loudly, not ship the next read-only-store crash untested."""
+        assert "ck_pm_store_probes_cover_shipped" in self.check
+        assert "DOTFILES_TOOLS" in self.check
+        assert "no writability probe in STORE_PROBES" in self.check
+
+    def _store_probe_entries(self) -> list[str]:
+        """The quoted entries of the STORE_PROBES array, as written in the check."""
+        block = re.search(r"STORE_PROBES=\((?P<body>.*?)\)", self.check, re.DOTALL)
+        assert block, "STORE_PROBES array not found"
+        return re.findall(r'"(?P<entry>[^"]+)"', block.group("body"))
+
     def test_workflow_runs_the_check(self) -> None:
         job = self.workflow["jobs"]["dev-lifecycle-run"]
         assert job["if"] == "needs.decide.outputs.smoke == 'true'"

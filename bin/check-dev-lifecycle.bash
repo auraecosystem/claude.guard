@@ -133,6 +133,24 @@ COVERED=(
   watcher-gate.mjs
 )
 
+# SSOT for the package-manager store/cache writability invariant (ck_tool_stores_writable).
+# Each entry is "<tool>:<command that prints the dir the tool MUST be able to write at
+# runtime>". This generalises PR #1193's pnpm fix: pnpm regressed because its store derives
+# from the image-baked PNPM_HOME, which sits on the read-only rootfs — and ANY tool whose
+# default store resolves off the writable home/tmp zone hits the same EROFS/SQLite trap. The
+# lifecycle drives each shipped tool's OWN resolve command in the read-only runtime and
+# probe-writes the result, so a future package manager baked onto the immutable layer fails
+# the check without the test naming it in advance. Scoped to the package managers the image
+# actually ships (DOTFILES_TOOLS, the image-tools SSOT) — adding one there means adding it
+# here, which ck_pm_store_probes_cover_shipped enforces. pip is intentionally absent:
+# docker-compose seeds its cache READ-ONLY (CLAUDE_GUARD_HOST_PIP_CACHE → /home/node/.cache/
+# pip:ro) and pip degrades gracefully on a read-only cache rather than hard-crashing as
+# pnpm's SQLite store index does.
+STORE_PROBES=(
+  "npm:npm config get cache"
+  "pnpm:pnpm store path"
+)
+
 ck_hook_auth_advice() {
   # Advisory hook must run without crashing (no missing-dep failure) and exit 0.
   # No credentials in the env so the hook would flag "claude" if it were to emit
@@ -170,6 +188,64 @@ ck_hook_ensure_pnpm_store() {
     echo "pnpm resolves a store path but it is read-only after ensure-writable-pnpm-store ran"
     return 1
   }
+}
+
+ck_tool_stores_writable() {
+  # The GENERAL invariant behind PR #1193: every package-manager store/cache the agent
+  # writes to at runtime must resolve to a WRITABLE path under the read-only rootfs — not
+  # just pnpm's. Drive each shipped tool's own resolve command (STORE_PROBES) from a SEPARATE
+  # exec (the git-hook shell, which reads on-disk config rather than this session's env) and
+  # probe-write the dir it names. A tool absent from the image is skipped; one that can't
+  # resolve a dir in this stripped container (e.g. a corepack shim with no network) has
+  # nothing to assert and no-ops. Runs after the pnpm redirect (--needs hook_pnpmstore) so
+  # pnpm's store reflects the post-SessionStart state the agent actually sees.
+  local entry tool cmd rc probed=0
+  for entry in "${STORE_PROBES[@]}"; do
+    tool=${entry%%:*}
+    cmd=${entry#*:}
+    run_hook "command -v $tool >/dev/null 2>&1" '' >/dev/null && rc=0 || rc=$?
+    [[ "$rc" -eq 0 ]] || continue # tool not shipped in this image — nothing to probe
+    # exit 0 = wrote+removed a probe (store is writable); exit 3 = no resolvable dir (skip);
+    # anything else = the resolve worked but the dir is read-only (the bug).
+    run_hook "dir=\$($cmd 2>/dev/null) || exit 3; [ -n \"\$dir\" ] || exit 3; mkdir -p \"\$dir\" 2>/dev/null && : >\"\$dir/.cg-store-probe\" 2>/dev/null && rm -f \"\$dir/.cg-store-probe\"" '' >/dev/null && rc=0 || rc=$?
+    case "$rc" in
+    0) probed=$((probed + 1)) ;;
+    3) ;;
+    *)
+      echo "$tool resolves a store/cache dir that is NOT writable under the read-only rootfs (baked onto the immutable layer?)"
+      return 1
+      ;;
+    esac
+  done
+  # Non-vacuity: npm is baked into every image (DOTFILES_TOOLS) with a writable ~/.npm cache,
+  # so at least one tool MUST have been probed — zero means a PATH/exec regression silently
+  # turned the whole sweep into an all-skip no-op.
+  [[ "$probed" -ge 1 ]] || {
+    echo "no package-manager store was probed at all — npm/pnpm missing from the image? (PATH regression)"
+    return 1
+  }
+}
+
+ck_pm_store_probes_cover_shipped() {
+  # Drift guard for STORE_PROBES: any node-style package manager the image ships
+  # (DOTFILES_TOOLS, the SSOT) must carry a writability probe above, so baking a new one
+  # (e.g. yarn) onto the image without a probe fails HERE instead of as the next session's
+  # read-only-store crash. Scoped to node PMs: pip is deliberately read-only (see
+  # STORE_PROBES) and the non-PM tools (jq, rg, squid…) keep no writable user store.
+  local tools keys=" " entry pm
+  tools=$(run_hook 'echo "$DOTFILES_TOOLS"' '') || tools=""
+  [[ -n "$tools" ]] || {
+    echo "could not read DOTFILES_TOOLS from the container"
+    return 1
+  }
+  for entry in "${STORE_PROBES[@]}"; do keys+="${entry%%:*} "; done
+  for pm in npm pnpm yarn; do
+    [[ " $tools " == *" $pm "* ]] || continue
+    [[ "$keys" == *" $pm "* ]] || {
+      echo "$pm is shipped (DOTFILES_TOOLS) but has no writability probe in STORE_PROBES"
+      return 1
+    }
+  done
 }
 
 ck_hook_scan_invisible() {
@@ -455,6 +531,8 @@ run_check --needs up dev_mode "managed CLAUDE_GUARD_DIR points at /workspace (de
 
 run_check --needs services_running hook_authadvice "PreToolUse auth-advice runs without crashing" ck_hook_auth_advice
 run_check --needs services_running hook_pnpmstore "SessionStart ensure-writable-pnpm-store makes pnpm's store writable" ck_hook_ensure_pnpm_store
+run_check --needs hook_pnpmstore tool_stores "every shipped package manager's store/cache is writable under the read-only rootfs" ck_tool_stores_writable
+run_check --needs services_running pm_probe_cover "every shipped node package manager has a writability probe" ck_pm_store_probes_cover_shipped
 run_check --needs services_running hook_scan "SessionStart scan-invisible-chars runs" ck_hook_scan_invisible
 run_check --needs services_running hook_mcptrip "SessionStart mcp-tripwire surfaces a project MCP server" ck_hook_mcp_tripwire
 run_check --needs services_running hook_fwsummary "SessionStart firewall-summary reports the allowlist" ck_hook_firewall_summary
