@@ -176,8 +176,8 @@ fi
 RESPONSE_FILE="$(mktemp)"
 trap 'rm -f "$RESPONSE_FILE"' EXIT
 _call_claude_api() {
-  # pin-exempt: Anthropic API JSON response, parsed by jq — never executed/extracted
   local code
+  # pin-exempt: Anthropic API JSON response, parsed by jq — never executed/extracted
   code=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
     --max-time 30 https://api.anthropic.com/v1/messages \
     -H "Content-Type: application/json" \
