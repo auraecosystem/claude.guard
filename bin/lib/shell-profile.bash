@@ -340,12 +340,10 @@ ensure_man_page() {
   ensure_dir "$man_dir"
   local page="$man_dir/claude-guard.1" alias="$man_dir/claude.1"
 
-  # Clear hostile pre-states before writing, then verify the post-condition — `cp`
-  # onto a dangling symlink dies on the missing target, and `ln -sf` onto a
-  # DIRECTORY silently drops the link INSIDE it (man claude then never resolves and
-  # nothing fails loud). Trust the resulting state, not cp/ln's exit status; the man
-  # page is cosmetic, so a genuine write failure warns loudly but never aborts setup
-  # (no `return 1` under the caller's set -e).
+  # Clear a hostile pre-state at the page — a dangling symlink `cp` would follow to
+  # a dead target, or a directory — then verify the post-condition rather than trust
+  # cp's exit status. The man page is cosmetic, so a genuine write failure warns
+  # loudly but never aborts setup (no `return 1` under the caller's set -e).
   [[ -e "$page" || -L "$page" ]] && [[ ! -f "$page" ]] && {
     warn "Replacing non-file at $page before installing the man page."
     rm -rf "$page"
@@ -355,12 +353,21 @@ ensure_man_page() {
     warn "Could not install the man page at $page — skipping (man claude-guard won't work)."
     return 0
   }
-  # A pre-existing directory (or any non-symlink) at the alias would capture the
-  # link rather than be replaced by it; clear it so `ln -sf` lands the symlink.
-  [[ -e "$alias" || -L "$alias" ]] && [[ ! -L "$alias" ]] && {
-    warn "Replacing non-symlink at $alias before linking the man page alias."
-    rm -rf "$alias"
-  }
+
+  # claude.1 is a symlink to claude-guard.1 so `man claude` resolves for the alias.
+  # If it's already our symlink, leave it. If it's the user's own claude.1 — a
+  # regular file, a directory, or a non-ours symlink for a different `claude` tool —
+  # back it up rather than clobber it (mirrors safe_symlink), then link and verify.
+  if [[ -L "$alias" && "$(readlink "$alias")" == claude-guard.1 ]]; then
+    status "Installed man page (man claude-guard / man claude) in $man_dir"
+    return 0
+  fi
+  if [[ -e "$alias" || -L "$alias" ]]; then
+    local bak
+    bak="$alias.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$alias" "$bak"
+    warn "Backed up existing $alias to $bak"
+  fi
   ln -sf claude-guard.1 "$alias" 2>/dev/null || true
   [[ -L "$alias" ]] || {
     warn "Could not link the man page alias at $alias — man claude won't resolve."
