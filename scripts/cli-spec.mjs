@@ -125,10 +125,11 @@ export const subcommands = [
     completion: "reclaim Docker leftovers from finished sessions",
     man: [
       "Reclaim the Docker resources left by sessions this host is no longer running:",
-      "superseded prebuilt image sets, orphaned per-workspace volumes, containers from",
-      "dead stacks, stale BuildKit build cache, and the now-empty sandbox networks. The",
-      "same passes run automatically (backgrounded) on each launch; this is the",
-      "on-demand entry point for cleaning up a busy host between sessions.",
+      "superseded prebuilt image sets, superseded local builds (the dangling images a",
+      "rebuild orphans), orphaned per-workspace volumes, containers from dead stacks,",
+      "stale BuildKit build cache, and the now-empty sandbox networks. The same passes",
+      "run automatically (backgrounded) on each launch; this is the on-demand entry",
+      "point for cleaning up a busy host between sessions.",
     ],
   },
   {
