@@ -7,7 +7,7 @@ claude-guard \- security wrapper for Claude Code (sandbox + outgoing-traffic fir
 .br
 .B claude-guard
 .\" GEN:BEGIN synopsis
-.RB { setup | setup-token | setup-ntfy | doctor | trace | audit | panic | gc | sessions | orientation | version | update | version | gh-app | remote }
+.RB { setup | setup-token | setup-ntfy | doctor | trace | audit | panic | gc | sessions | orientation | version | update | gh-app | remote }
 .\" GEN:END synopsis
 .RI [ args ...]
 .br
@@ -101,8 +101,11 @@ same passes run automatically (backgrounded) on each launch; this is the
 on-demand entry point for cleaning up a busy host between sessions.
 .TP
 .B sessions
-List running claude-guard sessions and, for the current repo, its per-session
-git worktrees.
+List running claude-guard sessions, the persistent sessions that were paused
+after sitting idle past CLAUDE_GUARD_SESSION_TTL (with how to resume each), and,
+for the current repo, its per-session git worktrees. A paused session restarts
+the next time you launch from its workspace; add --resume/--continue to pick the
+conversation back up.
 .TP
 .B orientation
 Re-print every first-run orientation notice \(em the one-time explainers for
@@ -110,16 +113,6 @@ invisible behaviors (ephemeral sessions, automated auth, output sanitization,
 the network allowlist, env-var scrubbing). The launch-time notices show once
 each and are then silent; this replays them all without consuming the
 once-only acknowledgement markers.
-.TP
-.B version
-Print the stack version (and the git commit when running from a clone), then
-exit. The same identity
-.B claude-guard doctor
-reports and the bug-report bundle records.
-.TP
-.B update
-Update to the latest version now (git installs only; Homebrew/AUR update via
-their package manager).
 .TP
 .B version
 Print the claude-guard version. The released version is read from the bundled
@@ -131,6 +124,10 @@ revision (commit, and a
 .I -dirty
 suffix for a modified tree) the wrapper is running from. Accepts
 .BR --version " and " -V " as well."
+.TP
+.B update
+Update to the latest version now (git installs only; Homebrew/AUR update via
+their package manager).
 .TP
 .B gh-app
 Manage the GitHub App integration.
