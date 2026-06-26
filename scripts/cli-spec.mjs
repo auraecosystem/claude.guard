@@ -373,7 +373,7 @@ export const envToggles = [
   },
   {
     name: "CLAUDE_NO_IMAGE_GC=1",
-    desc: "skip auto-pruning of superseded prebuilt sandbox image sets on launch",
+    desc: "skip auto-pruning of superseded sandbox images (prebuilt sets and local builds) on launch",
   },
   {
     name: "CLAUDE_NO_STACK_GC=1",
