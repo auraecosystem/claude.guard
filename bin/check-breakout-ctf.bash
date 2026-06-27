@@ -329,7 +329,7 @@ dump_boot_diagnostics() {
   else
     cids="$(docker ps -aq 2>/dev/null || true)"
   fi
-  for c in $cids; do
+  for c in "${cids[@]}"; do
     cg_warn "boot diagnostics — docker logs (tail 50) for $(docker inspect -f '{{.Name}}' "$c" 2>/dev/null || echo "$c"):"
     { docker logs --tail 50 "$c" || true; } >&2 2>&1
   done
