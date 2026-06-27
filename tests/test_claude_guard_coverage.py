@@ -668,7 +668,12 @@ def test_use_original_claude_execs_real_binary_with_remaining_args(
     args_line = next(ln for ln in r.stdout.splitlines() if ln.startswith("args:"))
     assert "--dangerously-use-original-claude" not in args_line
     assert "hello" in args_line
-    assert "bypassing the guard" in r.stderr
+    # The escape hatch surfaces the dropped posture as the red settings table
+    # (no special one-line warning): every layer reads OFF.
+    assert "Protection" in r.stderr
+    assert "guard OFF" in r.stderr
+    assert "UNRESTRICTED network access" in r.stderr
+    assert "Monitor" in r.stderr
 
 
 def test_use_original_claude_without_real_binary_exits_127(tmp_path: Path) -> None:
