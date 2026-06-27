@@ -156,6 +156,10 @@ trade-off never applies.
 
 Phone alerts need a one-time `claude-guard setup-ntfy`, which generates a private
 topic on the public `ntfy.sh` server (`claude-guard doctor` reports the state).
+To push to an access-controlled topic instead (a self-hosted server set via a
+`url=` line, or a reserved `ntfy.sh` topic), add a `token=<bearer-token>` line to
+`~/.config/claude-monitor/ntfy.conf`; the monitor sends it as an
+`Authorization: Bearer` header and never logs it.
 The monitor pushes one alert when it **halts a call for approval** (an `ask` verdict — exfiltration,
 guardrail tampering, obfuscation). The push is a heads-up that the session is
 paused; you approve or deny in the Claude Code permission prompt, not from the
