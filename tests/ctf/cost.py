@@ -107,6 +107,22 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _usage_tokens(usage: dict) -> tuple[int, int]:
+    """(input, output) tokens from one turn's usage block, across wire dialects.
+
+    Anthropic reports ``input_tokens``/``output_tokens`` (with cache reads/writes
+    counted separately, summed into input); the OpenAI-compatible wire reports
+    ``prompt_tokens``/``completion_tokens``. A model proxied through OpenRouter can
+    surface either, so read both rather than silently summing zero."""
+    inp = sum(int(usage[f]) for f in _INPUT_TOKEN_FIELDS if _is_number(usage.get(f)))
+    if inp == 0 and _is_number(usage.get("prompt_tokens")):
+        inp = int(usage["prompt_tokens"])
+    out = usage["output_tokens"] if _is_number(usage.get("output_tokens")) else None
+    if out is None and _is_number(usage.get("completion_tokens")):
+        out = usage["completion_tokens"]
+    return inp, int(out) if _is_number(out) else 0
+
+
 def transcript_token_usage(transcript_path: str | os.PathLike | None) -> dict:
     """Sum per-request token usage across a stream-json agent transcript.
 
@@ -114,8 +130,9 @@ def transcript_token_usage(transcript_path: str | os.PathLike | None) -> dict:
     the number of assistant turns that carried a ``usage`` block — i.e. real calls
     to the inference provider. Each assistant turn is one request, so this is the
     per-REQUEST usage attributable to THIS run. ``requests == 0`` means no usage was
-    recorded (an empty/boot-failed transcript, or a provider that returns none), and
-    the caller should fall back to the meter delta rather than bill a phantom zero."""
+    recorded; ``requests > 0`` with zero tokens means the provider returned a usage
+    block the harness can't price (some OpenRouter-proxied models report none) —
+    either way the caller falls back to the meter rather than bill a phantom zero."""
     inp = 0
     out = 0
     requests = 0
@@ -127,13 +144,9 @@ def transcript_token_usage(transcript_path: str | os.PathLike | None) -> dict:
         if not isinstance(usage, dict):
             continue
         requests += 1
-        for field in _INPUT_TOKEN_FIELDS:
-            value = usage.get(field)
-            if _is_number(value):
-                inp += int(value)
-        output = usage.get("output_tokens")
-        if _is_number(output):
-            out += int(output)
+        turn_in, turn_out = _usage_tokens(usage)
+        inp += turn_in
+        out += turn_out
     return {"input_tokens": inp, "output_tokens": out, "requests": requests}
 
 
@@ -258,9 +271,27 @@ def _round_opt(value: float | None) -> float | None:
     return round(value, 6) if value is not None else None
 
 
+def resolve_agent_cost(
+    tokens_usd: float | None, grader_usd: float | None, meter_delta_usd: float | None
+) -> tuple[float | None, str]:
+    """Pick the agent's USD cost and label its source.
+
+    Prefer the true per-request figure (transcript tokens priced at live rates). But
+    a model proxied through OpenRouter often reports no usable per-turn tokens, so
+    that comes back zero; in that case fall back to the credits-meter delta minus the
+    grader's exactly-known cost (both legs ride the same key, so the remainder is the
+    agent). Returns ``(usd_or_None, source)``."""
+    if tokens_usd is not None and tokens_usd > 0:
+        return tokens_usd, "transcript-tokens"
+    if meter_delta_usd is not None:
+        return max(0.0, meter_delta_usd - (grader_usd or 0.0)), "meter-minus-grader"
+    return tokens_usd, "transcript-tokens"
+
+
 def build_report(
     *,
     agent_usd: float | None,
+    agent_cost_source: str,
     grader_usd: float | None,
     agent_requests: int,
     monitor_usd: float,
@@ -269,20 +300,16 @@ def build_report(
 ) -> dict:
     """Assemble the real-cost breakdown from already-measured legs (no I/O).
 
-    The OpenRouter figure is the per-request sum (agent + grader) when either leg
-    is available; otherwise it falls back to the cumulative-meter delta so the
-    report still renders. ``openrouter_source`` records which path was used, and the
-    meter delta is always carried as a cross-check."""
-    has_per_request = agent_usd is not None or grader_usd is not None
-    per_request = (agent_usd or 0.0) + (grader_usd or 0.0)
-    openrouter_usd = per_request if has_per_request else (meter_delta_usd or 0.0)
-    source = "per-request" if has_per_request else "meter-delta"
+    The OpenRouter figure is the agent leg (resolved by ``resolve_agent_cost``) plus
+    the grader's exact per-request cost. The cumulative-meter delta is carried as a
+    cross-check, and ``agent_cost_source`` records how the agent leg was measured."""
+    openrouter_usd = (agent_usd or 0.0) + (grader_usd or 0.0)
     return {
         "openrouter_agent_usd": _round_opt(agent_usd),
+        "agent_cost_source": agent_cost_source,
         "agent_requests": agent_requests,
         "openrouter_grader_usd": _round_opt(grader_usd),
         "openrouter_usd": round(openrouter_usd, 6),
-        "openrouter_source": source,
         "openrouter_meter_delta_usd": _round_opt(meter_delta_usd),
         "monitor_usd": round(monitor_usd, 6),
         "monitor_calls": monitor_calls,
@@ -305,11 +332,10 @@ def format_report(report: dict) -> str:
     )
     return (
         "### Real run cost\n\n"
-        f"- OpenRouter agent ({report['agent_requests']} request(s)): "
-        f"**{_usd(report['openrouter_agent_usd'])}**\n"
+        f"- OpenRouter agent ({report['agent_requests']} request(s), "
+        f"{report['agent_cost_source']}): **{_usd(report['openrouter_agent_usd'])}**\n"
         f"- OpenRouter grader: **{_usd(report['openrouter_grader_usd'])}**\n"
-        f"- OpenRouter subtotal ({report['openrouter_source']}): "
-        f"**${report['openrouter_usd']:.4f}**\n"
+        f"- OpenRouter subtotal: **${report['openrouter_usd']:.4f}**\n"
         f"- Monitor (Anthropic, {report['monitor_calls']} paid call(s)): "
         f"**${report['monitor_usd']:.4f}**\n"
         f"- **Total: ${report['total_usd']:.4f}**\n"
@@ -398,8 +424,10 @@ def main(argv: list[str] | None = None) -> int:
     meter_delta = None
     if args.or_before is not None and args.or_after is not None:
         meter_delta = max(0.0, args.or_after - args.or_before)
+    agent_usd, agent_cost_source = resolve_agent_cost(agent_usd, grader_usd, meter_delta)
     breakdown = build_report(
         agent_usd=agent_usd,
+        agent_cost_source=agent_cost_source,
         grader_usd=grader_usd,
         agent_requests=usage["requests"],
         monitor_usd=monitor_usd,

@@ -186,6 +186,47 @@ def test_transcript_token_usage_missing_file_is_empty():
     }
 
 
+def test_transcript_token_usage_reads_openai_wire_keys(tmp_path):
+    # A model proxied through OpenRouter can report OpenAI-style prompt/completion
+    # keys instead of Anthropic input/output; both must be counted.
+    tx = tmp_path / "t.jsonl"
+    tx.write_text(
+        _assistant({"prompt_tokens": 80, "completion_tokens": 12}) + "\n"
+    )
+    assert cost.transcript_token_usage(tx) == {
+        "input_tokens": 80,
+        "output_tokens": 12,
+        "requests": 1,
+    }
+
+
+# ── _usage_tokens: dual-dialect per-turn token extraction ──────────────────────
+def test_usage_tokens_anthropic_sums_cache_fields():
+    assert cost._usage_tokens(
+        {
+            "input_tokens": 50,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 5,
+            "cache_creation_input_tokens": 3,
+        }
+    ) == (58, 10)
+
+
+def test_usage_tokens_openai_keys():
+    assert cost._usage_tokens({"prompt_tokens": 30, "completion_tokens": 7}) == (30, 7)
+
+
+def test_usage_tokens_anthropic_wins_when_both_present():
+    # input_tokens is non-zero, so prompt_tokens is not consulted; output falls back.
+    assert cost._usage_tokens(
+        {"input_tokens": 40, "prompt_tokens": 999, "completion_tokens": 4}
+    ) == (40, 4)
+
+
+def test_usage_tokens_ignores_non_numeric():
+    assert cost._usage_tokens({"input_tokens": True, "output_tokens": "x"}) == (0, 0)
+
+
 # ── grader_spend: read the grader's real cost from attempt.json ─────────────────
 def test_grader_spend_reads_cost_usd(tmp_path):
     p = tmp_path / "attempt.json"
@@ -259,10 +300,35 @@ def test_request_cost_prices_input_and_output():
     assert cost.request_cost(usage, pricing) == pytest.approx(0.005)
 
 
+# ── resolve_agent_cost: pick the agent leg and label its source ────────────────
+def test_resolve_agent_cost_prefers_transcript_tokens():
+    assert cost.resolve_agent_cost(0.012, 0.002, 0.05) == (0.012, "transcript-tokens")
+
+
+def test_resolve_agent_cost_falls_back_to_meter_minus_grader():
+    # No usable per-turn tokens (zero) ⇒ attribute the meter delta minus the grader's
+    # exactly-known cost (both legs ride the same key) to the agent.
+    usd, source = cost.resolve_agent_cost(0.0, 0.002, 0.04)
+    assert usd == pytest.approx(0.038)
+    assert source == "meter-minus-grader"
+
+
+def test_resolve_agent_cost_meter_branch_clamps_negative():
+    # A grader cost exceeding the (lagged/partial) meter delta must not go negative.
+    usd, source = cost.resolve_agent_cost(None, 0.05, 0.01)
+    assert usd == 0.0
+    assert source == "meter-minus-grader"
+
+
+def test_resolve_agent_cost_none_when_no_tokens_and_no_meter():
+    assert cost.resolve_agent_cost(None, None, None) == (None, "transcript-tokens")
+
+
 # ── report assembly + formatting ───────────────────────────────────────────────
-def test_build_report_per_request_sum_is_authoritative():
+def test_build_report_assembles_legs_from_resolved_agent_cost():
     report = cost.build_report(
         agent_usd=0.012,
+        agent_cost_source="transcript-tokens",
         grader_usd=0.002,
         agent_requests=4,
         monitor_usd=0.034,
@@ -271,10 +337,10 @@ def test_build_report_per_request_sum_is_authoritative():
     )
     assert report == {
         "openrouter_agent_usd": 0.012,
+        "agent_cost_source": "transcript-tokens",
         "agent_requests": 4,
         "openrouter_grader_usd": 0.002,
         "openrouter_usd": 0.014,  # agent + grader, NOT the meter delta
-        "openrouter_source": "per-request",
         "openrouter_meter_delta_usd": 0.013,
         "monitor_usd": 0.034,
         "monitor_calls": 7,
@@ -282,17 +348,18 @@ def test_build_report_per_request_sum_is_authoritative():
     }
 
 
-def test_build_report_falls_back_to_meter_delta_when_no_per_request():
+def test_build_report_subtotal_is_agent_plus_grader_even_for_meter_source():
     report = cost.build_report(
-        agent_usd=None,
-        grader_usd=None,
+        agent_usd=0.038,
+        agent_cost_source="meter-minus-grader",
+        grader_usd=0.002,
         agent_requests=0,
         monitor_usd=0.02,
         monitor_calls=2,
         meter_delta_usd=0.04,
     )
-    assert report["openrouter_usd"] == 0.04
-    assert report["openrouter_source"] == "meter-delta"
+    assert report["openrouter_usd"] == pytest.approx(0.04)  # 0.038 + 0.002
+    assert report["agent_cost_source"] == "meter-minus-grader"
     assert report["total_usd"] == pytest.approx(0.06)
 
 
@@ -300,6 +367,7 @@ def test_format_report_shows_legs_total_and_crosscheck():
     text = cost.format_report(
         cost.build_report(
             agent_usd=0.01,
+            agent_cost_source="transcript-tokens",
             grader_usd=0.002,
             agent_requests=3,
             monitor_usd=0.02,
@@ -315,7 +383,7 @@ def test_format_report_shows_legs_total_and_crosscheck():
     assert "3 request(s)" in text
     assert "3 paid call(s)" in text
     assert "$0.0125" in text  # meter cross-check
-    assert "per-request" in text
+    assert "transcript-tokens" in text
     assert "phantom" in text
 
 
@@ -323,6 +391,7 @@ def test_format_report_renders_unavailable_legs():
     text = cost.format_report(
         cost.build_report(
             agent_usd=None,
+            agent_cost_source="transcript-tokens",
             grader_usd=None,
             agent_requests=0,
             monitor_usd=0.0,
@@ -378,7 +447,8 @@ def test_main_report_writes_breakdown_and_clamps_negative(tmp_path, capsys):
 def test_main_report_openrouter_delta_is_fallback_without_per_request(tmp_path, capsys):
     log = tmp_path / "audit.jsonl"
     log.write_text(_audit_line(0.005) + "\n")
-    # No transcript/grader ⇒ no per-request data ⇒ the meter delta is the subtotal.
+    # No transcript/grader ⇒ no per-request tokens ⇒ the meter delta (minus the
+    # absent grader) is attributed to the agent leg.
     assert (
         cost.main(
             ["report", "--audit", str(log), "--or-before", "1.0", "--or-after", "1.04"]
@@ -386,9 +456,9 @@ def test_main_report_openrouter_delta_is_fallback_without_per_request(tmp_path, 
         == 0
     )
     out = capsys.readouterr().out
-    assert "$0.0400" in out  # meter-delta fallback subtotal
+    assert "$0.0400" in out  # meter-minus-grader agent leg / subtotal
     assert "$0.0450" in out  # total incl. monitor
-    assert "meter-delta" in out
+    assert "meter-minus-grader" in out
 
 
 def test_main_report_per_request_sum(tmp_path, monkeypatch, capsys):
@@ -420,13 +490,15 @@ def test_main_report_per_request_sum(tmp_path, monkeypatch, capsys):
     assert written["openrouter_agent_usd"] == pytest.approx(0.005)  # 1000*2e-6+500*6e-6
     assert written["openrouter_grader_usd"] == pytest.approx(0.002)
     assert written["openrouter_usd"] == pytest.approx(0.007)  # agent + grader
-    assert written["openrouter_source"] == "per-request"
+    assert written["agent_cost_source"] == "transcript-tokens"
     assert written["agent_requests"] == 1
     assert written["monitor_usd"] == pytest.approx(0.01)
     assert written["total_usd"] == pytest.approx(0.017)
 
 
-def test_main_report_agent_leg_degrades_on_pricing_failure(tmp_path, monkeypatch, capsys):
+def test_main_report_agent_leg_degrades_to_meter_on_pricing_failure(
+    tmp_path, monkeypatch, capsys
+):
     log = tmp_path / "audit.jsonl"
     log.write_text(_audit_line(0.0) + "\n")
     tx = tmp_path / "t.jsonl"
@@ -449,8 +521,9 @@ def test_main_report_agent_leg_degrades_on_pricing_failure(tmp_path, monkeypatch
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "unavailable" in out  # agent leg degraded
-    assert "$0.0300" in out  # meter delta is the fallback subtotal
+    # Pricing failed ⇒ no per-token figure ⇒ the meter delta becomes the agent leg.
+    assert "$0.0300" in out  # meter-minus-grader agent leg / subtotal
+    assert "meter-minus-grader" in out
 
 
 def test_main_report_missing_key_degrades_agent_leg(tmp_path, monkeypatch, capsys):
