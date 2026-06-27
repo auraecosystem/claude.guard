@@ -826,7 +826,11 @@ def test_archives_and_removes_idle_ephemeral_stack(tmp_path: Path) -> None:
     s = _ephemeral_stack("claudeeph", ws=_existing_ws(tmp_path), vid=vid, mtime=_idle())
     result, calls = _run(tmp_path, [s])
     assert result.returncode == 0, result.stderr
-    assert sorted(c for c in calls if c.startswith("rm")) == ["rm app", "rm fw", "rm mon"]
+    assert sorted(c for c in calls if c.startswith("rm")) == [
+        "rm app",
+        "rm fw",
+        "rm mon",
+    ]
     assert "netrm claudeeph_sandbox" in calls
     assert sorted(c.removeprefix("volrm ") for c in calls if c.startswith("volrm")) == (
         sorted(_session_volumes(vid))
@@ -845,7 +849,11 @@ def test_archives_idle_stopped_ephemeral_husk(tmp_path: Path) -> None:
     config-volume probe (stopped_stack_mtime), not the exec probe."""
     vid = "eph-cod-2003"
     s = _ephemeral_stack(
-        "claudeephstop", ws=_existing_ws(tmp_path), vid=vid, mtime=_idle(), running=False
+        "claudeephstop",
+        ws=_existing_ws(tmp_path),
+        vid=vid,
+        mtime=_idle(),
+        running=False,
     )
     result, calls = _run(tmp_path, [s])
     assert result.returncode == 0, result.stderr
@@ -913,7 +921,10 @@ def test_ephemeral_idle_threshold_is_strictly_greater(
     mutation flips the exactly-TTL case."""
     frozen = 1_500_000_000
     s = _ephemeral_stack(
-        "claudeephedge", ws=_existing_ws(tmp_path), vid="eph-owl-2010", mtime=frozen - age
+        "claudeephedge",
+        ws=_existing_ws(tmp_path),
+        vid="eph-owl-2010",
+        mtime=frozen - age,
     )
     result, calls = _run(tmp_path, [s], ttl=100, now=frozen)
     assert result.returncode == 0, result.stderr
@@ -944,7 +955,9 @@ def test_spares_attached_ephemeral_stack(tmp_path: Path) -> None:
 
 def test_dry_run_counts_idle_ephemeral_and_mutates_nothing(tmp_path: Path) -> None:
     vid = "eph-dry-2008"
-    s = _ephemeral_stack("claudeephdry", ws=_existing_ws(tmp_path), vid=vid, mtime=_idle())
+    s = _ephemeral_stack(
+        "claudeephdry", ws=_existing_ws(tmp_path), vid=vid, mtime=_idle()
+    )
     result, calls = _run(tmp_path, [s], dry_run=True)
     assert result.returncode == 0, result.stderr
     assert (
@@ -959,7 +972,9 @@ def test_ephemeral_archive_failure_refuses_removal(tmp_path: Path) -> None:
     """If the transcript snapshot fails, the ephemeral stack is NOT removed (we won't
     trade the only copy of the conversation for disk) and the pass fails loud."""
     vid = "eph-fail-2009"
-    s = _ephemeral_stack("claudeephf", ws=_existing_ws(tmp_path), vid=vid, mtime=_idle())
+    s = _ephemeral_stack(
+        "claudeephf", ws=_existing_ws(tmp_path), vid=vid, mtime=_idle()
+    )
     result, calls = _run(tmp_path, [s], run_fail=("transcript",))
     assert result.returncode == 1
     assert [c for c in calls if c.split()[0] in ("rm", "volrm", "netrm")] == []
