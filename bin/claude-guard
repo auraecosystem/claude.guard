@@ -284,7 +284,15 @@ exec_real_claude() {
 # Claude Code *now* without uninstalling. Handled here, the earliest point a
 # real binary can be resolved, so it bypasses every launch step below.
 if "$_use_original_claude"; then
-  cg_warn "--dangerously-use-original-claude: bypassing the guard — running unwrapped Claude Code on the host."
+  # Render the dropped posture as a red table — the same render_settings_box grid
+  # the normal launch uses — instead of a single warning line, so the absent
+  # sandbox/firewall/monitor read as the at-a-glance danger they are. Every row is
+  # red: this exec keeps nothing. The box renders here (settings-box.bash is sourced
+  # above) without the launch-path posture machinery, which runs far below.
+  _orig_prot_row=$'red\tProtection\tguard OFF\tunwrapped Claude Code on the host'
+  _orig_net_row=$'red\tNetwork\tfirewall OFF\tUNRESTRICTED network access'
+  _orig_mon_row=$'red\tMonitor\toff\tthis session is not monitored'
+  render_settings_box "$_orig_prot_row" "$_orig_net_row" "$_orig_mon_row"
   exec_real_claude "$@"
 fi
 
