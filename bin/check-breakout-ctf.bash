@@ -320,14 +320,17 @@ dump_boot_diagnostics() {
     --format 'table {{.Names}}\t{{.Status}}\t{{.RunningFor}}\t{{.Image}}' >&2 2>/dev/null || true
   # Scope per-container logs to this run's compose project when resolvable (the app
   # container carries devcontainer.local_folder); fall back to every container,
-  # since in CI the runner is dedicated to this one run.
-  local proj_name cids c
+  # since in CI the runner is dedicated to this one run. mapfile keeps the ids in a
+  # real array so each is one loop iteration (a plain string would word-split, and a
+  # quoted scalar would collapse to a single blob).
+  local proj_name c
+  local -a cids=()
   proj_name="$(docker ps -aq --filter "label=devcontainer.local_folder=$WORKSPACE" |
     head -1 | xargs -r docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)"
   if [[ -n "$proj_name" ]]; then
-    cids="$(docker ps -aq --filter "label=com.docker.compose.project=$proj_name" 2>/dev/null || true)"
+    mapfile -t cids < <(docker ps -aq --filter "label=com.docker.compose.project=$proj_name" 2>/dev/null || true)
   else
-    cids="$(docker ps -aq 2>/dev/null || true)"
+    mapfile -t cids < <(docker ps -aq 2>/dev/null || true)
   fi
   for c in "${cids[@]}"; do
     cg_warn "boot diagnostics — docker logs (tail 50) for $(docker inspect -f '{{.Name}}' "$c" 2>/dev/null || echo "$c"):"
