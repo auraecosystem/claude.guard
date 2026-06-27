@@ -117,6 +117,17 @@ def _path_without_jq(tmp_path: Path) -> Path:
     return farm
 
 
+def _isolate_home_relative_env(env: dict[str, str]) -> None:
+    """Make the fake HOME the sole basis for every path uninstall.bash derives.
+    uninstall.bash resolves the global allowlist, fish config, man pages, and zshrc
+    through XDG_*/ZDOTDIR (e.g. ${XDG_CONFIG_HOME:-$HOME/.config}); if the runner has
+    any of these set (GitHub's ubuntu images export XDG_CONFIG_HOME), it would act on
+    the runner's real dirs instead of the test's HOME and silently no-op. Strip them
+    so the override is deterministic across hosts."""
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZDOTDIR"):
+        env.pop(var, None)
+
+
 def _run(
     home: Path, stub: Path, tmp_path: Path, *, path: str | None = None, **seams: str
 ):
@@ -138,6 +149,7 @@ def _run(
         ),
     }
     env.pop("CLAUDE_GUARD_ASSUME_YES", None)
+    _isolate_home_relative_env(env)
     return run_capture([str(SETUP), "--uninstall"], env=env)
 
 
@@ -672,6 +684,7 @@ def _run_purge(
         **extra_env,
     }
     env.pop("CLAUDE_GUARD_ASSUME_YES", None)
+    _isolate_home_relative_env(env)
     return run_capture([str(SETUP), "--purge"], env=env)
 
 
