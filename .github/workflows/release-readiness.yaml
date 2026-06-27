@@ -30,11 +30,11 @@ jobs:
       pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        # Credentials stay persisted: open_release_pr pushes the seed branch with
+        # them. A PAT (not GITHUB_TOKEN) so the `release` label this job applies
+        # fires release-prep.yaml's `labeled` trigger (the Actions recursion guard).
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6 # zizmor: ignore[artipacked]
         with:
-          # A PAT (not GITHUB_TOKEN) so the `release` label this job applies
-          # fires release-prep.yaml's `labeled` trigger; persisted so `git push`
-          # of the seed branch authenticates.
           token: ${{ secrets.TEMPLATE_SYNC_TOKEN }}
 
       - name: Set up Node.js
