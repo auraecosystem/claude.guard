@@ -262,8 +262,8 @@ def build_user_message(diff_text: str, flags: DeterministicFlags, scope: str) ->
 
 def parse_verdict(text: str) -> str:
     """The verdict token from the LLM's reply, or 'UNKNOWN' if it emitted none."""
-    match = re.search(r"VERDICT:\s*(SUSPICIOUS|CLEAN|UNSURE)", text, re.IGNORECASE)
-    return match.group(1).upper() if match else "UNKNOWN"
+    match = re.search(r"VERDICT:\s*(?P<verdict>SUSPICIOUS|CLEAN|UNSURE)", text, re.IGNORECASE)
+    return match.group("verdict").upper() if match else "UNKNOWN"
 
 
 def run_llm(diff_text: str, flags: DeterministicFlags, scope: str) -> tuple[str, str]:
@@ -336,14 +336,12 @@ def format_result(result: SeedReviewResult, branch: str) -> list[str]:
         body.append(f"  (automated reviewer did not run: {reason}; flags above are not judged.)")
     if not body:
         return []
-    return (
-        [f"Review branch {branch} before merging — it is the agent's work returning to you:"]
-        + body
-        + [
-            f"  inspect: git diff $(git merge-base HEAD {branch})..{branch}",
-            "  to RUN or build it, do so inside a sandbox (claude-guard), not bare on the host.",
-        ]
-    )
+    return [
+        f"Review branch {branch} before merging — it is the agent's work returning to you:",
+        *body,
+        f"  inspect: git diff $(git merge-base HEAD {branch})..{branch}",
+        "  to RUN or build it, do so inside a sandbox (claude-guard), not bare on the host.",
+    ]
 
 
 class _Args(argparse.Namespace):
