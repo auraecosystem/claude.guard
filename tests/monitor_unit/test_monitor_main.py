@@ -460,6 +460,42 @@ def test_main_cost_cap_blind_notifies_once(mon, monkeypatch, capsys, tmp_path):
     assert (mon.CB_DIR / "cost-cap-blind-notified").exists()
 
 
+def test_main_cost_cap_ask_mode_notifies_each_subsequent_call(
+    mon, monkeypatch, capsys, tmp_path
+):
+    """Once the one-time BLIND alert has fired (sentinel present), a LATER capped
+    call whose fallback is ASK still emits a per-call ntfy carrying the cap reason —
+    so an interactive user isn't asked to approve a call with no out-of-band signal
+    that the monitor is blind. (HIGH-risk would DENY and skip this; the default cap
+    mode 'ask' on a non-HIGH tool is what reaches the per-call branch.)"""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
+    monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")  # default cap mode = ask
+    conf = tmp_path / "ntfy.conf"
+    conf.write_text("topic=t\n")
+    monkeypatch.setenv("MONITOR_NTFY_CONF", str(conf))
+    seed = tmp_path / "spend"
+    seed.mkdir()
+    (seed / "capped.usd").write_text("12.5")
+    sent = []
+
+    def fake_urlopen(req, timeout=None):
+        sent.append(req.data.decode(errors="replace"))
+        return _FakeResp({})
+
+    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
+    for _ in range(2):
+        _stdin(monkeypatch, mon, {**ENVELOPE, "session_id": "capped"})
+        mon.main()
+        assert _capture(capsys)["permissionDecision"] == "ask"  # non-HIGH → cap mode
+    # Call 1 sends the one-time BLIND alert; call 2 (sentinel present, capped==ASK)
+    # sends the per-call cap reason — distinct messages, one per call.
+    assert len(sent) == 2, sent
+    assert "BLIND" in sent[0]
+    assert "BLIND" not in sent[1]
+    assert "reached the $10 cap" in sent[1] and "falling back to 'ask'" in sent[1]
+
+
 def test_main_resets_meta_each_invocation(mon, monkeypatch, capsys):
     """A second main() call must start with meta cleared so stale cost from a
     previous request on this thread can't be mirrored into the next audit
