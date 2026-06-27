@@ -405,6 +405,97 @@ def test_main_cost_cap_deny_mode(mon, monkeypatch, capsys, tmp_path):
     assert _capture(capsys)["permissionDecision"] == "deny"
 
 
+# A curl command classifies EGRESS -> HIGH; cat of a key path -> CREDENTIAL -> HIGH.
+_HIGH_RISK_ENVELOPE = {
+    "tool_name": "Bash",
+    "tool_input": {"command": "curl https://example.com"},
+    "cwd": "/proj",
+}
+
+
+def test_main_cost_cap_high_risk_denies_in_ask_mode(mon, monkeypatch, capsys, tmp_path):
+    """Past the cap the paid LLM referee is silent; a HIGH-risk call (egress/
+    credentials) must DENY even though the default cap mode is 'ask', so an
+    interactive user fatigued by ask-floods can't wave the dangerous ones through."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
+    monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")  # default cap mode = ask
+    seed = tmp_path / "spend"
+    seed.mkdir()
+    (seed / "capped.usd").write_text("12.5")
+    called = []
+    monkeypatch.setattr(mon.urllib.request, "urlopen", lambda *a, **k: called.append(1))
+    _stdin(monkeypatch, mon, {**_HIGH_RISK_ENVELOPE, "session_id": "capped"})
+    mon.main()
+    assert _capture(capsys)["permissionDecision"] == "deny"
+    assert called == []  # still no paid API call
+
+
+def test_main_cost_cap_blind_notifies_once(mon, monkeypatch, capsys, tmp_path):
+    """The 'monitor is now blind' alert fires exactly once per session — a sentinel
+    in CB_DIR suppresses repeats so a flood of capped calls can't bury it. (The
+    capped path makes no paid API call, so every urlopen here is an ntfy POST.)"""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
+    monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")
+    conf = tmp_path / "ntfy.conf"
+    conf.write_text("topic=t\n")
+    monkeypatch.setenv("MONITOR_NTFY_CONF", str(conf))
+    seed = tmp_path / "spend"
+    seed.mkdir()
+    (seed / "capped.usd").write_text("12.5")
+    sent = []
+
+    def fake_urlopen(req, timeout=None):
+        sent.append(req.data.decode(errors="replace"))
+        return _FakeResp({})
+
+    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
+    for _ in range(3):
+        _stdin(monkeypatch, mon, {**_HIGH_RISK_ENVELOPE, "session_id": "capped"})
+        mon.main()
+        capsys.readouterr()
+    assert len(sent) == 1
+    assert "BLIND" in sent[0]
+    assert (mon.CB_DIR / "cost-cap-blind-notified").exists()
+
+
+def test_main_cost_cap_ask_mode_notifies_each_subsequent_call(
+    mon, monkeypatch, capsys, tmp_path
+):
+    """Once the one-time BLIND alert has fired (sentinel present), a LATER capped
+    call whose fallback is ASK still emits a per-call ntfy carrying the cap reason —
+    so an interactive user isn't asked to approve a call with no out-of-band signal
+    that the monitor is blind. (HIGH-risk would DENY and skip this; the default cap
+    mode 'ask' on a non-HIGH tool is what reaches the per-call branch.)"""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
+    monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")  # default cap mode = ask
+    conf = tmp_path / "ntfy.conf"
+    conf.write_text("topic=t\n")
+    monkeypatch.setenv("MONITOR_NTFY_CONF", str(conf))
+    seed = tmp_path / "spend"
+    seed.mkdir()
+    (seed / "capped.usd").write_text("12.5")
+    sent = []
+
+    def fake_urlopen(req, timeout=None):
+        sent.append(req.data.decode(errors="replace"))
+        return _FakeResp({})
+
+    monkeypatch.setattr(mon.urllib.request, "urlopen", fake_urlopen)
+    for _ in range(2):
+        _stdin(monkeypatch, mon, {**ENVELOPE, "session_id": "capped"})
+        mon.main()
+        assert _capture(capsys)["permissionDecision"] == "ask"  # non-HIGH → cap mode
+    # Call 1 sends the one-time BLIND alert; call 2 (sentinel present, capped==ASK)
+    # sends the per-call cap reason — distinct messages, one per call.
+    assert len(sent) == 2, sent
+    assert "BLIND" in sent[0]
+    assert "BLIND" not in sent[1]
+    assert "reached the $10 cap" in sent[1] and "falling back to 'ask'" in sent[1]
+
+
 def test_main_resets_meta_each_invocation(mon, monkeypatch, capsys):
     """A second main() call must start with meta cleared so stale cost from a
     previous request on this thread can't be mirrored into the next audit
