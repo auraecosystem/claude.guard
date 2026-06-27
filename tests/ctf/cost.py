@@ -43,12 +43,24 @@ tests/ctf/attempt_grader.py.
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from tests.ctf.render_transcript import load_events
+
+# Token-count field names live in the monitor's usage module (the single source of
+# truth, monitorlib.usage) so the CTF cost meter and the monitor's own response
+# parser can never read different spellings of the same usage block. monitorlib is
+# under .claude/hooks; add it to the path for the bare `python -m tests.ctf.cost`
+# teardown invocation (the pytest run already has it on the path).
+_HOOKS = Path(__file__).resolve().parents[2] / ".claude" / "hooks"
+if str(_HOOKS) not in sys.path:
+    sys.path.insert(0, str(_HOOKS))
+
+from monitorlib.usage import usage_tokens  # noqa: E402  (needs the path insert above)
 
 # OpenRouter's cumulative-usage endpoint. ``total_usage`` is lifetime USD spent on
 # the key; its delta across the run is the meter cross-check for the per-request sum.
@@ -58,17 +70,6 @@ _DEFAULT_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _DEFAULT_TIMEOUT = 30
 _RETRIES = 3
 _RETRY_BACKOFF_SECS = 1.0
-
-# Token-usage fields on an assistant turn that bill at the input (prompt) rate.
-# Anthropic-style usage reports cache reads/writes SEPARATELY from input_tokens, so
-# all three must be summed or cached turns undercount. Pricing cache reads at the
-# full prompt rate slightly OVER-counts (cache reads are cheaper) — deliberately
-# conservative, so the reported bill is never optimistic.
-_INPUT_TOKEN_FIELDS = (
-    "input_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-)
 
 
 def monitor_spend(audit_path: str | os.PathLike) -> tuple[float, int]:
@@ -107,22 +108,6 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _usage_tokens(usage: dict) -> tuple[int, int]:
-    """(input, output) tokens from one turn's usage block, across wire dialects.
-
-    Anthropic reports ``input_tokens``/``output_tokens`` (with cache reads/writes
-    counted separately, summed into input); the OpenAI-compatible wire reports
-    ``prompt_tokens``/``completion_tokens``. A model proxied through OpenRouter can
-    surface either, so read both rather than silently summing zero."""
-    inp = sum(int(usage[f]) for f in _INPUT_TOKEN_FIELDS if _is_number(usage.get(f)))
-    if inp == 0 and _is_number(usage.get("prompt_tokens")):
-        inp = int(usage["prompt_tokens"])
-    out = usage["output_tokens"] if _is_number(usage.get("output_tokens")) else None
-    if out is None and _is_number(usage.get("completion_tokens")):
-        out = usage["completion_tokens"]
-    return inp, int(out) if _is_number(out) else 0
-
-
 def transcript_token_usage(transcript_path: str | os.PathLike | None) -> dict:
     """Sum per-request token usage across a stream-json agent transcript.
 
@@ -144,7 +129,7 @@ def transcript_token_usage(transcript_path: str | os.PathLike | None) -> dict:
         if not isinstance(usage, dict):
             continue
         requests += 1
-        turn_in, turn_out = _usage_tokens(usage)
+        turn_in, turn_out = usage_tokens(usage)
         inp += turn_in
         out += turn_out
     return {"input_tokens": inp, "output_tokens": out, "requests": requests}
@@ -160,16 +145,16 @@ def grader_spend(attempt_path: str | os.PathLike | None) -> float | None:
     if not attempt_path:
         return None
     try:
-        obj = json.loads(Path(attempt_path).read_text(encoding="utf-8", errors="replace"))
+        obj = json.loads(
+            Path(attempt_path).read_text(encoding="utf-8", errors="replace")
+        )
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     cost = obj.get("cost_usd") if isinstance(obj, dict) else None
     return float(cost) if _is_number(cost) else None
 
 
-def _get_json(
-    url: str, api_key: str, *, timeout: int, retries: int
-) -> dict:
+def _get_json(url: str, api_key: str, *, timeout: int, retries: int) -> dict:
     """GET ``url`` with a bearer key and return the parsed JSON body.
 
     Retries transient transport/5xx failures with backoff so a flaky read doesn't
@@ -243,7 +228,9 @@ def fetch_openrouter_pricing(
     data = _get_json(url, api_key, timeout=timeout, retries=retries)
     models = data.get("data") if isinstance(data, dict) else None
     if not isinstance(models, list):
-        raise ValueError(f"OpenRouter models response had no model list: {data!r}")
+        # A response without a model list is a bad provider VALUE, not a caller type
+        # error — fail closed (mirrors fetch_openrouter_usage's total_usage guard).
+        raise ValueError(f"OpenRouter models response had no model list: {data!r}")  # noqa: TRY004
     for entry in models:
         if not isinstance(entry, dict) or entry.get("id") != model:
             continue
@@ -253,7 +240,9 @@ def fetch_openrouter_pricing(
             _to_price(pricing.get("completion")) if isinstance(pricing, dict) else None
         )
         if prompt is None or completion is None:
-            raise ValueError(f"OpenRouter model {model!r} has no usable pricing: {pricing!r}")
+            raise ValueError(
+                f"OpenRouter model {model!r} has no usable pricing: {pricing!r}"
+            )
         return {"prompt": prompt, "completion": completion}
     raise ValueError(f"OpenRouter model not found in catalog: {model!r}")
 
@@ -382,8 +371,12 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Measure the real cost of a CTF run")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    usage_cmd = sub.add_parser("usage", help="print the key's cumulative OpenRouter USD")
-    usage_cmd.add_argument("--api-key", default=None, help="OpenRouter key (else from env)")
+    usage_cmd = sub.add_parser(
+        "usage", help="print the key's cumulative OpenRouter USD"
+    )
+    usage_cmd.add_argument(
+        "--api-key", default=None, help="OpenRouter key (else from env)"
+    )
     usage_cmd.add_argument("--url", default=_DEFAULT_CREDITS_URL)
     usage_cmd.add_argument("--timeout", type=int, default=_DEFAULT_TIMEOUT)
 
@@ -396,7 +389,9 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument(
         "--grader-attempt", help="the grader's attempt.json (for its real cost)"
     )
-    report.add_argument("--api-key", default=None, help="OpenRouter key (else from env)")
+    report.add_argument(
+        "--api-key", default=None, help="OpenRouter key (else from env)"
+    )
     report.add_argument("--models-url", default=_DEFAULT_MODELS_URL)
     report.add_argument("--timeout", type=int, default=_DEFAULT_TIMEOUT)
     report.add_argument(
@@ -424,7 +419,9 @@ def main(argv: list[str] | None = None) -> int:
     meter_delta = None
     if args.or_before is not None and args.or_after is not None:
         meter_delta = max(0.0, args.or_after - args.or_before)
-    agent_usd, agent_cost_source = resolve_agent_cost(agent_usd, grader_usd, meter_delta)
+    agent_usd, agent_cost_source = resolve_agent_cost(
+        agent_usd, grader_usd, meter_delta
+    )
     breakdown = build_report(
         agent_usd=agent_usd,
         agent_cost_source=agent_cost_source,

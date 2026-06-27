@@ -190,41 +190,12 @@ def test_transcript_token_usage_reads_openai_wire_keys(tmp_path):
     # A model proxied through OpenRouter can report OpenAI-style prompt/completion
     # keys instead of Anthropic input/output; both must be counted.
     tx = tmp_path / "t.jsonl"
-    tx.write_text(
-        _assistant({"prompt_tokens": 80, "completion_tokens": 12}) + "\n"
-    )
+    tx.write_text(_assistant({"prompt_tokens": 80, "completion_tokens": 12}) + "\n")
     assert cost.transcript_token_usage(tx) == {
         "input_tokens": 80,
         "output_tokens": 12,
         "requests": 1,
     }
-
-
-# ── _usage_tokens: dual-dialect per-turn token extraction ──────────────────────
-def test_usage_tokens_anthropic_sums_cache_fields():
-    assert cost._usage_tokens(
-        {
-            "input_tokens": 50,
-            "output_tokens": 10,
-            "cache_read_input_tokens": 5,
-            "cache_creation_input_tokens": 3,
-        }
-    ) == (58, 10)
-
-
-def test_usage_tokens_openai_keys():
-    assert cost._usage_tokens({"prompt_tokens": 30, "completion_tokens": 7}) == (30, 7)
-
-
-def test_usage_tokens_anthropic_wins_when_both_present():
-    # input_tokens is non-zero, so prompt_tokens is not consulted; output falls back.
-    assert cost._usage_tokens(
-        {"input_tokens": 40, "prompt_tokens": 999, "completion_tokens": 4}
-    ) == (40, 4)
-
-
-def test_usage_tokens_ignores_non_numeric():
-    assert cost._usage_tokens({"input_tokens": True, "output_tokens": "x"}) == (0, 0)
 
 
 # ── grader_spend: read the grader's real cost from attempt.json ─────────────────
@@ -284,7 +255,9 @@ def test_fetch_openrouter_pricing_raises_when_model_absent(monkeypatch):
 
 
 def test_fetch_openrouter_pricing_raises_on_unusable_pricing(monkeypatch):
-    body = json.dumps({"data": [{"id": "a/model", "pricing": {"prompt": "x"}}]}).encode()
+    body = json.dumps(
+        {"data": [{"id": "a/model", "pricing": {"prompt": "x"}}]}
+    ).encode()
     monkeypatch.setattr(
         cost.urllib.request, "urlopen", lambda req, timeout: _FakeResp(body)
     )
@@ -477,12 +450,18 @@ def test_main_report_per_request_sum(tmp_path, monkeypatch, capsys):
     rc = cost.main(
         [
             "report",
-            "--audit", str(log),
-            "--transcript", str(tx),
-            "--agent-model", "a/model",
-            "--grader-attempt", str(attempt),
-            "--api-key", "K",
-            "--out", str(out),
+            "--audit",
+            str(log),
+            "--transcript",
+            str(tx),
+            "--agent-model",
+            "a/model",
+            "--grader-attempt",
+            str(attempt),
+            "--api-key",
+            "K",
+            "--out",
+            str(out),
         ]
     )
     assert rc == 0
@@ -511,12 +490,18 @@ def test_main_report_agent_leg_degrades_to_meter_on_pricing_failure(
     rc = cost.main(
         [
             "report",
-            "--audit", str(log),
-            "--transcript", str(tx),
-            "--agent-model", "a/model",
-            "--api-key", "K",
-            "--or-before", "1.0",
-            "--or-after", "1.03",
+            "--audit",
+            str(log),
+            "--transcript",
+            str(tx),
+            "--agent-model",
+            "a/model",
+            "--api-key",
+            "K",
+            "--or-before",
+            "1.0",
+            "--or-after",
+            "1.03",
         ]
     )
     assert rc == 0
@@ -536,7 +521,15 @@ def test_main_report_missing_key_degrades_agent_leg(tmp_path, monkeypatch, capsy
     # requests > 0 but no key ⇒ _resolve_key raises SystemExit, caught as a degraded
     # leg (the report must still render, never crash teardown).
     rc = cost.main(
-        ["report", "--audit", str(log), "--transcript", str(tx), "--agent-model", "a/model"]
+        [
+            "report",
+            "--audit",
+            str(log),
+            "--transcript",
+            str(tx),
+            "--agent-model",
+            "a/model",
+        ]
     )
     assert rc == 0
     assert "unavailable" in capsys.readouterr().out
