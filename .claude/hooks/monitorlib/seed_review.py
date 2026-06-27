@@ -240,7 +240,9 @@ def select_review_text(
         # No high-risk files to focus on, so reviewing the head of the whole diff
         # beats reporting a clean review we never performed.
         text = whole
-        note = "full diff, no high-risk subset to focus — truncated to the review budget"
+        note = (
+            "full diff, no high-risk subset to focus — truncated to the review budget"
+        )
     if estimate_tokens(text) <= max_tokens:
         return text, note
     return (
@@ -253,7 +255,9 @@ def build_user_message(diff_text: str, flags: DeterministicFlags, scope: str) ->
     """The LLM user turn: the deterministic pre-scan as context, then the diff."""
     lines = [f"Diff scope: {scope}."]
     if flags.any:
-        lines.append("A static pre-scan already flagged these (still judge their content):")
+        lines.append(
+            "A static pre-scan already flagged these (still judge their content):"
+        )
         lines += [f"- {p}: {why}" for p, why in flags.executables]
         lines += [f"- {p}: {why}" for p, why in flags.autorun]
     lines += ["", "Unified diff follows:", ""]
@@ -262,7 +266,9 @@ def build_user_message(diff_text: str, flags: DeterministicFlags, scope: str) ->
 
 def parse_verdict(text: str) -> str:
     """The verdict token from the LLM's reply, or 'UNKNOWN' if it emitted none."""
-    match = re.search(r"VERDICT:\s*(?P<verdict>SUSPICIOUS|CLEAN|UNSURE)", text, re.IGNORECASE)
+    match = re.search(
+        r"VERDICT:\s*(?P<verdict>SUSPICIOUS|CLEAN|UNSURE)", text, re.IGNORECASE
+    )
     return match.group("verdict").upper() if match else "UNKNOWN"
 
 
@@ -291,10 +297,14 @@ def run_llm(diff_text: str, flags: DeterministicFlags, scope: str) -> tuple[str,
     return parse_verdict(raw), raw
 
 
-def review(repo: str, base: str, branch: str, max_tokens: int | None = None) -> SeedReviewResult:
+def review(
+    repo: str, base: str, branch: str, max_tokens: int | None = None
+) -> SeedReviewResult:
     """Run both review layers over base..branch and return the combined result."""
     if max_tokens is None:
-        max_tokens = _env_int("CLAUDE_GUARD_SEED_REVIEW_MAX_TOKENS", _DEFAULT_MAX_TOKENS)
+        max_tokens = _env_int(
+            "CLAUDE_GUARD_SEED_REVIEW_MAX_TOKENS", _DEFAULT_MAX_TOKENS
+        )
     flags = classify(parse_raw_diff(_git_raw(repo, base, branch)))
     diff_text, scope = select_review_text(repo, base, branch, flags, max_tokens)
     if not diff_text.strip():
@@ -325,15 +335,21 @@ def format_result(result: SeedReviewResult, branch: str) -> list[str]:
     body = _flag_lines(result.flags)
     if result.llm_status == "ok":
         if result.verdict != "CLEAN":
-            body.append(f"  automated reviewer says {result.verdict} (a filter, not a guarantee):")
+            body.append(
+                f"  automated reviewer says {result.verdict} (a filter, not a guarantee):"
+            )
             body += [f"    {line}" for line in result.llm_text.strip().splitlines()]
         elif body:
-            body.append("  (automated reviewer judged it clean — a filter, not a guarantee.)")
+            body.append(
+                "  (automated reviewer judged it clean — a filter, not a guarantee.)"
+            )
     elif result.llm_status.startswith("unavailable") and body:
         # Surface the filter's absence only when something was flagged it couldn't judge —
         # a keyless session with nothing flagged stays silent (silent-success doctrine).
         reason = result.llm_status.split(":", 1)[1].strip()
-        body.append(f"  (automated reviewer did not run: {reason}; flags above are not judged.)")
+        body.append(
+            f"  (automated reviewer did not run: {reason}; flags above are not judged.)"
+        )
     if not body:
         return []
     return [
@@ -363,10 +379,14 @@ def main(argv: list[str] | None = None) -> None:
         description="Scan a seed-mode branch for code that could run on the host after merge.",
     )
     parser.add_argument("repo_root", help="path to the host git repository")
-    parser.add_argument("base_commit", help="the launch-time commit the branch forked from")
+    parser.add_argument(
+        "base_commit", help="the launch-time commit the branch forked from"
+    )
     parser.add_argument("branch", help="the claude/* review branch to scan")
     args = parser.parse_args(argv, namespace=_Args())
-    lines = format_result(review(args.repo_root, args.base_commit, args.branch), args.branch)
+    lines = format_result(
+        review(args.repo_root, args.base_commit, args.branch), args.branch
+    )
     if lines:
         print("\n".join(lines), file=sys.stderr)
 

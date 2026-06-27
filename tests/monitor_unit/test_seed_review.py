@@ -19,7 +19,6 @@ if str(HOOKS) not in sys.path:
 
 from monitorlib import seed_review as sr  # noqa: E402
 
-
 # --------------------------------------------------------------------------
 # autorun_reason — one case per enumerated member (driven from the SSOT)
 # --------------------------------------------------------------------------
@@ -72,7 +71,9 @@ def test_classify_buckets_every_case():
         sr.RawEntry("100644", "000000", "D", "removed.sh"),  # deletion: skipped
         sr.RawEntry("000000", "100755", "A", "new.sh"),  # new executable
         sr.RawEntry("100644", "100755", "M", "made-exec.sh"),  # newly executable
-        sr.RawEntry("100755", "100755", "M", "already-exec.sh"),  # poisoned existing exec
+        sr.RawEntry(
+            "100755", "100755", "M", "already-exec.sh"
+        ),  # poisoned existing exec
         sr.RawEntry("100644", "100644", "M", ".vscode/tasks.json"),  # autorun config
         sr.RawEntry("100644", "100644", "M", "src/plain.py"),  # nothing
     ]
@@ -81,7 +82,9 @@ def test_classify_buckets_every_case():
         ("new.sh", "new executable file"),
         ("made-exec.sh", "file made executable"),
     ]
-    assert flags.autorun == [(".vscode/tasks.json", sr.autorun_reason(".vscode/tasks.json"))]
+    assert flags.autorun == [
+        (".vscode/tasks.json", sr.autorun_reason(".vscode/tasks.json"))
+    ]
     assert flags.exec_paths == ["new.sh", "made-exec.sh", "already-exec.sh"]
     assert flags.any is True
 
@@ -145,9 +148,7 @@ def test_select_subset_when_whole_too_large(monkeypatch):
 
 
 def test_select_truncates_subset_when_still_too_large(monkeypatch):
-    monkeypatch.setattr(
-        sr, "_git_diff", lambda r, b, br, paths=None: "Y" * 4000
-    )
+    monkeypatch.setattr(sr, "_git_diff", lambda r, b, br, paths=None: "Y" * 4000)
     text, note = sr.select_review_text(
         "r", "b", "br", _flags(exec_paths=["a.sh"]), max_tokens=100
     )
@@ -169,7 +170,9 @@ def test_select_truncates_whole_when_no_high_risk_subset(monkeypatch):
 
 
 def test_build_user_message_includes_flags():
-    flags = sr.DeterministicFlags([("e.sh", "new executable file")], [("Makefile", "make")], [])
+    flags = sr.DeterministicFlags(
+        [("e.sh", "new executable file")], [("Makefile", "make")], []
+    )
     msg = sr.build_user_message("DIFFBODY", flags, "full diff")
     assert "Diff scope: full diff." in msg
     assert "- e.sh: new executable file" in msg
@@ -178,7 +181,9 @@ def test_build_user_message_includes_flags():
 
 
 def test_build_user_message_without_flags():
-    msg = sr.build_user_message("DIFFBODY", sr.DeterministicFlags([], [], []), "full diff")
+    msg = sr.build_user_message(
+        "DIFFBODY", sr.DeterministicFlags([], [], []), "full diff"
+    )
     assert "pre-scan already flagged" not in msg
     assert msg.endswith("DIFFBODY")
 
@@ -255,9 +260,7 @@ def test_review_clean_on_empty_diff(monkeypatch):
 
 
 def test_review_ok(monkeypatch):
-    monkeypatch.setattr(
-        sr, "_git_raw", lambda *a: b":000000 100755 0 c A\x00x.sh\x00"
-    )
+    monkeypatch.setattr(sr, "_git_raw", lambda *a: b":000000 100755 0 c A\x00x.sh\x00")
     monkeypatch.setattr(sr, "_git_diff", lambda *a, **k: "real diff")
     monkeypatch.setattr(sr, "resolve_llm", lambda **k: _fake_cfg())
     monkeypatch.setattr(
@@ -316,13 +319,17 @@ def test_flag_lines_empty():
 
 
 def test_format_result_silent_when_clean_and_no_flags():
-    res = sr.SeedReviewResult(sr.DeterministicFlags([], [], []), "ok", "CLEAN", "", "full diff")
+    res = sr.SeedReviewResult(
+        sr.DeterministicFlags([], [], []), "ok", "CLEAN", "", "full diff"
+    )
     assert sr.format_result(res, "claude/x") == []
 
 
 def test_format_result_suspicious_includes_llm_text_and_footer():
     flags = sr.DeterministicFlags([("e.sh", "new executable file")], [], [])
-    res = sr.SeedReviewResult(flags, "ok", "SUSPICIOUS", "- e.sh runs on open", "full diff")
+    res = sr.SeedReviewResult(
+        flags, "ok", "SUSPICIOUS", "- e.sh runs on open", "full diff"
+    )
     lines = sr.format_result(res, "claude/x")
     text = "\n".join(lines)
     assert "Review branch claude/x before merging" in lines[0]
@@ -336,11 +343,15 @@ def test_format_result_unavailable_annotates_flags():
     flags = sr.DeterministicFlags([("e.sh", "new executable file")], [], [])
     res = sr.SeedReviewResult(flags, "unavailable: no key", None, "", "full diff")
     lines = sr.format_result(res, "claude/x")
-    assert any("did not run: no key; flags above are not judged." in line for line in lines)
+    assert any(
+        "did not run: no key; flags above are not judged." in line for line in lines
+    )
 
 
 def test_format_result_unavailable_silent_without_flags():
-    res = sr.SeedReviewResult(sr.DeterministicFlags([], [], []), "unavailable: no key", None, "", "full diff")
+    res = sr.SeedReviewResult(
+        sr.DeterministicFlags([], [], []), "unavailable: no key", None, "", "full diff"
+    )
     assert sr.format_result(res, "claude/x") == []
 
 
@@ -374,7 +385,9 @@ def test_main_prints_warning(monkeypatch, capsys):
 
 
 def test_main_silent_on_clean(monkeypatch, capsys):
-    res = sr.SeedReviewResult(sr.DeterministicFlags([], [], []), "clean", None, "", "full diff")
+    res = sr.SeedReviewResult(
+        sr.DeterministicFlags([], [], []), "clean", None, "", "full diff"
+    )
     monkeypatch.setattr(sr, "review", lambda *a, **k: res)
     assert sr.main(["/repo", "base", "claude/x"]) is None
     assert capsys.readouterr().err == ""
@@ -439,9 +452,27 @@ _VERDICTS = {"SUSPICIOUS", "CLEAN", "UNSURE", "UNKNOWN"}
 def test_fuzz_parse_raw_diff_never_raises_on_arbitrary_bytes():
     rng = random.Random(0xC0FFEE)
     alphabet = [
-        b":", b" ", b"\x00", b"0", b"4", b"5", b"6", b"7", b"1",
-        b"A", b"M", b"D", b"R", b"C", b"T", b"x", b"/",
-        b"\xff", b"\x80", b"\xc3\xa9", "\U0001f600".encode(),
+        b":",
+        b" ",
+        b"\x00",
+        b"0",
+        b"4",
+        b"5",
+        b"6",
+        b"7",
+        b"1",
+        b"A",
+        b"M",
+        b"D",
+        b"R",
+        b"C",
+        b"T",
+        b"x",
+        b"/",
+        b"\xff",
+        b"\x80",
+        b"\xc3\xa9",
+        "\U0001f600".encode(),
     ]
     for _ in range(3000):
         raw = b"".join(rng.choice(alphabet) for _ in range(rng.randint(0, 48)))
@@ -458,17 +489,32 @@ def test_fuzz_parse_raw_diff_roundtrips_wellformed_records():
     for _ in range(1500):
         paths, records = [], []
         for _ in range(rng.randint(0, 8)):
-            path = "".join(chr(rng.choice(codepoints)) for _ in range(rng.randint(1, 6)))
+            path = "".join(
+                chr(rng.choice(codepoints)) for _ in range(rng.randint(1, 6))
+            )
             paths.append(path)
             meta = f"{rng.choice(modes)} {rng.choice(modes)} a b {rng.choice(statuses)}"
-            records.append(b":" + meta.encode() + b"\x00" + path.encode("utf-8") + b"\x00")
+            records.append(
+                b":" + meta.encode() + b"\x00" + path.encode("utf-8") + b"\x00"
+            )
         entries = sr.parse_raw_diff(b"".join(records))
         assert [e.path for e in entries] == paths
 
 
 def test_fuzz_parse_verdict_total_and_in_domain():
     rng = random.Random(0x1234)
-    tokens = ["VERDICT:", "verdict:", "SUSPICIOUS", "CLEAN", "UNSURE", "?", " ", "\n", "\U0001f600", "\udca0"]
+    tokens = [
+        "VERDICT:",
+        "verdict:",
+        "SUSPICIOUS",
+        "CLEAN",
+        "UNSURE",
+        "?",
+        " ",
+        "\n",
+        "\U0001f600",
+        "\udca0",
+    ]
     for _ in range(3000):
         text = "".join(rng.choice(tokens) for _ in range(rng.randint(0, 12)))
         assert sr.parse_verdict(text) in _VERDICTS  # total + closed domain
@@ -476,7 +522,18 @@ def test_fuzz_parse_verdict_total_and_in_domain():
 
 def test_fuzz_autorun_reason_total_and_in_domain():
     rng = random.Random(0x5678)
-    segments = [".vscode", ".envrc", "Makefile", "package.json", ".bashrc", "src", "a", "..", "", "\U0001f600"]
+    segments = [
+        ".vscode",
+        ".envrc",
+        "Makefile",
+        "package.json",
+        ".bashrc",
+        "src",
+        "a",
+        "..",
+        "",
+        "\U0001f600",
+    ]
     for _ in range(3000):
         path = "/".join(rng.choice(segments) for _ in range(rng.randint(0, 6)))
         reason = sr.autorun_reason(path)
@@ -490,7 +547,10 @@ def test_fuzz_classify_emits_only_input_paths():
     for _ in range(2000):
         entries = [
             sr.RawEntry(
-                rng.choice(modes), rng.choice(modes), rng.choice(statuses), f"p{rng.randint(0, 5)}"
+                rng.choice(modes),
+                rng.choice(modes),
+                rng.choice(statuses),
+                f"p{rng.randint(0, 5)}",
             )
             for _ in range(rng.randint(0, 10))
         ]

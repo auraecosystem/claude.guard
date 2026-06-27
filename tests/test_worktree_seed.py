@@ -1396,16 +1396,16 @@ def test_resume_overlay_skips_when_host_tracked_tree_edited(tmp_path: Path) -> N
 
 # All key vars blanked so the LLM layer resolves to "no key" (the deterministic
 # layer is independent) — no test ever makes a real API call even if CI exports one.
-_NO_MONITOR_KEY = {
-    k: ""
-    for k in (
+_NO_MONITOR_KEY = dict.fromkeys(
+    (
         "ANTHROPIC_API_KEY",
         "MONITOR_API_KEY",
         "VENICE_INFERENCE_KEY",
         "OPENROUTER_API_KEY",
         "MONITOR_PROVIDER",
-    )
-}
+    ),
+    "",
+)
 
 
 def test_review_seed_diff_disabled_is_silent(tmp_path: Path) -> None:
