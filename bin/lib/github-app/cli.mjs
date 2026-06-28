@@ -443,8 +443,8 @@ async function manualCreate(org, ask) {
 export const HEADLESS_MENU = `This machine has no browser, so the GitHub App can't be created with one
 click here. How do you want to continue?
 
-  [1] Set it up on a computer with a browser, then import it here (recommended)
-  [2] Type the App details in by hand here
+  ★ [1] Set it up on a computer with a browser, then import it here
+    [2] Type the App details in by hand here
 
 Choice [1]: `;
 

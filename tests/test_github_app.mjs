@@ -226,6 +226,9 @@ test("headless menu offers import-from-a-browser-machine as the default", () => 
     /\[1\] Set it up on a computer with a browser.*import it here/,
   );
   assert.match(HEADLESS_MENU, /\[2\] Type the App details/);
+  // A star marks the recommended default to the left of [1].
+  assert.match(HEADLESS_MENU, /★ \[1\] Set it up/);
+  assert.doesNotMatch(HEADLESS_MENU, /\(recommended\)/);
   assert.match(HEADLESS_MENU, /Choice \[1\]: $/);
   // The hand-off note names the export/import commands to run.
   assert.match(IMPORT_ELSEWHERE_NOTE, /claude-github-app export/);
