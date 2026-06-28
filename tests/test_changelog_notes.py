@@ -116,6 +116,36 @@ def test_no_duplicate_subsections_within_a_version() -> None:
     assert not duplicates, "duplicate changelog subsections: " + "; ".join(duplicates)
 
 
+def test_oversized_notes_are_truncated_under_github_limit(tmp_path: Path) -> None:
+    """GitHub rejects a release body over 125,000 chars (HTTP 422). A large
+    section must be truncated on a line boundary with a CHANGELOG pointer, not
+    emitted whole (which is what failed the v0.6.0 release)."""
+    bullet = "- A reasonably descriptive changelog bullet about some change.\n"
+    big = "### Added\n\n" + bullet * 3000  # ~190 KB, well over the cap
+    changelog = (
+        f"## [1.0.0] - 2026-06-28\n\n{big}\n## [0.1.0] - 2026-06-08\n\n- Initial.\n"
+    )
+    (tmp_path / "CHANGELOG.md").write_text(changelog)
+    result = run_script("1.0.0", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert len(result.stdout) <= 125000, f"body still too long: {len(result.stdout)}"
+    assert "see CHANGELOG.md for the complete v1.0.0 changelog" in result.stdout
+    # Cut on a line boundary: every line before the footer is a whole bullet.
+    body = result.stdout.split("\n\n_Release notes truncated")[0]
+    assert all(
+        line == "### Added" or line == bullet.strip() or line == ""
+        for line in body.splitlines()
+    ), "truncation split a line mid-content"
+
+
+def test_within_limit_notes_are_not_truncated(tmp_path: Path) -> None:
+    """A normal-sized section is emitted verbatim, with no truncation footer."""
+    (tmp_path / "CHANGELOG.md").write_text(FIXTURE)
+    result = run_script("0.2.0", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "Release notes truncated" not in result.stdout
+
+
 def test_every_released_version_has_notes() -> None:
     """Each released header in the real CHANGELOG must yield non-empty notes,
     since tag-release.sh publishes exactly this output as the GitHub Release

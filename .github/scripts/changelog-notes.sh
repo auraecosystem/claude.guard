@@ -32,4 +32,16 @@ if [[ -z "$notes" ]]; then
   exit 1
 fi
 
+# GitHub rejects a release body over 125,000 characters (HTTP 422), so a large
+# release — many rolled-up fragments, e.g. the first cut after a manual gap —
+# would fail `gh release create` outright. Cap the notes well under the limit
+# and append a pointer to the full CHANGELOG rather than fail the release. Cut
+# on a line boundary so a category heading or bullet is never split mid-line.
+max_chars=120000
+footer=$(printf '\n\n_Release notes truncated — see CHANGELOG.md for the complete v%s changelog._' "$version")
+if ((${#notes} > max_chars)); then
+  head=${notes:0:max_chars-${#footer}}
+  notes="${head%$'\n'*}${footer}"
+fi
+
 printf '%s\n' "$notes"
