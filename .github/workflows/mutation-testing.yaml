@@ -26,14 +26,14 @@ permissions:
   contents: read
 
 concurrency:
-  # Group by PR head branch so a newer push cancels the superseded PR run
-  # (cancel-in-progress below). Push / merge / cron / release runs carry no
-  # head_ref, so they fall back to the unique run_id — a group of one that
-  # never collides and so is never cancelled, not even as a queued run dropped
-  # when the next merge lands during a burst. Post-merge runs always finish,
-  # keeping the status badge honest (a cancelled main run would show red).
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Cancel the superseded run the moment a newer commit lands — on a PR head
+  # and on main alike. The newest commit's run always finishes (nothing
+  # supersedes it), so it is the latest *completed* run the status badge
+  # reads; a bumped run that ends `cancelled` is never the newest and so never
+  # reddens the badge. Safe to cancel post-merge: a pure check, no durable
+  # output to drop. (Intermediate commits are cancelled, not run to completion.)
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # One decide job computes both js and python verdicts in a single checkout,
