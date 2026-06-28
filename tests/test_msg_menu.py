@@ -11,6 +11,8 @@ import os
 import re
 import subprocess
 
+import pytest
+
 from tests._helpers import REPO_ROOT, run_pty
 
 MSG_LIB = REPO_ROOT / "bin" / "lib" / "msg.bash"
@@ -220,7 +222,13 @@ def _menu_lines(out):
     return [ln for ln in lines if _MENU_LINE_RE.match(ln)]
 
 
-def test_no_emitted_row_exceeds_terminal_width(tmp_path):
+# Sweep the domain a wrap bug hides in: narrow + wide terminals, and few + many
+# options. n=12 crosses into two-digit option numbers, so the prefix widens by a
+# column — a row that still assumed a single-digit (5-col) prefix would render one
+# column too wide and wrap.
+@pytest.mark.parametrize("cols", (12, 20, 40))
+@pytest.mark.parametrize("n", (2, 5, 9, 12))
+def test_no_emitted_row_exceeds_terminal_width(tmp_path, cols, n):
     """The invariant behind the up/down duplication bug, asserted across the input
     domain rather than one symptom.
 
@@ -234,28 +242,25 @@ def test_no_emitted_row_exceeds_terminal_width(tmp_path):
     A short prompt ("Pick") keeps the prompt/top-rule (drawn once, above the rewound
     frame and exempt) from being the widest line, so a violation here is squarely a
     too-wide row or bottom rule — the duplication class."""
-    # Sweep the domain a wrap bug hides in: narrow + wide terminals, few + many
-    # options, and labels both under and far over the width. A navigation sequence
-    # (down, up, down) exercises the redraw path, not just the initial paint.
-    for cols in (12, 20, 40):
-        for n in (2, 5, 9):
-            opts = []
-            for i in range(n):
-                # Alternate short and very-long labels so clipping and non-clipping
-                # rows coexist in the same menu.
-                body = f"L{i}-" + ("w" * (70 if i % 2 else 1))
-                opts.append(f"{i + 1}:{body}")
-            argv = [str(_harness(tmp_path)), "choose", "Pick", "1", *opts]
-            env = {**os.environ, "COLUMNS": str(cols)}
-            out, rc = run_pty(argv, env, tmp_path, "\033[B\033[A\033[B\n")
-            assert rc == 0, out
-            drawn = _menu_lines(out)
-            assert drawn, out  # the menu must have actually rendered something
-            for line in drawn:
-                assert len(line) <= cols, (
-                    f"cols={cols} n={n}: menu line of width {len(line)} exceeds "
-                    f"terminal — it will wrap and the fixed rewind duplicates: {line!r}"
-                )
+    opts = []
+    for i in range(n):
+        # Alternate short and very-long labels so clipping and non-clipping rows
+        # coexist in the same menu.
+        body = f"L{i}-" + ("w" * (70 if i % 2 else 1))
+        opts.append(f"{i + 1}:{body}")
+    argv = [str(_harness(tmp_path)), "choose", "Pick", "1", *opts]
+    env = {**os.environ, "COLUMNS": str(cols)}
+    # A navigation sequence (down, up, down) exercises the redraw path, not just the
+    # initial paint.
+    out, rc = run_pty(argv, env, tmp_path, "\033[B\033[A\033[B\n")
+    assert rc == 0, out
+    drawn = _menu_lines(out)
+    assert drawn, out  # the menu must have actually rendered something
+    for line in drawn:
+        assert len(line) <= cols, (
+            f"cols={cols} n={n}: menu line of width {len(line)} exceeds terminal — "
+            f"it will wrap and the fixed rewind duplicates: {line!r}"
+        )
 
 
 def test_long_label_is_clipped_with_marker(tmp_path):

@@ -160,20 +160,28 @@ cg_box() {
   } >&2
 }
 
+# _cg_choose_prefix_cols <num> — the display width of the fixed part of a menu row
+# that precedes the label: a 2-column lead ("❯ " on the selected row, "  " elsewhere),
+# then "<num>. ". The SSOT both the rule-width sizing and the per-row label clip read,
+# so the two cannot disagree on where the label starts — and it tracks a multi-digit
+# <num> instead of assuming the option count stays ≤ 9.
+_cg_choose_prefix_cols() {
+  printf '%s' "$((2 + ${#1} + 2))" # "  " + "<num>" + ". "
+}
+
 # Render one menu row in place (clearing the line first so an in-place redraw can't
 # leave stale glyphs behind). The highlighted row carries the ❯ cursor and bold
 # colour; the rest are indented to line up under it.
 #
-# A row's visible layout is a 5-column prefix ("❯ "/"  " = 2, then "N. " = 3) plus
-# the label, so when `maxwidth` is given the label is clipped to maxwidth-5 columns
-# (with a trailing … to mark the cut). This keeps every row on ONE physical terminal
-# line: cg_choose's in-place redraw rewinds a FIXED count of lines, and a label that
-# wrapped onto a second physical line would slip past the rewind and pile up stale
-# copies on each keypress. maxwidth empty/0 (width unknown, e.g. piped) disables the
-# clip and prints the row in full.
+# A row is a prefix (_cg_choose_prefix_cols) plus the label, so when `maxwidth` is
+# given the label is clipped to maxwidth-prefix columns (with a trailing … to mark the
+# cut). This keeps every row on ONE physical terminal line: cg_choose's in-place redraw
+# rewinds a FIXED count of lines, and a label that wrapped onto a second physical line
+# would slip past the rewind and pile up stale copies on each keypress. maxwidth empty/0
+# (width unknown, e.g. piped) disables the clip and prints the row in full.
 _cg_choose_row() {
   local idx="$1" sel="$2" num="$3" label="$4" maxwidth="${5:-0}"
-  local avail=$((maxwidth - 5))
+  local avail=$((maxwidth - $(_cg_choose_prefix_cols "$num")))
   if ((maxwidth > 0 && avail >= 1 && ${#label} > avail)); then
     label="${label:0:avail-1}…"
   fi
@@ -220,11 +228,11 @@ cg_choose() {
   # (test_msg_menu.py).
   local sel=$((def - 1)) i key rest pick=0 cancel=0
   # Rule width spans the widest of the prompt and the option rows. A rendered row is
-  # "  N. label" / "❯ N. label" — a 2-col prefix, the single-digit number, ". ", then
-  # the label = 5 + label length (option count is always ≤ 9 here, so one digit).
+  # "  N. label" / "❯ N. label" — _cg_choose_prefix_cols columns of prefix, then the
+  # label — so its width is that prefix plus the label length.
   local width=${#prompt} rowlen cols rule
   for ((i = 0; i < n; i++)); do
-    rowlen=$((5 + ${#labels[i]}))
+    rowlen=$(($(_cg_choose_prefix_cols "$((i + 1))") + ${#labels[i]}))
     ((rowlen > width)) && width=$rowlen
   done
   cols="$(_cg_terminal_cols)"
