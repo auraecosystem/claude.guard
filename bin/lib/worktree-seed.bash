@@ -377,11 +377,7 @@ worktree_persist_resume_artifacts() {
   rm -rf "$tmp" 2>/dev/null
   # The bucket holds the agent's plaintext commits + the uncommitted overlay, as sensitive
   # as the seed-branches store, so create it owner-only. Best-effort: a secure_mkdir failure
-  # only costs a later resume its overlay, never teardown. Tighten the umask to 077 for the
-  # whole capture so every artifact below (commits.mbox, overlay.patch, base, wip.patch)
-  # lands 0600 even though `cp` would otherwise copy the source patch's looser mode; restore
-  # the caller's umask on every exit path (this runs in the launcher's process, not a
-  # subshell, so a leaked umask would silently tighten unrelated later writes).
+  # only costs a later resume its overlay, never teardown.
   worktree_secure_mkdir "$tmp" 2>/dev/null || return 0
   # Write every artifact under umask 077 so each lands 0600. The subshell scopes the umask
   # change — this function runs in the launcher's process (not its own subshell), so a bare

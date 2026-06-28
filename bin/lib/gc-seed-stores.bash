@@ -63,13 +63,18 @@ if gc_dry_run; then
 fi
 
 removed=0
-for _c in "${candidates[@]}"; do
-  # rm -rf: a resume bucket is a directory, a loose artifact a file; both are reclaimable
-  # plaintext. A failure (perms, race) is best-effort — the next sweep retries.
-  if rm -rf "$_c" 2>/dev/null; then
-    removed=$((removed + 1))
-  fi
-done
+# `${arr[@]}` on an EMPTY array under `set -u` is an unbound-variable error on the bash
+# 3.2 a host macOS still ships, so guard the count before iterating (a clean host has
+# nothing to prune).
+if ((${#candidates[@]})); then
+  for _c in "${candidates[@]}"; do
+    # rm -rf: a resume bucket is a directory, a loose artifact a file; both are reclaimable
+    # plaintext. A failure (perms, race) is best-effort — the next sweep retries.
+    if rm -rf "$_c" 2>/dev/null; then
+      removed=$((removed + 1))
+    fi
+  done
+fi
 
 if [[ "$removed" -gt 0 ]]; then
   maintenance_log 'pruned %s stale seed/resume artifact(s) from the host stores\n' "$removed"
