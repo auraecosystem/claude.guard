@@ -11,18 +11,16 @@ if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
   echo "heldout=false" >>"$GITHUB_OUTPUT"
   exit 0
 fi
-# Capture git output into variables BEFORE matching. Piping `git … | grep -q`
-# under `set -o pipefail` is a trap: grep -q exits on its first match and closes
-# the pipe, the still-writing git process is killed by SIGPIPE (exit 141), and
-# pipefail makes the whole pipeline non-zero — so a MATCH is misread as no-match
-# and the && guard never fires. The matching commit is usually the newest, i.e.
-# git log's FIRST line, so grep -q exits almost immediately and the race is lost
-# reliably on a cold CI runner (it is merely flaky on a fast warm checkout). The
-# net effect: the keyword trigger silently failed on every pull_request, so
-# [breakout-ctf]/[monitor-eval]/[sabotage-eval] in a PR commit title never ran.
-# Reading from a here-string removes the upstream pipe entirely, so grep's early
-# exit can no longer kill git and pipefail cannot misfire. A real git failure now
-# aborts loudly via set -e (a broken range is a bug, not a silent run=false).
+# Capture git output into variables, then match against a here-string, rather
+# than piping `git … | grep -q`. Under `set -o pipefail` that pipe is a trap:
+# grep -q exits on its first match and closes the pipe, the still-writing git is
+# killed by SIGPIPE (exit 141), and pipefail turns that into a non-zero pipeline
+# — so a MATCH reads as no-match and the && guard never fires. The matching
+# commit is the newest (git log's first line), so grep -q exits almost
+# immediately and the kill is reliable on a slow runner. A here-string has no
+# upstream process for grep's early exit to kill, so pipefail cannot misfire; a
+# genuine git failure surfaces via set -e (a broken range is a bug, not a silent
+# run=false).
 changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
 subjects="$(git log --format='%s' "$BASE_SHA...$HEAD_SHA")"
 run=false

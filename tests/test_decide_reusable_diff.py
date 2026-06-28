@@ -1,19 +1,17 @@
 """Behavioral regression test for .github/scripts/decide-reusable-diff.sh.
 
-Guards the pipefail + `grep -q` SIGPIPE bug. `git … | grep -q` under
-`set -o pipefail` misreports a MATCH as no-match: grep -q exits on its first hit
-and closes the pipe, the still-writing git is killed by SIGPIPE (exit 141), and
-pipefail propagates that as a non-zero pipeline, so the `&&` guard never fires.
-On a pull request the matching commit is git log's FIRST line, so grep -q exits
-immediately and the producer is reliably killed — the keyword trigger silently
-returned run=false, and `[breakout-ctf]`/`[monitor-eval]`/`[sabotage-eval]` in a
-PR commit title never ran (only workflow_dispatch, which has no base/head to
-diff, worked).
+Pins that a keyword/path match sets run=true even when the matching line is the
+first of a large `git` output. Matching with `git … | grep -q` under
+`set -o pipefail` does not: grep -q exits on its first hit and closes the pipe,
+the still-writing git is killed by SIGPIPE (exit 141), pipefail turns that into a
+non-zero pipeline, and the `&&` guard reads the MATCH as no-match. The matching
+commit is git log's first line, so grep -q exits immediately and the kill is
+reliable on a slow runner.
 
-The fake `git` here `exec cat`s a file that floods >64 KiB AFTER the match on
-line 1, so the dropped pipe fills and the producer is SIGPIPE-killed regardless
-of scheduling. That makes the unfixed pipeline FAIL deterministically (not just
-flakily on a fast box) and the capture-then-grep fix pass.
+The fake `git` `exec cat`s a file that floods >64 KiB AFTER the match on line 1,
+so the dropped pipe fills and the producer is SIGPIPE-killed regardless of
+scheduling — making a piped implementation FAIL deterministically (not just
+flakily on a fast box) and the capture-then-grep form pass.
 """
 
 import os
@@ -23,7 +21,7 @@ from tests._helpers import REPO_ROOT, run_capture
 
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "decide-reusable-diff.sh"
 # Comfortably over the 64 KiB default pipe buffer, so grep -q's early exit
-# guarantees a blocked write → SIGPIPE on the unfixed pipeline.
+# guarantees a blocked write → SIGPIPE for a piped implementation.
 FLOOD_LINES = 50_000
 
 
