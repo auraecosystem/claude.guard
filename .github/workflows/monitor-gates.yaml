@@ -478,7 +478,6 @@ jobs:
           result: ${{ needs.gate-live-floor.result }}
           skip-message: "Skipped: no monitor- or eval-relevant changes"
           treat-skipped-as-success: "true"
-          treat-skipped-as-success: "true"
 
   # ─── Single upsert ───────────────────────────────────────────────────────────
 

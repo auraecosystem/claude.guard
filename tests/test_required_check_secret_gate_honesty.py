@@ -77,9 +77,9 @@ def _gate_script_path(work_job: dict) -> Path | None:
         if not isinstance(step, dict):
             continue
         run = str(step.get("run", ""))
-        m = re.search(r"\.github/scripts/(\S+-secret-gate\.sh)", run)
+        m = re.search(r"\.github/scripts/(?P<script>\S+-secret-gate\.sh)", run)
         if m:
-            return SCRIPTS / m.group(1)
+            return SCRIPTS / m.group("script")
     return None
 
 
