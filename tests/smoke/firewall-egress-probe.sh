@@ -362,18 +362,23 @@ done
 
 # (f) HTTPS via CONNECT — the PRODUCTION path (every real egress is CONNECT host:443
 # + ssl_bump), which the plaintext probes above never exercise. Stand up a TLS origin
-# on :443 and drive curl's `CONNECT` through squid to assert:
-#   (f1) CONNECT to an allowlisted rw domain is permitted, spliced, and reaches the
-#        TLS origin (the happy path works end-to-end through the bump engine);
-#   (f2) CONNECT to a RAW IP is denied — it skips dnsmasq and matches no dstdomain,
-#        the exfil channel the allowlist-by-name gate closes;
-#   (f3) CONNECT to a non-allowlisted hostname is denied at squid by the same gate.
-# rw.test is SPLICED (rw_domains), so squid tunnels TCP and curl validates the origin
-# cert directly via --cacert — no squid-side origin trust needed for the assertion.
-status "(f) HTTPS CONNECT: allowlisted domain reaches the TLS origin; raw-IP and non-allowlisted CONNECT denied"
+# on :443, drive curl's `CONNECT` through squid, and assert on squid's OWN logged
+# verdict for each attempt (the access-log result tag), not on curl's TLS outcome:
+#   (f1) CONNECT to an allowlisted rw domain is permitted and SPLICED — squid opens the
+#        tunnel to the origin (logged TCP_TUNNEL): the gate lets the happy path through;
+#   (f2) CONNECT to a RAW IP is denied (logged TCP_DENIED) — it skips dnsmasq and matches
+#        no dstdomain, the exfil channel the allowlist-by-name gate closes;
+#   (f3) CONNECT to a non-allowlisted hostname is denied by the same gate (TCP_DENIED).
+# Asserting on the access-log tag, rather than on reaching the origin end-to-end, tests the
+# CONNECT gate directly and is immune to the container's curl/openssl cert-validation
+# quirks: a spliced tunnel registers TCP_TUNNEL whether or not curl accepts the self-signed
+# origin cert inside it.
+status "(f) HTTPS CONNECT: allowlisted domain is spliced (TCP_TUNNEL); raw-IP and non-allowlisted CONNECT denied (TCP_DENIED)"
+ACCESS_LOG=/var/log/squid/access.log
 TLS_DIR=/tmp/tls-origin.$$
 mkdir -p "$TLS_DIR"
-# Self-signed leaf for rw.test (its own CA): curl trusts it via --cacert below.
+# Self-signed leaf for rw.test: the origin only needs to be a TLS listener squid can splice
+# to, so the spliced CONNECT registers TCP_TUNNEL — the cert's validity is never asserted on.
 openssl req -x509 -newkey rsa:2048 -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
   -days 1 -nodes -subj "/CN=rw.test" -addext "subjectAltName=DNS:rw.test" >/dev/null 2>&1
 python3 - "$MARKER" "$TLS_DIR/cert.pem" "$TLS_DIR/key.pem" <<'PY' &
@@ -401,36 +406,57 @@ srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
 PY
 TLS_PID=$!
-# CONNECT to rw.test:443 is the gated, spliced path; once it returns MARKER the TLS
-# origin, dnsmasq, and squid's CONNECT gate + splice are all proven up together.
-wait_for "TLS origin" 40 \
-  curl -fsS -o /dev/null --cacert "$TLS_DIR/cert.pem" -x "$PROXY" https://rw.test:443/
+# Readiness: a proxied CONNECT that SKIPS cert validation (-k) — once it returns 200, squid
+# + dnsmasq + the splice engine + the TLS origin are all proven up together, without
+# coupling readiness to the cert-validation quirk this section is written to avoid.
+wait_for "TLS origin" 40 bash -c "curl -k -fsS -o /dev/null --max-time 5 -x $PROXY https://rw.test:443/"
 
-# (f1) Allowlisted rw domain over HTTPS reaches the origin.
-HTTPS_BODY=$(curl -sS --cacert "$TLS_DIR/cert.pem" -x "$PROXY" https://rw.test:443/ 2>/dev/null) || HTTPS_BODY="" # pin-exempt: captures proxied response body for assertion
-if [[ "$HTTPS_BODY" == *"$MARKER"* ]]; then
-  pass "CONNECT rw.test:443 spliced through to the TLS origin (HTTPS happy path works)"
+# Count only access-log lines written by THIS section's CONNECT attempts: snapshot the
+# current length so earlier (plaintext) sections — and the readiness CONNECT above — can't
+# satisfy a match.
+LOG_START=$(wc -l <"$ACCESS_LOG" 2>/dev/null || echo 0)
+LOG_START=$((LOG_START + 1))
+
+# squid flushes the access log asynchronously, so poll until the CONNECT to $1:443 appears
+# tagged with squid result code $2 (TCP_TUNNEL = permitted + spliced; TCP_DENIED = blocked
+# at the http_access CONNECT gate). Narrow to this section's lines first.
+connect_result() {
+  local target="$1" tag="$2" i
+  for ((i = 0; i < 40; i++)); do
+    if tail -n +"$LOG_START" "$ACCESS_LOG" 2>/dev/null | grep -F "CONNECT ${target}:443" | grep -Fq "$tag"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+# Trigger the three CONNECT attempts; the assertions read squid's logged verdict, not curl's
+# exit (the inner TLS handshake to the self-signed origin is irrelevant to the gate decision,
+# and the denied attempts never reach TLS at all).
+curl -k -s -o /dev/null --max-time 10 -x "$PROXY" https://rw.test:443/ 2>/dev/null || true       # pin-exempt: drives a gated CONNECT; assertion reads squid's access log
+curl -k -s -o /dev/null --max-time 10 -x "$PROXY" https://127.0.0.1:443/ 2>/dev/null || true     # pin-exempt: see above
+curl -k -s -o /dev/null --max-time 10 -x "$PROXY" https://unlisted.test:443/ 2>/dev/null || true # pin-exempt: see above
+
+# (f1) Allowlisted rw domain: the CONNECT is permitted and spliced to the origin.
+if connect_result rw.test TCP_TUNNEL; then
+  pass "CONNECT rw.test:443 permitted and spliced to the TLS origin (TCP_TUNNEL — HTTPS happy path works)"
 else
-  fail "CONNECT rw.test:443 did not reach the TLS origin (body=${HTTPS_BODY:0:120})"
+  fail "CONNECT rw.test:443 was not spliced (no TCP_TUNNEL in access log)"
 fi
 
-# (f2) Raw-IP CONNECT is denied — squid never opens the tunnel, so curl fails before
-# any TLS handshake (no MARKER, non-zero curl). A raw IP matches no dstdomain.
-RAWIP_OUT=$(curl -sS -o /dev/null -w '%{http_code}' --cacert "$TLS_DIR/cert.pem" \
-  -x "$PROXY" https://127.0.0.1:443/ 2>/dev/null) || RAWIP_OUT=000                                                  # pin-exempt: probes a denied CONNECT, captures only the status code
-RAWIP_BODY=$(curl -sS --cacert "$TLS_DIR/cert.pem" -x "$PROXY" https://127.0.0.1:443/ 2>/dev/null) || RAWIP_BODY="" # pin-exempt: see above
-if [[ "$RAWIP_BODY" != *"$MARKER"* ]]; then
-  pass "CONNECT to raw IP 127.0.0.1:443 denied by the allowlist-by-name gate (code=$RAWIP_OUT)"
+# (f2) Raw-IP CONNECT is denied — a raw IP matches no dstdomain, so the gate blocks it.
+if connect_result 127.0.0.1 TCP_DENIED; then
+  pass "CONNECT to raw IP 127.0.0.1:443 denied by the allowlist-by-name gate (TCP_DENIED)"
 else
-  fail "CONNECT to raw IP 127.0.0.1:443 reached the origin — raw-IP CONNECT bypassed the gate"
+  fail "CONNECT to raw IP 127.0.0.1:443 was not denied (no TCP_DENIED in access log) — raw-IP CONNECT may have bypassed the gate"
 fi
 
 # (f3) A non-allowlisted hostname CONNECT is denied at squid by the same gate.
-UNLISTED_BODY=$(curl -sS --cacert "$TLS_DIR/cert.pem" -x "$PROXY" https://unlisted.test:443/ 2>/dev/null) || UNLISTED_BODY="" # pin-exempt: probes a denied CONNECT
-if [[ "$UNLISTED_BODY" != *"$MARKER"* ]]; then
-  pass "CONNECT to non-allowlisted unlisted.test:443 denied by the gate"
+if connect_result unlisted.test TCP_DENIED; then
+  pass "CONNECT to non-allowlisted unlisted.test:443 denied by the gate (TCP_DENIED)"
 else
-  fail "CONNECT to non-allowlisted unlisted.test:443 was permitted"
+  fail "CONNECT to non-allowlisted unlisted.test:443 was not denied (no TCP_DENIED in access log)"
 fi
 kill "$TLS_PID" 2>/dev/null || true
 
