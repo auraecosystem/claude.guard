@@ -489,6 +489,118 @@ def test_reseed_container_fails_loud_when_extract_fails(tmp_path: Path) -> None:
     assert b"could not re-seed /workspace with the current working tree" in r.stderr
 
 
+# ── prewarm seed fingerprint: stamp at prewarm, match-or-reseed at adoption ────
+
+
+def _stamp_env(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A /workspace stand-in that is itself a git repo — so the pre-initialized seed repo's .git
+    exists for the stamp and `git rev-parse HEAD` works — plus the /workspace->$WS_DIR stub."""
+    ws = tmp_path / "ws"
+    _init_repo(ws)
+    (ws / "seed.txt").write_text("seeded\n")
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-qm", "wip-root")
+    stub = tmp_path / "stub"
+    write_exe(stub / "docker", _MAP_DOCKER)
+    return ws, {"PATH": f"{stub}:{os.environ.get('PATH', '')}", "WS_DIR": str(ws)}
+
+
+def test_seed_fingerprint_lifecycle(tmp_path: Path) -> None:
+    """Stamp the host tree's fingerprint into the pre-initialized spare, then: an UNCHANGED tree
+    matches (the warm-reuse case), and worktree_container_seed_head recovers the spare's WIP root.
+    Editing a tracked file (uncommitted) breaks the match via the working-tree delta; a new commit
+    breaks it via HEAD — so any drift since the prewarm forces a re-seed."""
+    host = tmp_path / "host"
+    _init_repo(host)
+    (host / "f.txt").write_text("v1\n")
+    _git(host, "add", "-A")
+    _git(host, "commit", "-qm", "c1")
+    head = _git(host, "rev-parse", "HEAD")
+    ws, env = _stamp_env(tmp_path)
+
+    r = _sourced('worktree_stamp_seed_fingerprint "$1" "$2"', "cid", str(host), env=env)
+    assert r.returncode == 0, r.stderr
+    assert (ws / ".git" / "claude-seed-head").read_text().strip() == head
+
+    r = _sourced(
+        'worktree_seed_fingerprint_matches "$1" "$2"', "cid", str(host), env=env
+    )
+    assert r.returncode == 0, r.stderr  # unchanged tree → reuse the prewarm repo
+
+    r = _sourced('worktree_container_seed_head "$1"', "cid", env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.decode().strip() == _git(ws, "rev-parse", "HEAD")
+
+    (host / "f.txt").write_text("v1\nedit\n")  # uncommitted edit → delta differs
+    r = _sourced(
+        'worktree_seed_fingerprint_matches "$1" "$2"', "cid", str(host), env=env
+    )
+    assert r.returncode != 0
+
+    _git(host, "add", "-A")
+    _git(host, "commit", "-qm", "c2")  # new commit → HEAD differs
+    r = _sourced(
+        'worktree_seed_fingerprint_matches "$1" "$2"', "cid", str(host), env=env
+    )
+    assert r.returncode != 0
+
+
+def test_seed_fingerprint_no_match_without_a_stamp(tmp_path: Path) -> None:
+    """With no stamp present (a spare whose fingerprint was never written, or was wiped), the
+    match check returns non-zero so adoption re-seeds rather than trust an absent fingerprint."""
+    host = tmp_path / "host"
+    _init_repo(host)
+    (host / "f.txt").write_text("v1\n")
+    _git(host, "add", "-A")
+    _git(host, "commit", "-qm", "c1")
+    _, env = _stamp_env(tmp_path)  # ws/.git exists but carries no claude-seed-* files
+    r = _sourced(
+        'worktree_seed_fingerprint_matches "$1" "$2"', "cid", str(host), env=env
+    )
+    assert r.returncode != 0
+
+
+def test_seed_fingerprint_match_requires_a_git_repo_root(tmp_path: Path) -> None:
+    """A non-git workspace can't be fingerprinted, so the match check returns non-zero (the HEAD
+    read fails) rather than wrongly reuse a spare."""
+    nongit = tmp_path / "plain"
+    nongit.mkdir()
+    _, env = _stamp_env(tmp_path)
+    r = _sourced(
+        'worktree_seed_fingerprint_matches "$1" "$2"', "cid", str(nongit), env=env
+    )
+    assert r.returncode != 0
+
+
+def test_stamp_seed_fingerprint_fails_loud_without_head(tmp_path: Path) -> None:
+    """Stamping a non-git/HEADless workspace aborts loud (non-zero + a clear message) so a prewarm
+    never leaves a spare an adopter would trust as current."""
+    nongit = tmp_path / "plain"
+    nongit.mkdir()
+    _, env = _stamp_env(tmp_path)
+    r = _sourced(
+        'worktree_stamp_seed_fingerprint "$1" "$2"', "cid", str(nongit), env=env
+    )
+    assert r.returncode != 0
+    assert b"could not read HEAD" in r.stderr
+
+
+def test_container_seed_head_fails_loud_when_not_a_repo(tmp_path: Path) -> None:
+    """If the spare's /workspace is not a git repo, recovering the seed base fails loud (non-zero
+    + message) rather than hand teardown an empty extract base."""
+    ws = tmp_path / "ws"
+    ws.mkdir()  # NOT a git repo
+    stub = tmp_path / "stub"
+    write_exe(stub / "docker", _MAP_DOCKER)
+    r = _sourced(
+        'worktree_container_seed_head "$1"',
+        "cid",
+        env={"PATH": f"{stub}:{os.environ.get('PATH', '')}", "WS_DIR": str(ws)},
+    )
+    assert r.returncode != 0
+    assert b"could not read the pre-initialized seed repo HEAD" in r.stderr
+
+
 # ── full round-trip: seed -> in-sandbox commits -> extract -> host apply ───────
 
 

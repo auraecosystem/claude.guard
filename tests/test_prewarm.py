@@ -18,6 +18,7 @@ Two layers:
 
 # covers: bin/claude-guard
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -999,6 +1000,12 @@ exec)
           ;;
       esac
       exit 0 ;;
+    # Seed-fingerprint probes (adoption's reuse-or-reseed decision). The stamped head echoes
+    # FAKE_SEED_HEAD; the wip cmp succeeds only under FAKE_SEED_FP_MATCH. With neither set the
+    # head reads empty and the match fails, so adoption re-seeds (the drift path).
+    *"cat /workspace/.git/claude-seed-head"*) printf '%s\n' "${{FAKE_SEED_HEAD:-}}"; exit 0 ;;
+    *"cmp -s - /workspace/.git/claude-seed-wip"*)
+      [ -n "${{FAKE_SEED_FP_MATCH:-}}" ] && exit 0 || exit 1 ;;
   esac
   exit 0 ;;
 inspect)
@@ -1080,61 +1087,70 @@ def _trace_stages(trace: Path) -> list[str]:
     return [ln.split("\t")[0] for ln in trace.read_text().splitlines()]
 
 
-def test_prewarm_boot_does_not_initialize_the_seed_repo(tmp_path: Path) -> None:
-    """A prewarm boot must NOT stand up the in-sandbox seed git repo. That repo is
-    per-ADOPTING-session machinery: its branch name is keyed to the volume id of the session
-    that claims the spare. Initialized at prewarm time it would brand the pristine spare with
-    a branch named after the spare's OWN throwaway vid; the adopter inherits that vid (warm
-    adoption keeps the spare's volume id), recomputes the identical name, and
-    worktree_container_init_repo's `git checkout -b` collides ("branch already exists") —
-    hard-failing the very first warm launch. The launcher emits worktree_seed_locked right
-    before the init, so the trace is the signal: a prewarm boot in seed mode must NOT emit it,
-    while a cold seed launch (which owns its session) must. Both run in seed mode (the real
-    default in a git checkout) — the bug is invisible to the suite's bind-mode default."""
+def _host_head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_prewarm_boot_initializes_and_stamps_the_seed_repo(tmp_path: Path) -> None:
+    """A prewarm boot now pays the seed repo's `git init` up front (in the background pool) and
+    stamps a fingerprint of the seeded tree, so an adopting launch can reuse the repo as-is and
+    stay fast. The branch name is deterministic from the spare's volume id — the SAME name the
+    adopter recomputes — so initializing it at prewarm is not a collision. The fake docker logs
+    every exec: `git init` proves the repo was stood up and `claude-seed-head` proves the
+    fingerprint was stamped. Seed mode is the real default in a git checkout; the suite's
+    bind-mode default would hide this."""
     _init_repo(tmp_path)
-    pre_trace = tmp_path / "prewarm.trace"
-    _, _, pre_env = _prewarm_env(
+    log = tmp_path / "prewarm.log"
+    _, _, env = _prewarm_env(
         tmp_path,
         CLAUDE_NO_PREWARM_REAP="1",
         CLAUDE_GUARD_NO_WORKTREE_SEED="",  # opt into the default seed mode
-        CLAUDE_GUARD_TRACE="info",
-        CLAUDE_GUARD_TRACE_FILE=str(pre_trace),
+        FAKE_DOCKER_LOG=str(log),
     )
-    rp = run_capture(
-        [str(WRAPPER), "prewarm", str(tmp_path)], env=pre_env, cwd=tmp_path
-    )
-    assert rp.returncode == 0, rp.stderr
-    assert "pre-warmed sandbox ready" in rp.stderr
-    pre_text = pre_trace.read_text() if pre_trace.exists() else ""
-    assert "worktree_seed_locked" not in pre_text, pre_text
+    r = run_capture([str(WRAPPER), "prewarm", str(tmp_path)], env=env, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "pre-warmed sandbox ready" in r.stderr
+    text = log.read_text()
+    assert "git init" in text, text
+    assert "claude-seed-head" in text, text
 
-    # The contrapositive: a cold launch (no claimable spare) in the SAME seed mode DOES own a
-    # session, so it initializes the seed repo and emits the event — guarding against a fix
-    # that simply never emits it.
-    cold_trace = tmp_path / "cold.trace"
-    _, _, cold_env = _prewarm_env(
+
+def test_warm_adoption_reuses_unchanged_spare(tmp_path: Path) -> None:
+    """When the host's tracked tree is UNCHANGED since the prewarm (the fingerprint matches), a
+    warm adoption REUSES the prewarm-initialized seed repo as-is: no re-seed (`maxdepth 1` absent)
+    and no second `git init`. This is the fast warm path the optimization preserves — the init was
+    already paid in the pool; adoption only recovers the extract base from the spare's seed HEAD."""
+    _init_repo(tmp_path)
+    log = tmp_path / "warm.log"
+    _, _, env = _prewarm_env(
         tmp_path,
+        FAKE_SPARE="1",
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",  # seed mode (the real default in a git checkout)
         CLAUDE_NO_PREWARM_REAP="1",
-        CLAUDE_GUARD_NO_WORKTREE_SEED="",
-        CLAUDE_GUARD_TRACE="info",
-        CLAUDE_GUARD_TRACE_FILE=str(cold_trace),
+        FAKE_SEED_FP_MATCH="1",
+        FAKE_SEED_HEAD=_host_head(tmp_path),
+        FAKE_DOCKER_LOG=str(log),
     )
-    rc = _run_container(tmp_path, cold_env)
-    assert rc.returncode == 0, rc.stderr
-    assert "LAUNCHED-CLAUDE" in rc.stdout
-    cold_text = cold_trace.read_text() if cold_trace.exists() else ""
-    assert "worktree_seed_locked" in cold_text, cold_text
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+    text = log.read_text()
+    assert "maxdepth 1" not in text, text  # no re-seed
+    assert "git init" not in text, text  # no re-init — reused as-is
 
 
-def test_warm_adoption_reseeds_the_workspace_in_seed_mode(tmp_path: Path) -> None:
-    """A warm adoption in seed mode re-seeds the adopted spare's /workspace with THIS launch's
-    current tracked tree before initializing the repo. The spare was seeded at prewarm time and
-    the adoption spec gate fingerprints the install checkout, not the workspace tree, so without
-    the re-seed the agent would work on a stale tree and the teardown reconcile would replay onto
-    a mismatched WIP root. The re-seed runs its authoritative wipe+extract (`find ... | tar`) in
-    the adopted container; the fake docker logs every call, so its unique `maxdepth 1` marker
-    proves the step ran. A cold launch (which seeds its own fresh volume at boot) must NOT run
-    it — guarded by the contrapositive below."""
+def test_warm_adoption_reseeds_a_drifted_spare(tmp_path: Path) -> None:
+    """When the host's tracked tree DRIFTED since the prewarm (the fingerprint does not match), a
+    warm adoption re-seeds the spare's stale /workspace with the current tree (`maxdepth 1`) and
+    re-inits the seed repo (`git init`), so the agent works on the up-to-date tree and the teardown
+    reconcile replays onto a matching WIP root. (No FAKE_SEED_* set → the stamped head reads empty
+    → the match fails → the drift path.) The cold contrapositive seeds its own fresh volume at
+    boot, so it re-inits but must NOT re-seed in-container."""
     _init_repo(tmp_path)
     # Per-phase docker logs: both phases share tmp_path (hence the same default FAKE_DOCKER_LOG),
     # so give each its own so the cold assertion can't read the warm run's re-seed entry.
@@ -1142,17 +1158,17 @@ def test_warm_adoption_reseeds_the_workspace_in_seed_mode(tmp_path: Path) -> Non
     _, _, warm_env = _prewarm_env(
         tmp_path,
         FAKE_SPARE="1",
-        CLAUDE_GUARD_NO_WORKTREE_SEED="",  # seed mode (the real default in a git checkout)
+        CLAUDE_GUARD_NO_WORKTREE_SEED="",
         CLAUDE_NO_PREWARM_REAP="1",
         FAKE_DOCKER_LOG=str(warm_log),
     )
     rw = _run_container(tmp_path, warm_env)
     assert rw.returncode == 0, rw.stderr
     assert "LAUNCHED-CLAUDE" in rw.stdout
-    assert "maxdepth 1" in warm_log.read_text(), warm_log.read_text()
+    warm_text = warm_log.read_text()
+    assert "maxdepth 1" in warm_text, warm_text  # drift → re-seed
+    assert "git init" in warm_text, warm_text  # and re-init
 
-    # A cold launch in the same seed mode seeds its own fresh volume via the hardener at boot, so
-    # it must not re-seed the workspace in-container.
     cold_log = tmp_path / "cold.log"
     _, _, cold_env = _prewarm_env(
         tmp_path,
@@ -1162,7 +1178,11 @@ def test_warm_adoption_reseeds_the_workspace_in_seed_mode(tmp_path: Path) -> Non
     )
     rc = _run_container(tmp_path, cold_env)
     assert rc.returncode == 0, rc.stderr
-    assert "maxdepth 1" not in cold_log.read_text(), cold_log.read_text()
+    cold_text = cold_log.read_text()
+    assert "maxdepth 1" not in cold_text, (
+        cold_text
+    )  # seeds its own volume; no in-container re-seed
+    assert "git init" in cold_text, cold_text  # but it does init the seed repo
 
 
 def test_prewarm_subcommand_boots_to_handover_and_stays_up(tmp_path: Path) -> None:
