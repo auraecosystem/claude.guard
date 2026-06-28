@@ -60,7 +60,9 @@ def test_prunes_each_kind_to_newest_n(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
 
     surviving_mbox = sorted(p.stem for p in seed.glob("*.mbox"))
-    surviving_wip = sorted(p.name[: -len(".wip.patch")] for p in seed.glob("*.wip.patch"))
+    surviving_wip = sorted(
+        p.name[: -len(".wip.patch")] for p in seed.glob("*.wip.patch")
+    )
     surviving_buckets = sorted(p.name for p in overlay.glob("ws-*"))
 
     # Newest 10 (indices 003..012) survive; oldest 3 (000..002) are gone.
@@ -122,7 +124,7 @@ def test_opt_out_skips_everything(tmp_path: Path) -> None:
 
 def test_dry_run_reports_and_deletes_nothing(tmp_path: Path) -> None:
     """GC_DRY_RUN=1 reports the count it WOULD remove and deletes nothing — the preview
-    reuses the real selection so it can't drift from what a real run reclaims."""
+    reuses the real selection logic so it reports exactly what a real run reclaims."""
     seed, overlay = _seed_store(tmp_path)
     _populate(seed, overlay, 13)
     r = _run(tmp_path, GC_DRY_RUN="1")
