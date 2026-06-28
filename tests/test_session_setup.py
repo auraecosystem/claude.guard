@@ -633,12 +633,13 @@ def test_uv_installers_are_chained_not_concurrent_peers() -> None:
     them chained in a single `{ ...; ...; } &` job — never as two background peers
     that would serialize on the lock anyway (or corrupt it)."""
     text = SESSION_SETUP.read_text()
+    # Chained in one brace-group background job. Accept both the single-line form
+    # (`{ a; b; } &`) and shfmt's canonical multi-line form (newline-separated, no
+    # semicolons) — the formatter rewrites the former into the latter.
     assert re.search(
-        r"\{\s*_install_python_deps\s*;\s*_install_precommit_toolchain\s*;\s*\}\s*&",
+        r"\{\s*_install_python_deps\s*;?\s*_install_precommit_toolchain\s*;?\s*\}\s*&",
         text,
-    ), (
-        "uv installers must be chained in one `{ _install_python_deps; _install_precommit_toolchain; } &` job"
-    )
+    ), "uv installers must be chained in one `{ ...; ...; } &` job"
     for inst in _UV_INSTALLERS:
         assert not re.search(rf"^\s*{re.escape(inst)} &\s*$", text, re.M), (
             f"{inst} must not be a standalone background peer — concurrent uv "

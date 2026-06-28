@@ -579,7 +579,8 @@ _install_cosign &
 } &
 wait
 
-# .venv/bin on PATH so Python tools are available to hooks (uv sync ran above).
+# .venv/bin on PATH so Python tools are available to hooks (uv sync ran in the
+# fan-out above and was joined by `wait`).
 if [[ -d "$PROJECT_DIR/.venv/bin" ]]; then
   export PATH="$PROJECT_DIR/.venv/bin:$PATH"
   if [[ "${CLAUDE_ENV_FILE:-}" != "" ]]; then
