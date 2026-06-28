@@ -282,10 +282,12 @@ function startLoopback(requestedPort) {
  * GitHub's callback, then exchanges the code. The server is always torn down,
  * even on rejection. The caller stores only id + pem (+ slug/html_url/name).
  *
- * `port` pins the loopback to a fixed port so it can be SSH-forwarded; when set,
- * `forwardedInstructions` replaces the "opening your browser" message with the
- * tunnel steps (the user drives it from their own machine's browser instead).
- * @param {{ org?: string, name: string, url: string, permissions: string[][], fetchImpl?: typeof fetch, open?: (url: string) => void, port?: number, forwardedInstructions?: string }} params
+ * `port` pins the loopback to a fixed port so it can be SSH-forwarded in
+ * advance; omit it for an ephemeral port. `buildForwarded`, when given, takes the
+ * actually-bound port and returns the message to print INSTEAD of "opening your
+ * browser" — the tunnel steps the user drives from their own machine's browser
+ * (it gets the bound port so an ephemeral port can be forwarded reactively).
+ * @param {{ org?: string, name: string, url: string, permissions: string[][], fetchImpl?: typeof fetch, open?: (url: string) => void, port?: number, buildForwarded?: (port: number) => string }} params
  * @returns {Promise<Record<string, any>>}
  */
 export async function runManifestFlow({
@@ -296,7 +298,7 @@ export async function runManifestFlow({
   fetchImpl,
   open = openBrowser,
   port: fixedPort,
-  forwardedInstructions,
+  buildForwarded,
 }) {
   const state = crypto.randomBytes(32).toString("hex");
   const { server, port } = await startLoopback(fixedPort);
@@ -337,10 +339,11 @@ export async function runManifestFlow({
         }),
       );
       stderr.write(
-        forwardedInstructions ??
-          `Opening your browser to create the GitHub App "${name}".\n` +
-            `If it doesn't open, visit:\n  ${localUrl}\n` +
-            `Then click "Create GitHub App" on GitHub.\n`,
+        buildForwarded
+          ? buildForwarded(port)
+          : `Opening your browser to create the GitHub App "${name}".\n` +
+              `If it doesn't open, visit:\n  ${localUrl}\n` +
+              `Then click "Create GitHub App" on GitHub.\n`,
       );
       // Harmless on a browser-less host: openBrowser swallows the missing
       // launcher, and the forwarded instructions tell the user what to do.

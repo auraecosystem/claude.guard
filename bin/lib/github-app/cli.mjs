@@ -421,26 +421,33 @@ export function homepageUrl(flags) {
 // open the browser to a loopback page that POSTs the manifest to GitHub, and
 // take back the App's id + private key from the conversion. The user's only
 // step is clicking "Create GitHub App". Stores nothing on any failure.
-/** @param {Record<string, string | boolean>} flags */
-async function manifestCreate(flags) {
+//
+// `forwarded` (or a fixed --port on a headless host) prints SSH-tunnel steps
+// instead of opening a local browser, so the user drives the one click from
+// their own machine — the bound port is filled in at flow time, so an ephemeral
+// port can be forwarded reactively.
+/**
+ * @param {Record<string, string | boolean>} flags
+ * @param {{ forwarded?: boolean }} [opts]
+ */
+async function manifestCreate(flags, { forwarded = false } = {}) {
   const port = portFlag(flags);
-  // A fixed port on a browser-less host means "I'll forward it and use my own
-  // browser" — so print the tunnel steps instead of trying to open one here.
-  const forwardedInstructions =
-    port !== undefined && headlessLinux()
-      ? tunnelInstructions({
-          port,
+  const useForwarded = forwarded || (port !== undefined && headlessLinux());
+  const buildForwarded = useForwarded
+    ? (/** @type {number} */ boundPort) =>
+        tunnelInstructions({
+          port: boundPort,
           host: os.hostname(),
           user: os.userInfo().username,
         })
-      : undefined;
+    : undefined;
   const app = await runManifestFlow({
     org: valueFlag(flags, "org"),
     name: appName(flags),
     url: homepageUrl(flags),
     permissions: APP_PERMISSIONS,
     port,
-    forwardedInstructions,
+    buildForwarded,
   });
   await persistApp({
     appId: app.id,
@@ -463,8 +470,7 @@ async function manifestCreate(flags) {
 async function manualCreate(org, ask) {
   const url = newAppUrl(org);
   stderr.write(createGuidance(url));
-  await ask("Press Enter to open the GitHub App creation page...");
-  openBrowser(url);
+  await ask("Press Enter once you've opened that page in a browser...");
   // Validate the App ID before prompting for the key so a typo fails here,
   // cheaply, rather than after reading a file or capturing a pasted block.
   const appId = Number((await ask("App ID: ")).trim());
@@ -486,39 +492,73 @@ async function manualCreate(org, ask) {
   });
 }
 
-// Shown when we fall back to the manual walkthrough, so the user knows WHY the
-// few extra steps appear and what the one-click path would have done. Creating a
-// GitHub App always needs a human to confirm it in a browser (there is no API to
-// do it unattended), so the best case is still one click — but that one-click
-// flow needs a browser on THIS machine that can reach a short-lived local page,
-// which a browser-less or remote/SSH host can't. The manual steps need no file
-// on this host: you can paste the key's text instead.
-export const MANUAL_FALLBACK_NOTE = `No browser is available on this machine to run the one-click setup, so
-we'll walk through the manual steps. You won't need to copy any file onto
-this machine — you can paste the key's text at the prompt.
+// The choice offered on a browser-less interactive host instead of dumping the
+// manual wall. Default [1] is the SSH-tunnel one-click (least effort: copy one
+// line, click once); [2] hands off to another machine via export/import; [3] is
+// the by-hand walkthrough. Exported so a test can pin the option set.
+export const HEADLESS_MENU = `This machine has no browser, so the GitHub App can't be created with one
+click here. How do you want to continue?
 
-Two ways to skip the manual steps entirely:
-  - Re-run with --port <number> and forward that port over SSH, to do the
-    one-click setup from the browser on your own computer (nothing to copy).
-  - Or run "claude-github-app setup" on your own computer, then
-    "claude-github-app export" there and "claude-github-app import" here.
+  [1] One-click from your own computer, over an SSH tunnel (recommended)
+  [2] Set it up on a computer with a browser, then import it here
+  [3] Type the App details in by hand here
+
+Choice [1]: `;
+
+// Printed when the user picks "set it up elsewhere": the three commands that
+// create the App on a machine with a browser and carry it back here.
+export const IMPORT_ELSEWHERE_NOTE = `On a computer with a browser, run:
+    claude-github-app setup     # one-click create + install
+    claude-github-app export    # prints one line to copy
+then back on this machine:
+    claude-github-app import    # paste that line
 `;
 
-// Create the App: one-click via the manifest flow where a browser can reach the
-// loopback callback, else the manual walkthrough. A manifest attempt that does
-// start fails loud rather than silently downgrading — only an unavailable flow
-// falls back. The manifest path is fully browser-driven, so it ignores `ask`.
+// Create the App and report whether creds now exist here (false = the user chose
+// to set it up elsewhere, so `setup` must skip the install phase). The flow:
+// one-click manifest where a local browser can reach the loopback; an explicit
+// manual walkthrough under CLAUDE_GH_APP_NO_BROWSER (scripted/forced); otherwise
+// — a browser-less interactive host — a short menu defaulting to the SSH tunnel.
 /**
  * @param {Record<string, string | boolean>} flags
  * @param {(question: string, opts?: { hidden?: boolean }) => Promise<string>} ask
+ * @returns {Promise<boolean>}
  */
 async function cmdCreate(flags, ask) {
+  if (process.env.CLAUDE_GH_APP_NO_BROWSER === "1") {
+    await manualCreate(valueFlag(flags, "org"), ask);
+    return true;
+  }
   if (manifestFlowAvailable(flags)) {
     await manifestCreate(flags);
-    return;
+    return true;
   }
-  stderr.write(MANUAL_FALLBACK_NOTE);
-  await manualCreate(valueFlag(flags, "org"), ask);
+  return chooseHeadlessCreate(flags, ask);
+}
+
+// Let a user on a browser-less host pick how to create the App, defaulting to
+// the SSH-tunnel one-click rather than the manual wall. Returns false only for
+// the "set it up elsewhere" choice (nothing is created here).
+/**
+ * @param {Record<string, string | boolean>} flags
+ * @param {(question: string, opts?: { hidden?: boolean }) => Promise<string>} ask
+ * @returns {Promise<boolean>}
+ */
+async function chooseHeadlessCreate(flags, ask) {
+  const choice = (await ask(HEADLESS_MENU)).trim() || "1";
+  if (choice === "1") {
+    await manifestCreate(flags, { forwarded: true });
+    return true;
+  }
+  if (choice === "2") {
+    stderr.write(IMPORT_ELSEWHERE_NOTE);
+    return false;
+  }
+  if (choice === "3") {
+    await manualCreate(valueFlag(flags, "org"), ask);
+    return true;
+  }
+  throw new Error(`invalid choice "${choice}" (expected 1, 2, or 3)`);
 }
 
 // How long to wait for the user to finish the browser install before giving up.
@@ -662,8 +702,8 @@ async function cmdVerify(flags) {
 /** @param {Record<string, string | boolean>} flags */
 async function cmdSetup(flags) {
   await withPrompts(async (ask) => {
-    await cmdCreate(flags, ask);
-    await cmdInstall(ask);
+    // "Set it up elsewhere" creates nothing here, so there's nothing to install.
+    if (await cmdCreate(flags, ask)) await cmdInstall(ask);
   });
 }
 

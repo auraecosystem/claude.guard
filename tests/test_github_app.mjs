@@ -33,7 +33,8 @@ import {
   manifestFlowAvailable,
   appName,
   homepageUrl,
-  MANUAL_FALLBACK_NOTE,
+  HEADLESS_MENU,
+  IMPORT_ELSEWHERE_NOTE,
   portFlag,
   tunnelInstructions,
 } from "../bin/lib/github-app/cli.mjs";
@@ -220,12 +221,16 @@ test("create guidance lists the required perms and offers workflows as opt-in", 
   assert.match(guidance, /secret/i);
 });
 
-test("manual fallback note explains the why and the no-file-needed paste path", () => {
-  // It must name the tradeoff (one-click flow needs a local browser) and the
-  // reassurance that drives the SSH path: no key file has to reach this host.
-  assert.match(MANUAL_FALLBACK_NOTE, /one-click/);
-  assert.match(MANUAL_FALLBACK_NOTE, /browser/);
-  assert.match(MANUAL_FALLBACK_NOTE, /paste/);
+test("headless menu lists all three choices and defaults to the tunnel", () => {
+  // The menu replaces the old manual-wall dump: tunnel one-click is option [1]
+  // (the default), with hand-off and by-hand as [2]/[3].
+  assert.match(HEADLESS_MENU, /\[1\] One-click.*SSH tunnel/);
+  assert.match(HEADLESS_MENU, /\[2\] Set it up on a computer/);
+  assert.match(HEADLESS_MENU, /\[3\] Type the App details/);
+  assert.match(HEADLESS_MENU, /Choice \[1\]: $/);
+  // The hand-off note names the export/import commands to run.
+  assert.match(IMPORT_ELSEWHERE_NOTE, /claude-github-app export/);
+  assert.match(IMPORT_ELSEWHERE_NOTE, /claude-github-app import/);
 });
 
 test("token: mintInstallationToken errors clearly when no install id known", async (t) => {
@@ -978,8 +983,8 @@ test("cli: setup (manual create) registers the App, stores creds, and installs",
   // Both phases ran: the App was registered AND the installation discovered.
   assert.match(r.stderr, /Saved App "made"/);
   assert.match(r.stderr, /Saved installation_id=555 \(me\)/);
-  // The manual fallback explains itself before walking the user through it.
-  assert.ok(r.stderr.includes(MANUAL_FALLBACK_NOTE));
+  // The by-hand walkthrough is shown (CLAUDE_GH_APP_NO_BROWSER => manual).
+  assert.match(r.stderr, /Create a GitHub App in your account by hand/);
   process.env.XDG_CONFIG_HOME = dir;
   const meta = await storage.readMeta();
   assert.equal(meta.app_id, 12345);
@@ -1913,7 +1918,7 @@ test("manifest: runManifestFlow binds the fixed port and uses forwarded instruct
         json: { id: 7, slug: "s", name: "n", html_url: "h", pem: FAKE_PEM },
       }),
     port,
-    forwardedInstructions: "TUNNEL-STEPS",
+    buildForwarded: (boundPort) => `TUNNEL on ${boundPort}`,
     open: (localUrl) => {
       drovenUrl = localUrl;
       void driveBrowser(localUrl, { code: "C" });
@@ -2035,4 +2040,76 @@ test("cli: setup --port on a headless host prints SSH tunnel steps and one-click
   assert.match(r.stderr, new RegExp(`ssh -L ${port}:localhost:${port}`));
   assert.match(r.stderr, /Saved App "made"/);
   assert.match(r.stderr, /Saved installation_id=555/);
+});
+
+// Env for a browser-less INTERACTIVE host: no DISPLAY/WAYLAND, browser launch not
+// suppressed (so the menu — not the scripted manual path — is reached), with the
+// fake browser on PATH to drive the loopback when the tunnel option is chosen.
+const headlessMenuEnv = (dir, bin, extra = {}) => ({
+  XDG_CONFIG_HOME: dir,
+  PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+  DISPLAY: "",
+  WAYLAND_DISPLAY: "",
+  CLAUDE_GH_APP_NO_BROWSER: "",
+  CLAUDE_GH_APP_MANIFEST_TIMEOUT_MS: "8000",
+  ...FAST_POLL,
+  ...extra,
+});
+
+for (const [label, input] of [
+  ["an explicit 1", "1\n"],
+  ["the empty default", "\n"],
+]) {
+  test(`cli: headless setup menu (${label}) one-clicks over the SSH tunnel`, async (t) => {
+    const dir = await cliXdg(t);
+    const bin = await fakeBrowserBin(t);
+    const r = await runCli(["setup"], {
+      env: headlessMenuEnv(dir, bin),
+      input,
+      fetchStub: oneClickStub(oneClickConvert(genKeypair().privateKey)),
+    });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /\[1\] One-click/); // the menu was shown
+    assert.match(r.stderr, /ssh -L \d+:localhost:\d+/); // ephemeral port, forwarded
+    assert.match(r.stderr, /Saved App "made"/);
+    assert.match(r.stderr, /Saved installation_id=555/);
+  });
+}
+
+test("cli: headless setup menu option 2 hands off to export/import, creates nothing", async (t) => {
+  const dir = await cliXdg(t);
+  const bin = await fakeBrowserBin(t);
+  const r = await runCli(["setup"], {
+    env: headlessMenuEnv(dir, bin),
+    input: "2\n",
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /claude-github-app import/);
+  // Nothing was created here, so the install phase is skipped and no creds land.
+  process.env.XDG_CONFIG_HOME = dir;
+  await assert.rejects(() => storage.readMeta());
+});
+
+test("cli: headless setup menu option 3 runs the by-hand walkthrough", async (t) => {
+  const dir = await cliXdg(t);
+  const bin = await fakeBrowserBin(t);
+  const pemPath = await tmpPemFile(t);
+  const r = await runCli(["setup"], {
+    env: headlessMenuEnv(dir, bin, { XDG_DOWNLOAD_DIR: await tmpDownloads(t) }),
+    input: `3\n\n12345\n${pemPath}\n`,
+    fetchStub: setupManualStub(),
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /Create a GitHub App in your account by hand/);
+  assert.match(r.stderr, /Saved App "made"/);
+  assert.match(r.stderr, /Saved installation_id=555/);
+});
+
+test("cli: headless setup menu rejects an out-of-range choice (exit 1)", async (t) => {
+  const r = await runCli(["setup"], {
+    env: headlessMenuEnv(await cliXdg(t), await fakeBrowserBin(t)),
+    input: "9\n",
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /invalid choice/);
 });
