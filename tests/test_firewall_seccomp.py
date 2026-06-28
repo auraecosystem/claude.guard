@@ -239,7 +239,9 @@ def test_escape_syscall_nrs_are_plausible_numbers() -> None:
         assert isinstance(arm, int) and arm > 0, f"{name} aarch64 number is invalid"
         # The arm64 generic-ABI numbers are all distinct from the legacy x86-64 ones
         # for this set; equality would signal a copy-paste of one column.
-        assert x86 != arm, f"{name} has identical x86-64/aarch64 numbers — likely a typo"
+        assert x86 != arm, (
+            f"{name} has identical x86-64/aarch64 numbers — likely a typo"
+        )
 
 
 def test_caps_check_probes_the_full_escape_syscall_set_from_the_ssot() -> None:
