@@ -752,8 +752,12 @@ offer_first_run_setup
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
 
 if [[ -n "${CLAUDE_WORKSPACE:-}" ]]; then
-  workspace_folder="$(canonicalize "$CLAUDE_WORKSPACE")"
-  if [[ ! -d "$workspace_folder" ]]; then
+  # canonicalize now returns non-zero on an unresolvable path (BSD realpath fails
+  # for a non-existent target, where GNU realpath succeeds). Capture it in the `if`
+  # condition so `set -e` can't abort the launcher on that non-zero before the
+  # user-facing "does not exist" branch — a failed resolve here just means the
+  # workspace is missing, the same user-config mistake as a resolved non-directory.
+  if ! workspace_folder="$(canonicalize "$CLAUDE_WORKSPACE")" || [[ ! -d "$workspace_folder" ]]; then
     cg_error "CLAUDE_WORKSPACE=$CLAUDE_WORKSPACE does not exist."
     _bug_hint_armed=false
     exit 1
