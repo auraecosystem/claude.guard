@@ -1113,20 +1113,28 @@ def test_wt_run_detached_survives_process_group_sigint(tmp_path: Path) -> None:
         tmp_path / "victim.py",
         "import signal, sys, time\n"
         "signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
+        'open(sys.argv[3], "w").write("ready")\n'  # announce: signal only now (see harness)
         "time.sleep(float(sys.argv[1]))\n"
         'open(sys.argv[2], "w").write("done")\n',
     )
     marker = tmp_path / "marker"
+    ready = tmp_path / "ready"
     harness = write_exe(
         tmp_path / "sig.sh",
         f'#!/usr/bin/env bash\nset -uo pipefail\nsource "{EPHEMERAL}"\nsource "{LIB}"\n'
         "trap '' INT TERM HUP\n"  # the launcher's teardown guard
-        "( sleep 0.5; kill -INT 0 ) &\n"  # SIGINT to our whole process group, mid-victim
-        f'_wt_run python3 "{victim}" 1.5 "{marker}" || true\n',
+        # Fire the group SIGINT only once the victim is provably sleeping with SIG_DFL
+        # installed. A blind `sleep N` races python3 startup: on a loaded runner the victim
+        # hasn't reset SIGINT (or even exec'd) when the signal lands, so it survives and the
+        # direct case spuriously writes its marker (flaked on WSL2). Gating on the ready file
+        # removes the race — the kill always lands mid-sleep.
+        f'( until [[ -e "{ready}" ]]; do sleep 0.02; done; kill -INT 0 ) &\n'
+        f'_wt_run python3 "{victim}" 1.5 "{marker}" "{ready}" || true\n',
     )
 
     def run(runner: str) -> None:
         marker.unlink(missing_ok=True)
+        ready.unlink(missing_ok=True)
         subprocess.run(
             ["bash", str(harness)],
             env={**os.environ, "WORKTREE_EXTRACT_RUNNER": runner},
