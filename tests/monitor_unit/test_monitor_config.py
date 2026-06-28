@@ -1,6 +1,7 @@
 """Provider detection, policy loading, price-table loading, and cost computation."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,23 @@ def test_every_provider_key_var_is_in_the_redaction_ssot(mon):
         f"provider key var(s) not in the redaction SSOT: {sorted(missing)} — every "
         "provider in monitor-providers.json must carry an env_key"
     )
+
+
+def test_build_providers_fails_loud_on_registry_wire_mismatch(monkeypatch):
+    """A provider added to the registry but not to providers.py's wire config (or the
+    reverse) is a half-added provider — _build_providers must raise at import rather
+    than ship a backend that can't resolve a provider the picker offers."""
+    hooks = str(Path(__file__).resolve().parents[2] / ".claude" / "hooks")
+    if hooks not in sys.path:
+        sys.path.insert(0, hooks)
+    from monitorlib import providers
+
+    # Registry names a provider the wire config doesn't (missing wire mechanics).
+    monkeypatch.setattr(
+        providers, "_ENV_KEYS", {**providers._ENV_KEYS, "ghost": "GHOST_API_KEY"}
+    )
+    with pytest.raises(RuntimeError, match="ghost"):
+        providers._build_providers()
 
 
 @pytest.mark.drift_guard(
