@@ -16,7 +16,7 @@ parallel?
 ## TL;DR
 
 - **Added latency, no monitor key:** ~**78 ms** — one `python3 -m
-  monitorlib.seed_review` subprocess (the LLM layer short-circuits to
+monitorlib.seed_review` subprocess (the LLM layer short-circuits to
   "unavailable"). Negligible against the ~506 ms docker teardown it sits next to.
 - **Added latency, monitor key set:** dominated by **one strong-model LLM call**
   (default `claude-sonnet-4-6`, `max_tokens=800`, temp 0, `MONITOR_TIMEOUT=10 s`):
@@ -33,11 +33,11 @@ parallel?
 
 ## Where the cost is (measured)
 
-| Component | Cost | Source |
-| --- | --- | --- |
-| docker teardown (`compose down -v`, the baseline) | **506 ms** median (491–577) | wall-clock = max(parallel stops)+containers+network+volumes over the 19 runs on the `perf-history` branch (`.github/teardown-history.json`) |
-| seed review — deterministic layer (no key) | **78 ms** (60 ms of it Python+import startup) | `python3 -m monitorlib.seed_review` subprocess over #1215's own 1743-line diff, no monitor key |
-| seed review — LLM layer (key set) | **~3.5 s** typical (2–10 s) | estimate: one `claude-sonnet-4-6` call, `max_tokens=800`, ≤80k-token diff, 10 s/attempt timeout — not tracked by the repo |
+| Component                                         | Cost                                          | Source                                                                                                                                      |
+| ------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| docker teardown (`compose down -v`, the baseline) | **506 ms** median (491–577)                   | wall-clock = max(parallel stops)+containers+network+volumes over the 19 runs on the `perf-history` branch (`.github/teardown-history.json`) |
+| seed review — deterministic layer (no key)        | **78 ms** (60 ms of it Python+import startup) | `python3 -m monitorlib.seed_review` subprocess over #1215's own 1743-line diff, no monitor key                                              |
+| seed review — LLM layer (key set)                 | **~3.5 s** typical (2–10 s)                   | estimate: one `claude-sonnet-4-6` call, `max_tokens=800`, ≤80k-token diff, 10 s/attempt timeout — not tracked by the repo                   |
 
 The deterministic layer is cheap because it is all local git: a `git diff --raw -z`,
 the whole-diff `git diff`, and a per-manifest `git diff -- <path>` only for files
