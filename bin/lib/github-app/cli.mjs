@@ -168,12 +168,24 @@ async function withPrompts(body) {
   const queued = [];
   /** @type {((line: string) => void) | null} */
   let waiting = null;
+  let closed = false;
   rl.on("line", (line) => {
     if (waiting) {
       waiting(line);
       waiting = null;
     } else {
       queued.push(line);
+    }
+  });
+  // EOF (Ctrl-D / a closed pipe): no more input is coming, so every question from
+  // here on — the one pending now and any asked later — resolves to an empty
+  // line. A caller that loops on input (the import-here wait) reads that as
+  // "cancelled" and stops, instead of installing a waiter nothing will resolve.
+  rl.on("close", () => {
+    closed = true;
+    if (waiting) {
+      waiting("");
+      waiting = null;
     }
   });
   /**
@@ -188,13 +200,14 @@ async function withPrompts(body) {
       if (restore) restore();
       return line;
     };
-    return queued.length
-      ? Promise.resolve(done(/** @type {string} */ (queued.shift())))
-      : new Promise(
-          /** @param {(line: string) => void} resolve */ (resolve) => {
-            waiting = (line) => resolve(done(line));
-          },
-        );
+    if (queued.length)
+      return Promise.resolve(done(/** @type {string} */ (queued.shift())));
+    if (closed) return Promise.resolve(done(""));
+    return new Promise(
+      /** @param {(line: string) => void} resolve */ (resolve) => {
+        waiting = (line) => resolve(done(line));
+      },
+    );
   };
   try {
     return await body(ask);
@@ -457,11 +470,13 @@ then back on this machine:
     claude-github-app import    # paste that line
 `;
 
-// Create the App and report whether creds now exist here (false = the user chose
-// to set it up elsewhere, so `setup` must skip the install phase). The flow:
-// one-click manifest where a local browser can reach the loopback; an explicit
-// manual walkthrough under CLAUDE_GH_APP_NO_BROWSER (scripted/forced); otherwise
-// — a browser-less interactive host — a short menu defaulting to import.
+// Create the App and report whether `setup` should run the browser install phase
+// next (false = it must not — the import-here path either pinned the install from
+// the pasted bundle or left it for later, and neither can drive the loopback
+// install on this browser-less host). The flow: one-click manifest where a local
+// browser can reach the loopback; an explicit manual walkthrough under
+// CLAUDE_GH_APP_NO_BROWSER (scripted/forced); otherwise — a browser-less
+// interactive host — a short menu defaulting to import.
 /**
  * @param {Record<string, string | boolean>} flags
  * @param {(question: string, opts?: { hidden?: boolean }) => Promise<string>} ask
@@ -480,8 +495,9 @@ async function cmdCreate(flags, ask) {
 }
 
 // Let a user on a browser-less host pick how to create the App, defaulting to
-// the import-from-a-browser-machine path rather than the manual wall. Returns
-// false for the default (nothing is created here — the user imports instead).
+// the import-from-a-browser-machine path rather than the manual wall. The default
+// blocks waiting for the imported bundle here, so it always returns false (the
+// install phase, which needs the loopback, never runs on this host).
 /**
  * @param {Record<string, string | boolean>} flags
  * @param {(question: string, opts?: { hidden?: boolean }) => Promise<string>} ask
@@ -490,7 +506,7 @@ async function cmdCreate(flags, ask) {
 async function chooseHeadlessCreate(flags, ask) {
   const choice = (await ask(HEADLESS_MENU)).trim() || "1";
   if (choice === "1") {
-    stderr.write(IMPORT_ELSEWHERE_NOTE);
+    await waitForImportHere(ask);
     return false;
   }
   if (choice === "2") {
@@ -498,6 +514,49 @@ async function chooseHeadlessCreate(flags, ask) {
     return true;
   }
   throw new Error(`invalid choice "${choice}" (expected 1 or 2)`);
+}
+
+// Draw a Unicode border around multi-line text so a reprinted hint stands out
+// from the surrounding scrollback after the wait was cancelled or failed.
+/** @param {string} text */
+function boxed(text) {
+  const lines = text.split("\n");
+  while (lines[lines.length - 1] === "") lines.pop();
+  const width = Math.max(...lines.map((line) => line.length));
+  const bar = "─".repeat(width + 2);
+  const body = lines.map((line) => `│ ${line.padEnd(width)} │`).join("\n");
+  return `┌${bar}┐\n${body}\n└${bar}┘\n`;
+}
+
+// The default headless path: instead of exiting and leaving the user to re-run
+// `import` by hand, print the export/import steps and block here until they come
+// back from the browser machine and paste the exported bundle. An empty line
+// (they'll finish later) reprints the steps in a box and returns; a bundle that
+// fails to verify reprints the box and loops so they can paste again.
+/** @param {(question: string, opts?: { hidden?: boolean }) => Promise<string>} ask */
+async function waitForImportHere(ask) {
+  stderr.write(IMPORT_ELSEWHERE_NOTE);
+  for (;;) {
+    const raw = (
+      await ask(
+        "\nWaiting — paste the exported bundle here, " +
+          "or press Enter to finish later: ",
+        { hidden: true },
+      )
+    ).trim();
+    if (!raw) {
+      stderr.write("\nNo bundle pasted yet. When you have it, run:\n");
+      stderr.write(boxed(IMPORT_ELSEWHERE_NOTE));
+      return;
+    }
+    try {
+      await storeBundle(raw);
+      return;
+    } catch (err) {
+      stderr.write(`\nThat bundle didn't verify — ${String(err)}\n`);
+      stderr.write(boxed(IMPORT_ELSEWHERE_NOTE));
+    }
+  }
 }
 
 // How long to wait for the user to finish the browser install before giving up.
@@ -673,13 +732,12 @@ async function cmdExport() {
   stdout.write(bundle + "\n");
 }
 
-// Read an exported bundle (piped on stdin or pasted) and store it on this host.
-// The key is verified against GitHub before anything is written, so a corrupted
-// paste or wrong key fails here rather than as a confusing 401 at first use.
-async function cmdImport() {
-  const raw = await withPrompts((ask) =>
-    ask("Paste the exported bundle: ", { hidden: true }),
-  );
+// Verify an exported bundle against GitHub and store it on this host. The key is
+// checked before anything is written, so a corrupted paste or wrong key fails
+// here rather than as a confusing 401 at first use. Shared by the `import`
+// command and the headless setup's import-here wait.
+/** @param {string} raw */
+async function storeBundle(raw) {
   const creds = decodeBundle(raw);
   const app = await fetchAppMetadata({ appId: creds.app_id, pem: creds.pem });
   await persistApp({
@@ -698,6 +756,14 @@ async function cmdImport() {
     'No installation in the bundle — run "claude-github-app setup" here to ' +
       "install the App on your repos.\n",
   );
+}
+
+// Read an exported bundle (piped on stdin or pasted) and store it on this host.
+async function cmdImport() {
+  const raw = await withPrompts((ask) =>
+    ask("Paste the exported bundle: ", { hidden: true }),
+  );
+  await storeBundle(raw);
 }
 
 /** @type {Record<string, (flags: Record<string, string | boolean>) => Promise<void>>} */
