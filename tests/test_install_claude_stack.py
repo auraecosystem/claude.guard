@@ -65,21 +65,34 @@ def _pnpm_stub(
     cc: str | None = None,
     ccr: str | None = None,
     root_dir: str = "/nonexistent-root",
+    attempts: Path | None = None,
+    fail_add_times: int = 0,
 ) -> str:
     """A pnpm stub: reports `cc`/`ccr` versions via `list -g --json`, answers
-    `root -g` with `root_dir`, and appends every `add` package arg to `capture`."""
+    `root -g` with `root_dir`, and appends every successful `add` package arg to
+    `capture`. When `attempts` is given, each `add` invocation is logged there; with
+    `fail_add_times > 0` the first that many `add` calls exit non-zero (to exercise
+    retry_cmd) before the next one records to `capture`."""
     deps: dict[str, dict[str, str]] = {}
     if cc is not None:
         deps[_CC] = {"version": cc}
     if ccr is not None:
         deps[_CCR] = {"version": ccr}
     list_json = json.dumps([{"dependencies": deps}])
+    add_body = "add) shift; "
+    if attempts is not None:
+        add_body += f'echo a >> "{attempts}"; '
+        if fail_add_times:
+            add_body += (
+                f'[[ "$(wc -l < "{attempts}")" -le {fail_add_times} ]] && exit 1; '
+            )
+    add_body += f'printf "%s\\n" "$@" >> "{capture}" ;;'
     return (
         "#!/bin/bash\n"
         'case "$1" in\n'
         f"list) echo '{list_json}' ;;\n"
         f'root) echo "{root_dir}" ;;\n'
-        f'add) shift; printf "%s\\n" "$@" >> "{capture}" ;;\n'
+        f"{add_body}\n"
         "*) ;;\n"
         "esac\n"
     )
@@ -201,6 +214,23 @@ def test_warns_after_native_postinstall_retries_exhausted(tmp_path: Path) -> Non
     )
 
 
+def test_retries_claude_registry_add(tmp_path: Path) -> None:
+    # The registry `pnpm add` fails once then succeeds: retry_cmd makes a second
+    # attempt and the floor pin still lands.
+    pathdir, capture = _setup_path(tmp_path)
+    attempts = tmp_path / "add-attempts"
+    write_exe(
+        pathdir / "pnpm", _pnpm_stub(capture, attempts=attempts, fail_add_times=1)
+    )
+    r = run_capture(
+        [BASH, "-c", _HARNESS_CC, "bash", "1.2.3"],
+        env={"PATH": f"{pathdir}:/usr/bin:/bin"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert len(attempts.read_text().split()) == 2
+    assert f"{_CC}@1.2.3" in capture.read_text().split()
+
+
 # ── install_ccr_stack (exact pin + devcontainer) ─────────────────────────────
 
 
@@ -223,3 +253,40 @@ def test_installs_devcontainer_when_absent(tmp_path: Path) -> None:
     # devcontainer CLI missing: install_ccr_stack adds it (ccr already pinned).
     pkgs = _run_ccr(tmp_path, ccr_installed="2.0.0", devcontainer=False)
     assert _DC in pkgs
+
+
+def test_retries_ccr_registry_add(tmp_path: Path) -> None:
+    # The ccr registry `pnpm add` fails once then succeeds: retry_cmd makes a
+    # second attempt and the exact pin still lands (devcontainer already present).
+    pathdir, capture = _setup_path(tmp_path)
+    attempts = tmp_path / "add-attempts"
+    write_exe(
+        pathdir / "pnpm",
+        _pnpm_stub(capture, ccr=None, attempts=attempts, fail_add_times=1),
+    )
+    r = run_capture(
+        [BASH, "-c", _HARNESS_CCR, "bash", "2.0.0"],
+        env={"PATH": f"{pathdir}:/usr/bin:/bin"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert len(attempts.read_text().split()) == 2
+    assert f"{_CCR}@2.0.0" in capture.read_text().split()
+
+
+def test_retries_devcontainer_add(tmp_path: Path) -> None:
+    # The devcontainer registry `pnpm add` fails once then succeeds: retry_cmd
+    # makes a second attempt before the `|| warn` fallback, so the CLI still lands
+    # (ccr already pinned, so only the devcontainer add runs).
+    pathdir, capture = _setup_path(tmp_path, devcontainer=False)
+    attempts = tmp_path / "add-attempts"
+    write_exe(
+        pathdir / "pnpm",
+        _pnpm_stub(capture, ccr="2.0.0", attempts=attempts, fail_add_times=1),
+    )
+    r = run_capture(
+        [BASH, "-c", _HARNESS_CCR, "bash", "2.0.0"],
+        env={"PATH": f"{pathdir}:/usr/bin:/bin"},
+    )
+    assert r.returncode == 0, r.stderr
+    assert len(attempts.read_text().split()) == 2
+    assert _DC in capture.read_text().split()
