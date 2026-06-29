@@ -39,6 +39,9 @@ XPLAT_HOST_FILES: set[str] = {
     "bin/lib/runtime-detect.bash",
     # newest-release TTL cache reads the file mtime via `stat -c %Y || stat -f %m`.
     "bin/lib/claude-resolve.bash",
+    # secure-mkdir reads back the seed/resume store mode via `stat -c %a || stat -f
+    # %Lp` to verify it tightened to 0700 — the BSD arm runs on the macOS host.
+    "bin/lib/worktree-seed.bash",
     # POSIX-only host install/launch code: no GNU/BSD construct, but it writes
     # into the user's filesystem on macOS, so keep it on the BSD leg.
     "install.sh",
