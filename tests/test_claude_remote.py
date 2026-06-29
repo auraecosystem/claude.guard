@@ -341,11 +341,13 @@ def test_runpod_renders_valid_python_and_round_trips(tmp_path: Path) -> None:
     assert cfg["claude_args"] == ["-p", prompt]
 
 
-def test_runpod_agent_phase_keeps_native_sandbox_boundary(tmp_path: Path) -> None:
-    """Design brief §7.2: the agent runs with a non-bypass permission mode and
-    never --dangerously-skip-permissions. The runpod orchestrator builds the
-    agent command as a shell string, so assert the shell form (not modal's
-    argv-list form), ignoring the comment prose that names the flag."""
+def test_runpod_agent_phase_keeps_permission_gate(tmp_path: Path) -> None:
+    """The agent runs with a non-bypass permission mode and never
+    --dangerously-skip-permissions. On a managed RunPod pod the native sandbox
+    cannot run (no user namespaces — proven by the capability probe), so this
+    in-process permission gate is the LAST in-pod control and must stay engaged
+    (§7.2). The orchestrator builds the agent command as a shell string, so assert
+    the shell form (not modal's argv-list form), ignoring comment prose."""
     r = run_remote(_runpod("--print-app"), tmp_path)
     assert r.returncode == 0, r.stderr
     body = _strip_comments(r.stdout)
@@ -411,6 +413,95 @@ def test_runpod_bootstrap_omits_unset_auth_var(tmp_path: Path, monkeypatch) -> N
     agent_line = mod._bootstrap_command().splitlines()[-1]
     assert 'CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"' in agent_line
     assert "ANTHROPIC_API_KEY" not in agent_line
+
+
+def test_runpod_bootstrap_probes_capabilities_and_prints_posture(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The in-pod bootstrap runs the capability probe FIRST and prints an honest
+    posture banner: it tests unprivileged user namespaces (native sandbox) and
+    CAP_NET_ADMIN (the firewall), and warns plainly when neither is present —
+    matching the empirical finding that a managed pod grants neither. The default
+    posture warns and proceeds (no hard refusal)."""
+    stdout = run_remote(_runpod("--print-app"), tmp_path).stdout
+    mod = _load_runpod_app(stdout, tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_GUARD_REQUIRE_INPOD_BOUNDARY", raising=False)
+    boot = mod._bootstrap_command()
+    assert boot.splitlines()[0] == "set -euo pipefail"
+    assert "security posture on this RunPod pod" in boot
+    assert "unshare -Urn" in boot  # native-sandbox capability test
+    assert "CapEff" in boot  # NET_ADMIN capability test
+    assert "native sandbox" in boot
+    assert "network firewall" in boot
+    assert "external monitor" in boot
+    # The banner precedes the clone, which precedes the agent exec.
+    assert (
+        boot.index("security posture") < boot.index("git clone") < boot.rindex("exec ")
+    )
+    assert "refusing to run" not in boot
+
+
+def test_runpod_require_boundary_gate_refuses_when_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CLAUDE_GUARD_REQUIRE_INPOD_BOUNDARY=1 turns the honest banner into a hard
+    gate: the no-boundary branch exits non-zero before the agent exec. The flag is
+    read from the launcher's env (the orchestrator runs locally), so monkeypatching
+    the env changes the rendered bootstrap."""
+    stdout = run_remote(_runpod("--print-app"), tmp_path).stdout
+    mod = _load_runpod_app(stdout, tmp_path, monkeypatch)
+    monkeypatch.setenv("CLAUDE_GUARD_REQUIRE_INPOD_BOUNDARY", "1")
+    boot = mod._bootstrap_command()
+    assert "refusing to run" in boot
+    # The refusal sits in the no-boundary branch, ahead of the agent exec.
+    assert "exit 1" in boot
+    assert boot.index("refusing to run") < boot.rindex("exec ")
+
+
+@pytest.mark.parametrize(
+    "value, want_gate",
+    [
+        ("1", True),
+        ("true", True),
+        ("on", True),
+        ("0", False),
+        ("", False),
+        ("no", False),
+    ],
+)
+def test_runpod_require_boundary_flag_parsing(
+    tmp_path: Path, monkeypatch, value: str, want_gate: bool
+) -> None:
+    """The require-boundary flag accepts the truthy spellings and rejects the rest,
+    so a stray '0'/'no' doesn't silently arm (or disarm) the fail-closed gate."""
+    mod = _load_runpod_app(
+        run_remote(_runpod("--print-app"), tmp_path).stdout, tmp_path, monkeypatch
+    )
+    monkeypatch.setenv("CLAUDE_GUARD_REQUIRE_INPOD_BOUNDARY", value)
+    assert mod._require_inpod_boundary() is want_gate
+    assert ("refusing to run" in mod._bootstrap_command()) is want_gate
+
+
+def test_runpod_posture_probe_is_set_e_safe_and_prints_banner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The probe snippet must survive `set -euo pipefail` — its capability tests
+    are allowed to 'fail' — and always print a banner. Run it through real bash and
+    assert a clean exit plus a posture line, so a future edit that aborts the
+    bootstrap under set -e (an unguarded failing command) is caught."""
+    bash = shutil.which("bash")
+    assert bash, "bash required for this test"
+    mod = _load_runpod_app(
+        run_remote(_runpod("--print-app"), tmp_path).stdout, tmp_path, monkeypatch
+    )
+    snippet = mod._posture_probe(False)
+    r = subprocess.run(
+        [bash, "-c", "set -euo pipefail\n" + snippet], capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert "security posture on this RunPod pod" in r.stdout
+    # Exactly one of the two mutually exclusive posture verdicts is emitted.
+    assert ("boundary is available" in r.stdout) ^ ("WARNING:" in r.stdout)
 
 
 class _FakeClock:
