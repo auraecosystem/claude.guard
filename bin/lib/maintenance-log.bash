@@ -22,10 +22,15 @@ maintenance_log() {
   # and stays silent (the silent-success doctrine). GC_REPORT_MARKER, when set, gets
   # a byte per reported line so the orchestrator can tell a real reclaim from a
   # clean host and print an accurate footer.
+  # Best-effort like the log write above: neither the mirror (a broken stdout pipe)
+  # nor the marker (an unwritable path) may fail a pass — a non-zero return here would
+  # make the orchestrator record a phantom pass failure.
   [[ "${GC_REPORT_STDOUT:-}" == "1" ]] || return 0
   # shellcheck disable=SC2059  # same caller-controlled format string.
-  printf '  - '"$fmt" "$@"
-  [[ -n "${GC_REPORT_MARKER:-}" ]] && printf 'x' >>"$GC_REPORT_MARKER" 2>/dev/null
+  printf '  - '"$fmt" "$@" 2>/dev/null || true
+  if [[ -n "${GC_REPORT_MARKER:-}" ]]; then
+    printf 'x' >>"$GC_REPORT_MARKER" 2>/dev/null || true
+  fi
   return 0
 }
 

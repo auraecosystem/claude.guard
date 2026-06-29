@@ -129,8 +129,16 @@ cg_info "claude-guard gc: reclaiming leftovers from sessions this host is no lon
 export GC_REPORT_STDOUT=1
 GC_REPORT_MARKER="$(mktemp 2>/dev/null || true)"
 export GC_REPORT_MARKER
+# Remove the marker on every exit path; guard the empty case so a failed mktemp
+# doesn't turn into `rm -f ''` (a non-zero exit set -e would abort on). On that rare
+# mktemp failure the per-pass lines still print but the footer falls to the
+# already-clean wording — a tolerable best-effort degradation, not a correctness bug.
+_cleanup_marker() {
+  [[ -n "$GC_REPORT_MARKER" ]] && rm -f "$GC_REPORT_MARKER"
+  return 0
+}
 run_gc_passes "claude-guard gc:" || {
-  rm -f "$GC_REPORT_MARKER"
+  _cleanup_marker
   exit 1
 }
 if [[ -n "$GC_REPORT_MARKER" && -s "$GC_REPORT_MARKER" ]]; then
@@ -138,4 +146,4 @@ if [[ -n "$GC_REPORT_MARKER" && -s "$GC_REPORT_MARKER" ]]; then
 else
   cg_ok "claude-guard gc: done — nothing to reclaim; this host is already clean."
 fi
-rm -f "$GC_REPORT_MARKER"
+_cleanup_marker
