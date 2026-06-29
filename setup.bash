@@ -399,6 +399,11 @@ _link_claude_original_homebrew() {
   local preserved="$HOME/.local/bin/claude-original" real
   real="$(_ob_real_claude)" || return 0
   [[ -n "$real" ]] || return 0
+  # resolve_real_claude's second pass returns a `claude-original` candidate itself
+  # when no genuine `claude` resolves, so on a re-run where a stale claude-original
+  # already exists `real` can BE $preserved. Linking that would self-loop into a
+  # dangling symlink; there is no real CLI to point at, so no-op.
+  [[ "$real" == "$preserved" ]] && return 0
   [[ -L "$preserved" && "$(readlink "$preserved")" == "$real" ]] && return 0
   ensure_dir "$HOME/.local/bin"
   ln -sf "$real" "$preserved"

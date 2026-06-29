@@ -1065,6 +1065,24 @@ def test_link_homebrew_noop_when_already_correct(tmp_path: Path) -> None:
     assert "Linked claude-original" not in r.stdout
 
 
+def test_link_homebrew_noop_when_resolver_returns_claude_original_itself(
+    tmp_path: Path,
+) -> None:
+    """resolve_real_claude's name fallback can return claude-original itself when no
+    genuine claude resolves; linking that to itself would dangle. Guard: no-op,
+    leaving the existing (stale) symlink untouched rather than self-looping."""
+    home = tmp_path / "home"
+    preserved = home / ".local" / "bin" / "claude-original"
+    old_real = tmp_path / "real" / "claude"
+    write_exe(old_real, "#!/bin/bash\n")
+    r = _run_link_homebrew(
+        tmp_path, real_claude=preserved, existing_target=old_real, bin_on_path=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert os.readlink(preserved) == str(old_real), "must not self-loop"
+    assert "Linked claude-original" not in r.stdout
+
+
 def test_link_homebrew_warns_when_bin_off_path(tmp_path: Path) -> None:
     """When ~/.local/bin is not on PATH, the command would be unreachable, so the
     link is still created but a loud warning fires."""
