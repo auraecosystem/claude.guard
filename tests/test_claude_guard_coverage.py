@@ -382,6 +382,14 @@ _CONTAINER_ENV_STRIP = {
     # The auto-update-on tests below assert the default; a runner that pins
     # Claude Code (CLAUDE_NO_CODE_AUTO_UPDATE=1) must not leak in and flip it.
     "CLAUDE_NO_CODE_AUTO_UPDATE",
+    # This harness isolates host state via HOME=tmp and relies on the cache/config
+    # defaulting to $HOME/.cache etc. (e.g. the guardrail-stamp store _stamp_store reads).
+    # conftest's _isolate_xdg_dirs sets XDG_* suite-wide; strip them so the wrapper resolves
+    # the same $HOME-relative paths the assertions compute, rather than conftest's dirs.
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
 }
 
 
