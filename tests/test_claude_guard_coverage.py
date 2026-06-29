@@ -1228,6 +1228,230 @@ def test_worktree_creation_failure_aborts(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Large non-repo workspace warning (warn_if_large_workspace)
+# ---------------------------------------------------------------------------
+
+
+def _nonrepo_dir(tmp_path: Path, files: int) -> Path:
+    """A directory that is NOT a git repo, holding `files` plain files — the shape
+    the large-directory warning fires on (e.g. launching straight from $HOME)."""
+    work = tmp_path / "sprawl"
+    work.mkdir()
+    for i in range(files):
+        (work / f"f{i}").write_text("x")
+    return work
+
+
+def _large_dir_host_env(tmp_path: Path, real_dir: Path, **extra: str) -> dict:
+    """Env for a host-mode pty launch that reaches the fake claude with the large-dir
+    prompt as the ONLY interactive question before handover: a monitor key silences
+    the keyless ack, a present managed-settings file silences the first-run setup
+    offer, and orientation is pre-acknowledged."""
+    stripped = ":".join(
+        p
+        for p in os.environ.get("PATH", "").split(":")
+        if p
+        and not Path(p).joinpath("devcontainer").exists()
+        and not Path(p).joinpath("claude").exists()
+    )
+    state = tmp_path / "state"
+    _seed_orientation_acked(state)
+    managed = tmp_path / "managed.json"
+    managed.write_text("{}")
+    return {
+        **os.environ,
+        "PATH": f"{real_dir}:{stripped}",
+        "HOME": str(tmp_path / "home"),
+        "XDG_STATE_HOME": str(state),
+        "CLAUDE_GUARD_MANAGED_SETTINGS": str(managed),
+        "ANTHROPIC_API_KEY": "x",
+        "CLAUDE_GUARD_NO_UPDATE": "1",
+        "CLAUDE_NO_CODE_AUTO_UPDATE": "1",
+        "NO_COLOR": "1",
+        **extra,
+    }
+
+
+def test_large_dir_noninteractive_warns_and_proceeds(tmp_path: Path) -> None:
+    """A non-repo directory over the threshold warns that it isn't a git project and
+    is fully exposed — but a non-interactive launch proceeds rather than aborting a
+    scripted run."""
+    work = _nonrepo_dir(tmp_path, 5)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    r = _run_guard(
+        work,
+        [],
+        real_dir,
+        "--dangerously-skip-sandbox",
+        "--dangerously-skip-firewall",
+        CLAUDE_GUARD_LARGE_DIR_THRESHOLD="2",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not a git project" in r.stderr
+    assert "fake-claude-here:" in r.stdout
+
+
+def test_large_dir_huge_tree_does_not_abort(tmp_path: Path) -> None:
+    """A tree big enough that `find` is still producing entries when `head` closes the
+    pipe (the bounded-count fast path) must NOT abort the launch: under `set -o
+    pipefail` find's SIGPIPE (exit 141) would otherwise propagate out of the count
+    command substitution. Regression for that fail path — many files, tiny threshold."""
+    work = _nonrepo_dir(tmp_path, 600)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    r = _run_guard(
+        work,
+        [],
+        real_dir,
+        "--dangerously-skip-sandbox",
+        "--dangerously-skip-firewall",
+        CLAUDE_GUARD_LARGE_DIR_THRESHOLD="3",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not a git project" in r.stderr
+    assert "fake-claude-here:" in r.stdout
+
+
+def test_large_dir_under_threshold_is_silent(tmp_path: Path) -> None:
+    """At or below the threshold there is no warning — a normal small directory is
+    never flagged."""
+    work = _nonrepo_dir(tmp_path, 3)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    r = _run_guard(
+        work,
+        [],
+        real_dir,
+        "--dangerously-skip-sandbox",
+        "--dangerously-skip-firewall",
+        CLAUDE_GUARD_LARGE_DIR_THRESHOLD="100",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not a git project" not in r.stderr
+    assert "fake-claude-here:" in r.stdout
+
+
+def test_large_dir_threshold_zero_disables_warning(tmp_path: Path) -> None:
+    """`CLAUDE_GUARD_LARGE_DIR_THRESHOLD=0` disables the check entirely, even in a
+    directory that would otherwise trip it."""
+    work = _nonrepo_dir(tmp_path, 5)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    r = _run_guard(
+        work,
+        [],
+        real_dir,
+        "--dangerously-skip-sandbox",
+        "--dangerously-skip-firewall",
+        CLAUDE_GUARD_LARGE_DIR_THRESHOLD="0",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not a git project" not in r.stderr
+    assert "fake-claude-here:" in r.stdout
+
+
+def test_large_dir_in_git_repo_never_prompts(tmp_path: Path) -> None:
+    """A git checkout is a deliberate, scoped workspace, so the warning never fires
+    there no matter how low the threshold — only off-repo launches are flagged."""
+    _init_repo(tmp_path)
+    for i in range(5):
+        (tmp_path / f"f{i}").write_text("x")
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    r = _run_guard(
+        tmp_path,
+        [],
+        real_dir,
+        "--dangerously-skip-sandbox",
+        "--dangerously-skip-firewall",
+        CLAUDE_GUARD_LARGE_DIR_THRESHOLD="1",
+        CLAUDE_GUARD_NO_WORKTREE_SEED="1",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not a git project" not in r.stderr
+    assert "fake-claude-here:" in r.stdout
+
+
+def test_large_dir_prompt_decline_aborts(tmp_path: Path) -> None:
+    """Interactive: declining the large-directory prompt fails closed — the launch
+    aborts (exit 1) and claude never starts. A deliberate decline is a user choice,
+    so no bug-report hint is printed."""
+    work = _nonrepo_dir(tmp_path, 5)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    env = _large_dir_host_env(tmp_path, real_dir, CLAUDE_GUARD_LARGE_DIR_THRESHOLD="2")
+    out, rc = run_pty(
+        [str(WRAPPER), "--dangerously-skip-sandbox", "--dangerously-skip-firewall"],
+        env,
+        work,
+        "n\n",
+    )
+    assert rc == 1, out
+    assert "cancelled" in out
+    assert "fake-claude-here:" not in out
+    assert "doctor --bug-report" not in out
+
+
+def test_large_dir_prompt_accept_launches(tmp_path: Path) -> None:
+    """Interactive: accepting ('y') launches the agent against the directory anyway,
+    and does NOT record it (so the next launch asks again)."""
+    work = _nonrepo_dir(tmp_path, 5)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    env = _large_dir_host_env(tmp_path, real_dir, CLAUDE_GUARD_LARGE_DIR_THRESHOLD="2")
+    out, rc = run_pty(
+        [str(WRAPPER), "--dangerously-skip-sandbox", "--dangerously-skip-firewall"],
+        env,
+        work,
+        "y\n",
+    )
+    assert rc == 0, out
+    assert "fake-claude-here:" in out
+    ack = Path(env["XDG_STATE_HOME"]) / "claude-monitor" / "large-dir-ack"
+    assert not ack.exists()
+
+
+def test_large_dir_prompt_always_remembers(tmp_path: Path) -> None:
+    """Interactive: 'a' (Always) records the directory, so a subsequent launch — even
+    a non-interactive one over the threshold — is silent."""
+    work = _nonrepo_dir(tmp_path, 5)
+    real_dir = tmp_path / "stubs"
+    real_dir.mkdir()
+    _make_fake_claude(real_dir)
+    env = _large_dir_host_env(tmp_path, real_dir, CLAUDE_GUARD_LARGE_DIR_THRESHOLD="2")
+    out, rc = run_pty(
+        [str(WRAPPER), "--dangerously-skip-sandbox", "--dangerously-skip-firewall"],
+        env,
+        work,
+        "a\n",
+    )
+    assert rc == 0, out
+    assert "fake-claude-here:" in out
+    ack = Path(env["XDG_STATE_HOME"]) / "claude-monitor" / "large-dir-ack"
+    assert ack.read_text().strip(), "the directory must be recorded"
+    # The recorded directory is now skipped on a fresh (non-interactive) launch.
+    r = _run_guard(
+        work,
+        [],
+        real_dir,
+        "--dangerously-skip-sandbox",
+        "--dangerously-skip-firewall",
+        XDG_STATE_HOME=env["XDG_STATE_HOME"],
+        CLAUDE_GUARD_LARGE_DIR_THRESHOLD="2",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "is not a git project" not in r.stderr
+
+
+# ---------------------------------------------------------------------------
 # Per-project domain allowlist (sandbox.network.*)
 # ---------------------------------------------------------------------------
 
@@ -3463,11 +3687,13 @@ def test_watcher_prompt_gate_choice_enables_both(tmp_path: Path) -> None:
     _seed_orientation_acked(state)
     # The watcher prompt is deferred to overlap the container bring-up, so the one-time
     # host-auth offer (declined with the leading 'n') now precedes it; 'g' then answers
-    # the 3-way watcher prompt, which settles both knobs so no separate gate ask follows.
-    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\ng\n")
+    # the 3-way watcher prompt, which settles both knobs so no separate gate ask follows;
+    # the trailing 'n' declines the "remember this choice?" follow-up.
+    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\ng\nn\n")
     assert "Detected an Apollo Watcher process (PID 4242)" in out
     assert "SENDS ALL OF THIS SESSION" in out
     assert "Watch this session with Apollo Watcher?" in out
+    assert "Remember this choice for future sessions?" in out
     assert "approve or deny tool calls too?" not in out
     # The Watcher PID is named exactly once — no redundant "opted in (PID …)" line.
     assert out.count("4242") == 1
@@ -3485,8 +3711,9 @@ def test_watcher_prompt_watch_only_skips_gate(tmp_path: Path) -> None:
     env["XDG_STATE_HOME"] = str(state)
     _seed_orientation_acked(state)
     # 'n' declines the one-time host-auth offer that now precedes the deferred watcher
-    # prompt (overlap path); 'w' then answers watch-only, pinning the gate OFF.
-    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nw\n")
+    # prompt (overlap path); 'w' then answers watch-only, pinning the gate OFF; trailing
+    # 'n' declines the "remember this choice?" follow-up.
+    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nw\nn\n")
     assert "Watch this session with Apollo Watcher?" in out
     assert "approve or deny tool calls too?" not in out
     assert "LAUNCHED-CLAUDE" in out
@@ -3502,13 +3729,73 @@ def test_watcher_prompt_decline_proceeds(tmp_path: Path) -> None:
     state = tmp_path / "state"
     env["XDG_STATE_HOME"] = str(state)
     _seed_orientation_acked(state)
-    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nn\n")
+    # 'n' host-auth, 'n' Neither (an explicit decline), 'n' don't remember.
+    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nn\nn\n")
     assert "Watch this session with Apollo Watcher?" in out
     assert "opted in" not in out
     # Declining the offer means the session isn't watched, so the gate offer
     # (which only makes sense atop an active Watcher) never fires.
     assert "approve or deny tool calls too?" not in out
     assert "LAUNCHED-CLAUDE" in out
+
+
+def _watcher_pref_path(env: dict) -> Path:
+    """Where the wrapper persists a remembered Watcher decision. _container_env
+    strips XDG_CONFIG_HOME, so the wrapper resolves it under $HOME/.config."""
+    return Path(env["HOME"]) / ".config" / "claude-guard" / "watcher"
+
+
+def test_watcher_remember_saves_decision(tmp_path: Path) -> None:
+    """Answering 'remember' after the 3-way choice persists BOTH knobs to the
+    config-dir pref file, so a later session can skip the prompt. 'w' (watch-only)
+    pins watcher=1, gate=0."""
+    _init_repo(tmp_path)
+    _, _, env = _container_env(
+        tmp_path, FAKE_WATCHER_RUNNING="1", ANTHROPIC_API_KEY="x"
+    )
+    state = tmp_path / "state"
+    env["XDG_STATE_HOME"] = str(state)
+    _seed_orientation_acked(state)
+    # 'n' host-auth, 'w' watch-only, 'y' remember this choice.
+    out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nw\ny\n")
+    assert "Remember this choice for future sessions?" in out
+    assert _watcher_pref_path(env).read_text() == "watcher=1\ngate=0\n"
+    assert "LAUNCHED-CLAUDE" in out
+
+
+def test_watcher_remembered_decision_skips_prompt(tmp_path: Path) -> None:
+    """A saved 'Neither' decision (watcher=0) loads silently: even with a Watcher
+    detected, neither the prompt nor the non-interactive hint fires, and the launch
+    proceeds unwatched."""
+    _init_repo(tmp_path)
+    _, _, env = _container_env(
+        tmp_path, FAKE_WATCHER_RUNNING="1", ANTHROPIC_API_KEY="x"
+    )
+    pref = _watcher_pref_path(env)
+    pref.parent.mkdir(parents=True, exist_ok=True)
+    pref.write_text("watcher=0\ngate=0\n")
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "Watch this session with Apollo Watcher?" not in r.stderr
+    assert "won't see this sandboxed session" not in r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
+
+
+def test_watcher_corrupt_pref_falls_through_to_prompt(tmp_path: Path) -> None:
+    """A malformed pref file (hand-edited, truncated) is treated as absent: the
+    wrapper does NOT wire a decision from garbage and falls through to the normal
+    path — here the non-interactive hint, proving the load was rejected."""
+    _init_repo(tmp_path)
+    _, _, env = _container_env(
+        tmp_path, FAKE_WATCHER_RUNNING="1", ANTHROPIC_API_KEY="x"
+    )
+    pref = _watcher_pref_path(env)
+    pref.parent.mkdir(parents=True, exist_ok=True)
+    pref.write_text("garbage not a decision\n")
+    r = _run_container(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "won't see this sandboxed session" in r.stderr
+    assert "LAUNCHED-CLAUDE" in r.stdout
 
 
 # SSOT: the exact process pattern the launcher greps for, read from the wrapper so a
@@ -3539,7 +3826,8 @@ def test_watcher_prompt_detects_a_real_apollo_process(tmp_path: Path) -> None:
         ["bash", "-c", f"exec -a {_WATCHER_PROC_PATTERN} sleep 120"]
     )
     try:
-        out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nn\n")
+        # 'n' host-auth, 'n' Neither, 'n' don't remember.
+        out, rc = run_pty([str(WRAPPER)], env, tmp_path, "n\nn\nn\n")
     finally:
         watcher.terminate()
         watcher.wait()
