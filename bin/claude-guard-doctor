@@ -2199,16 +2199,14 @@ def write_bug_report(report_text: str) -> Path:
 
 
 def print_rule_framed(body: Text, color: str) -> None:
-    """Set `body` off with top/bottom rules rather than a full box, sized to its
-    widest line. A box's side borders get dragged into the selection when the user
-    copies a command out of it, so command-bearing output (the verdict's
-    remediation lines) is framed with rules only and the body sits flush-left, the
-    same treatment as worktree_print_merge_hint."""
-    width = min(console.measure(body).maximum, console.width)
-    rule = Text("─" * width, style=color)
-    console.print(rule)
-    console.print(body)
-    console.print(rule)
+    """Set `body` off with terminal-width top/bottom rules and centered content
+    rather than a full box. A box's side borders get dragged into the selection
+    when the user copies a remediation command out, so command-bearing output (the
+    verdict) is framed with rules only — the Python mirror of the bash cg_rule_frame
+    the worktree merge hint uses."""
+    console.rule(style=color)
+    console.print(body, justify="center")
+    console.rule(style=color)
 
 
 def print_verdict() -> None:

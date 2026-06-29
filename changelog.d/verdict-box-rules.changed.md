@@ -1,1 +1,1 @@
-- `claude-guard doctor` now frames its verdict with top/bottom rules instead of a full box, so copying a remediation command (e.g. `bash setup.bash`, `exec $SHELL`) no longer drags a `│` side border into the selection.
+- `claude-guard doctor`'s verdict and the worktree seed-mode merge hint now share one renderer: terminal-width top/bottom rules with centered content and no side borders, instead of a full box. Copying a remediation command out of them (e.g. `bash setup.bash`, `exec $SHELL`, `git merge …`) no longer drags a `│` side border into the selection.
