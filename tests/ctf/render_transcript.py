@@ -116,7 +116,14 @@ def _code_block(header: str, body: str, lang: str = "") -> list[str]:
     if len(body) <= _COLLAPSE_OVER:
         return [header, "", *fenced]
     summary = header.strip("*").rstrip(":")  # drop bold markers / trailing colon
-    return ["<details>", f"<summary>{summary} — {len(body):,} chars</summary>", "", *fenced, "</details>", ""]
+    return [
+        "<details>",
+        f"<summary>{summary} — {len(body):,} chars</summary>",
+        "",
+        *fenced,
+        "</details>",
+        "",
+    ]
 
 
 def _flatten_content(content: object) -> str:

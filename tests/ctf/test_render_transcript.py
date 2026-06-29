@@ -280,9 +280,14 @@ def test_details_blocks_are_well_formed_when_present() -> None:
         {
             "type": "assistant",
             "message": {
-                "content": [{"type": "text", "text": "ok"}, {"type": "tool_use", "name": "Bash", "input": {"c": "q" * 3000}}]
+                "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "tool_use", "name": "Bash", "input": {"c": "q" * 3000}},
+                ]
             },
         },
     ]
     out = rt.render({"contained": True, "vacuous_containment": False}, "task", events)
-    assert out.count("<details>") == out.count("</details>") == out.count("<summary>") == 1
+    assert (
+        out.count("<details>") == out.count("</details>") == out.count("<summary>") == 1
+    )
