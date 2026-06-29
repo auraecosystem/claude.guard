@@ -32,6 +32,7 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
@@ -39,6 +40,19 @@ from pathlib import Path
 import pytest
 
 from tests._helpers import REPO_ROOT, write_exe
+
+# The container-seed/extract helpers below are exercised through a docker stub that
+# runs the REAL in-container shell program on the host. That program is Linux-only:
+# its `tar --warning=no-unknown-keyword -xf -` extract (worktree-seed.bash) is GNU
+# tar, which in production only ever runs INSIDE the Linux sandbox container — never
+# on the macOS host, whose bsdtar rejects the flag. So emulating it on the BSD leg is
+# a genuinely inapplicable scenario; the host-portable constructs that DO run on
+# macOS (worktree_secure_mkdir's `stat -c||stat -f`, worktree_seed_tar's BSD metadata
+# handling) keep their coverage via the non-gated tests in this module.
+_LINUX_CONTAINER_ONLY = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="emulates the in-container GNU-tar extract on the host; runs on Linux only",
+)
 
 LIB = REPO_ROOT / "bin" / "lib" / "worktree-seed.bash"
 EPHEMERAL = REPO_ROOT / "bin" / "lib" / "ephemeral.bash"  # defines cg_run_detached
@@ -457,6 +471,7 @@ def _make_tar(path: Path, members: dict[str, bytes]) -> None:
             tar.addfile(info, io.BytesIO(data))
 
 
+@_LINUX_CONTAINER_ONLY
 def test_seed_into_container_contains_traversal(tmp_path: Path) -> None:
     """A tampered seed tar cannot write outside /workspace: the extract carries no
     -P, so `..`/absolute members are refused while a normal member lands. Driven
@@ -488,6 +503,7 @@ def test_seed_into_container_contains_traversal(tmp_path: Path) -> None:
     assert not Path("/escape-abs.txt").exists()
 
 
+@_LINUX_CONTAINER_ONLY
 def test_reseed_container_is_authoritative_and_preserves_node_modules(
     tmp_path: Path,
 ) -> None:
@@ -531,6 +547,7 @@ def test_reseed_container_is_authoritative_and_preserves_node_modules(
     ).read_text() == "{}\n"  # .claude preserved
 
 
+@_LINUX_CONTAINER_ONLY
 def test_reseed_container_contains_traversal(tmp_path: Path) -> None:
     """The re-seed's extract carries no -P, so a tampered tar's `..`/absolute members are
     refused while a normal member lands — the same containment worktree_seed_into_container is
@@ -562,6 +579,7 @@ def test_reseed_container_contains_traversal(tmp_path: Path) -> None:
     assert not Path("/escape-abs.txt").exists()  # absolute member refused
 
 
+@_LINUX_CONTAINER_ONLY
 def test_reseed_container_fails_loud_when_extract_fails(tmp_path: Path) -> None:
     """A docker/extract failure aborts the re-seed loud (non-zero + a clear message) so the
     launch never hands the agent a half-re-seeded tree."""
@@ -673,6 +691,7 @@ def test_stamp_seed_fingerprint_fails_loud_without_head(tmp_path: Path) -> None:
     assert b"could not read HEAD" in r.stderr
 
 
+@_LINUX_CONTAINER_ONLY
 def test_container_seed_head_fails_loud_when_not_a_repo(tmp_path: Path) -> None:
     """If the spare's /workspace is not a git repo, recovering the seed base fails loud (non-zero
     + message) rather than hand teardown an empty extract base."""
@@ -716,6 +735,7 @@ def _seed_and_init(host: Path, ws: Path, stub_env: dict[str, str]) -> str:
     return base
 
 
+@_LINUX_CONTAINER_ONLY
 def test_roundtrip_reconstructs_agent_branch(tmp_path: Path) -> None:
     """The whole mechanism end to end: seed a dirty working tree into the spare,
     let the in-sandbox agent commit, extract, and apply onto a host worktree. The
@@ -782,6 +802,7 @@ def test_roundtrip_reconstructs_agent_branch(tmp_path: Path) -> None:
     assert len(log.splitlines()) == 2  # WIP commit + the agent commit
 
 
+@_LINUX_CONTAINER_ONLY
 def test_roundtrip_reuse_path_serves_the_prewarm_base(tmp_path: Path) -> None:
     """End-to-end invariant for the warm-REUSE path: when the host tree is unchanged since the
     prewarm, adoption recovers the extract base from the spare's existing seed HEAD
@@ -860,6 +881,7 @@ def test_roundtrip_reuse_path_serves_the_prewarm_base(tmp_path: Path) -> None:
     assert len(log.splitlines()) == 2  # WIP commit + agent commit, atop the reused base
 
 
+@_LINUX_CONTAINER_ONLY
 def test_roundtrip_returns_agent_uncommitted_and_untracked(tmp_path: Path) -> None:
     """Work the agent NEVER committed — a modified tracked file AND a brand-new
     untracked file — must still return on the host branch, folded into a final commit
@@ -918,6 +940,7 @@ def test_roundtrip_returns_agent_uncommitted_and_untracked(tmp_path: Path) -> No
     assert len(log.splitlines()) == 1  # one folded "session end" commit
 
 
+@_LINUX_CONTAINER_ONLY
 def test_roundtrip_empty_agent_preserves_wip(tmp_path: Path) -> None:
     """If the agent makes no commits, extract is empty and the host branch still
     carries the user's uncommitted work — a fail-safe, no-data-loss outcome."""
@@ -965,6 +988,7 @@ def test_roundtrip_empty_agent_preserves_wip(tmp_path: Path) -> None:
     assert len(log.splitlines()) == 1  # just the WIP commit
 
 
+@_LINUX_CONTAINER_ONLY
 def test_roundtrip_preserves_a_launch_time_deletion(tmp_path: Path) -> None:
     """A tracked file deleted on disk at launch (a WIP deletion) must stay deleted on
     the reviewable branch, while the agent's work and the rest of the WIP survive. This
@@ -1253,6 +1277,7 @@ def test_host_apply_survives_failing_flock(tmp_path: Path) -> None:
 # ── extract orchestrator: container extract -> host apply, fail-loud ───────────
 
 
+@_LINUX_CONTAINER_ONLY
 def test_extract_to_host_reconstructs_branch(tmp_path: Path) -> None:
     """worktree_extract_to_host glues container-extract + host-apply: it writes the
     agent's commits into the given mbox and replays them onto a reviewable host branch,
@@ -1300,6 +1325,7 @@ def test_extract_to_host_reconstructs_branch(tmp_path: Path) -> None:
     assert (mbox.stat().st_mode & 0o7777) == 0o600  # owner-only plaintext, not 0644
 
 
+@_LINUX_CONTAINER_ONLY
 def test_extract_to_host_fails_loud_when_container_extract_fails(
     tmp_path: Path,
 ) -> None:
@@ -1428,6 +1454,7 @@ def test_wt_run_detached_survives_process_group_sigint(tmp_path: Path) -> None:
     assert marker.read_text() == "done"
 
 
+@_LINUX_CONTAINER_ONLY
 def test_extract_to_host_reconstructs_branch_through_detached_runner(
     tmp_path: Path,
 ) -> None:
@@ -1565,6 +1592,7 @@ def _resume_env(stub: Path, ws: Path, overlay: Path) -> dict[str, str]:
     }
 
 
+@_LINUX_CONTAINER_ONLY
 def test_resume_overlay_roundtrip_reconstructs_session_end(tmp_path: Path) -> None:
     """The whole resume mechanism: a prior session commits AND leaves uncommitted/untracked
     work; the next ephemeral resume (same un-merged host) must reproduce that end state in a
@@ -1665,6 +1693,7 @@ def test_resume_overlay_roundtrip_reconstructs_session_end(tmp_path: Path) -> No
     assert "?? untracked.txt" in _git(ws2, "status", "--porcelain")
 
 
+@_LINUX_CONTAINER_ONLY
 def test_resume_overlay_skips_and_warns_on_divergence(tmp_path: Path) -> None:
     """If the host checkout advanced since the prior session (e.g. you merged the review
     branch), the fingerprint no longer matches: the overlay must NOT be replayed (it could
@@ -1720,6 +1749,7 @@ def test_resume_overlay_skips_and_warns_on_divergence(tmp_path: Path) -> None:
     assert not (ws2 / "agent-new.txt").exists()  # the prior commit was NOT replayed
 
 
+@_LINUX_CONTAINER_ONLY
 def test_resume_overlay_noop_without_artifacts(tmp_path: Path) -> None:
     """A first resume (or one whose prior session captured nothing) is a silent no-op — no
     warning, no change, clean exit."""
@@ -1745,6 +1775,7 @@ def test_resume_overlay_noop_without_artifacts(tmp_path: Path) -> None:
     assert r.stderr == b""  # silent: nothing to restore, nothing to warn about
 
 
+@_LINUX_CONTAINER_ONLY
 def test_resume_overlay_noop_when_prior_contribution_empty(tmp_path: Path) -> None:
     """A prior session that committed nothing AND left a clean tree captures empty
     commits/overlay. The resume must silently no-op (nothing to replay) rather than warn or
@@ -1793,6 +1824,7 @@ def test_resume_overlay_noop_when_prior_contribution_empty(tmp_path: Path) -> No
     assert r.stderr == b""  # nothing to replay: silent, not a warning
 
 
+@_LINUX_CONTAINER_ONLY
 def test_resume_overlay_skips_when_host_tracked_tree_edited(tmp_path: Path) -> None:
     """Divergence by a launch-time WIP change (same HEAD commit, but the host's tracked tree
     differs from the prior session's): the fingerprint's WIP-patch comparison must catch it and
