@@ -27,9 +27,6 @@ importers:
       rehype-parse:
         specifier: 9.0.1
         version: 9.0.1
-      strip-ansi:
-        specifier: 7.2.0
-        version: 7.2.0
       unified:
         specifier: 11.0.5
         version: 11.0.5

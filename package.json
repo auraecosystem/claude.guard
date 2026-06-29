@@ -76,7 +76,6 @@
     "agent-input-sanitizer": "1.1.0",
     "namespace-guard": "0.20.0",
     "rehype-parse": "9.0.1",
-    "strip-ansi": "7.2.0",
     "unified": "11.0.5",
     "unist-util-visit": "5.1.0"
   }
