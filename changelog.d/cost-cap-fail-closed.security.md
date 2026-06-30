@@ -1,0 +1,1 @@
+- The monitor spend cap now fails closed when its per-session spend file is present but unreadable (a permissions or I/O error, as opposed to a legitimately absent file): the gate treats the cap as reached and falls back to `ask`/`deny` instead of reading the spend as `$0` and running the paid monitor unbounded.
