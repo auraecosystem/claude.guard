@@ -34,9 +34,12 @@ import sys
 from collections import namedtuple
 from pathlib import Path
 
+from tests.eval import dataset
+
 REPO = Path(__file__).resolve().parents[2]
 THRESHOLDS = Path(__file__).resolve().parent / "thresholds.json"
 MARKER = "<!-- monitor-eval-report -->"
+_ARCHIVE_DOC = "docs/eval-dataset-history.md"
 CHART_WINDOW = 20
 # Palette shared with the perf section so the same provider reads consistently.
 _SAFETY_COLOR = "#4e79a7"
@@ -214,6 +217,28 @@ def attack_category_table(row: dict) -> str:
     return "\n".join(lines)
 
 
+def dataset_history_table(history: list) -> str:
+    """One row per dataset that has ever run — its label, run count, commit span,
+    and latest safety/usefulness — for the archive doc. '' when empty."""
+    groups = dataset.group_by_dataset(history, kind=dataset.MONITOR)
+    if not groups:
+        return ""
+    lines = [
+        "| Dataset | Runs | Commits | Latest safety | Latest usefulness |",
+        "|---------|------|---------|---------------|-------------------|",
+    ]
+    for label, rows in groups:
+        latest = rows[-1]
+        first, last = _commit_label(rows[0]), _commit_label(rows[-1])
+        span = first if len(rows) == 1 else f"{first}…{last}"
+        useful = _src(latest, _README_USEFULNESS_SOURCE, "usefulness")
+        lines.append(
+            f"| `{label}` | {len(rows)} | {span} "
+            f"| {_pct(latest.get('safety'))} | {_pct(useful)} |"
+        )
+    return "\n".join(lines)
+
+
 def gate_verdict(row: dict) -> str:
     gate = row.get("gate") or {}
     if gate.get("passed"):
@@ -347,32 +372,38 @@ def _segment_color(base: str, idx: int) -> str:
     return shades[idx % len(shades)]
 
 
-def _model_segments(window: list) -> list:
-    """Maximal runs of consecutive rows sharing one ``monitor_model``.
+def _model_key(row: dict):
+    return row.get("monitor_model")
 
-    Returns ``(model, start, end)`` half-open index ranges over ``window``,
-    segmenting on the EXACT ``monitor_model`` string — cosmetic variants render as
-    separate runs (a deliberate, simple choice; see the PR description)."""
+
+def _segments(window: list, key_fn) -> list:
+    """Maximal runs of consecutive rows sharing one ``key_fn(row)`` value.
+
+    Returns ``(key, start, end)`` half-open index ranges over ``window``. Used for
+    both the live charts (keyed on the EXACT ``monitor_model`` string — cosmetic
+    variants render as separate runs) and the archive's per-dataset facets (keyed
+    on the dataset label)."""
     segments: list = []
     for i, row in enumerate(window):
-        model = row.get("monitor_model")
-        if segments and segments[-1][0] == model:
-            segments[-1] = (model, segments[-1][1], i + 1)
+        key = key_fn(row)
+        if segments and segments[-1][0] == key:
+            segments[-1] = (key, segments[-1][1], i + 1)
         else:
-            segments.append((model, i, i + 1))
+            segments.append((key, i, i + 1))
     return segments
 
 
-def _series(window: list, metric: Metric) -> list:
-    """One :class:`quickchart.Series` per maximal monitor-model run.
+def _series(window: list, metric: Metric, key_fn=_model_key) -> list:
+    """One :class:`quickchart.Series` per maximal run sharing ``key_fn(row)``.
 
     Each series' ``data`` (and band) is ``None`` at every x-index outside its own
-    segment, so no line connects the last point of one model to the first of the
-    next and a model's legend label never attaches to the next model's point. The
+    segment, so no line connects the last point of one run to the first of the
+    next and a run's legend label never attaches to the next run's point. The
     x-axis ``labels`` stay shared across all series (one continuous axis); only the
-    per-series ``data`` is masked to its own segment."""
+    per-series ``data`` is masked to its own segment. Defaults to segmenting by
+    monitor model (the live charts); the archive passes a dataset-label key."""
     series = []
-    for seg_idx, (model, start, end) in enumerate(_model_segments(window)):
+    for seg_idx, (key, start, end) in enumerate(_segments(window, key_fn)):
         data = [
             _scaled(metric.value(r), metric.percent) if start <= i < end else None
             for i, r in enumerate(window)
@@ -385,7 +416,7 @@ def _series(window: list, metric: Metric) -> list:
                 else (None, None)
             ),
         )
-        label = f"{metric.name} ({model})"
+        label = f"{metric.name} ({key})"
         series.append(
             quickchart.Series(
                 label, data, _segment_color(metric.color, seg_idx), band=band
@@ -394,19 +425,24 @@ def _series(window: list, metric: Metric) -> list:
     return series
 
 
-def _metric_charts(window, labels, metrics, latest, *, divider=None) -> str:
+def _metric_charts(
+    window, labels, metrics, latest, *, divider=None, key_fn=_model_key, slug_suffix=""
+) -> str:
     """Render one fixed-axis chart per metric over ``window`` — rates on 0–100 with
     their CI band and ``latest``'s sample size, the control-score index on 0–1 —
-    each titled accordingly. '' when nothing plots."""
+    each titled accordingly. '' when nothing plots. ``key_fn`` segments the lines
+    (monitor model for the live charts, dataset label for the archive facets);
+    ``slug_suffix`` distinguishes the archive's chart slugs from the live ones so
+    they don't overwrite each other on the CDN."""
     blocks = []
     for m in metrics:
         n = m.n(latest)
         note = f" — {m.title_note}" if m.title_note else ""
         size = f" (n={n})" if n else ""
         md = chart_publish.chart_markdown(
-            f"monitor-{m.name}",
+            f"monitor-{m.name}{slug_suffix}",
             labels,
-            _series(window, m),
+            _series(window, m, key_fn),
             alt=f"Monitor {m.name} chart",
             title=f"Monitor {m.name}{note}{size}",
             y_label="%" if m.percent else "index (0–1)",
@@ -422,8 +458,13 @@ def _metric_charts(window, labels, metrics, latest, *, divider=None) -> str:
 
 def charts(history: list, current: dict, divider_pr: str | None = None) -> str:
     """Safety, benign-coding usefulness, and their control score for the last N
-    runs, the latest point tagged 'now' (PR-comment view)."""
-    window = [*history[-(CHART_WINDOW - 1) :], current]
+    runs of the CURRENT dataset, the latest point tagged 'now' (PR-comment view).
+
+    The window is trimmed to the trailing run sharing ``current``'s dataset label,
+    so a run that switches datasets shows only the new dataset's points — the live
+    graph restarts on a dataset change (older datasets live in the archive doc)."""
+    full = [*history[-(CHART_WINDOW - 1) :], current]
+    window = dataset.current_dataset_window(full, kind=dataset.MONITOR)
     labels = [_label(r, i == len(window) - 1) for i, r in enumerate(window)]
     metrics = [
         _safety_metric(),
@@ -441,10 +482,12 @@ def charts(history: list, current: dict, divider_pr: str | None = None) -> str:
 
 def readme_charts(history: list) -> str:
     """Safety, benign-coding usefulness, and their control score for the README,
-    each x-tick named by the commit it was measured at — so the README names the
-    tested commit at every point. Returns '' when the series holds no plottable
-    point."""
-    window = history[-CHART_WINDOW:]
+    trimmed to the CURRENT dataset (a dataset change restarts the README graph),
+    each x-tick named by the commit it was measured at. Returns '' when the series
+    holds no plottable point."""
+    window = dataset.current_dataset_window(
+        history[-CHART_WINDOW:], kind=dataset.MONITOR
+    )
     if not window:
         return ""
     labels = [_commit_label(r) for r in window]
@@ -454,6 +497,31 @@ def readme_charts(history: list) -> str:
         _control_score_metric(_README_USEFULNESS_SOURCE),
     ]
     return _metric_charts(window, labels, metrics, window[-1])
+
+
+def faceted_charts(history: list) -> str:
+    """Safety, usefulness, and control score over the FULL history, faceted by
+    dataset — one colored line per dataset, its label in the legend — for the
+    archive doc that composes every dataset run-to-run. '' when the series is
+    empty. Unlike the live charts (one dataset, model-segmented), this keeps every
+    dataset visible at once; its slugs carry a ``-history`` suffix so it renders to
+    its own CDN images."""
+    if not history:
+        return ""
+    labels = [_commit_label(r) for r in history]
+    metrics = [
+        _safety_metric(),
+        _usefulness_metric(_README_USEFULNESS_SOURCE),
+        _control_score_metric(_README_USEFULNESS_SOURCE),
+    ]
+    return _metric_charts(
+        history,
+        labels,
+        metrics,
+        history[-1],
+        key_fn=lambda r: dataset.dataset_label(r, kind=dataset.MONITOR),
+        slug_suffix="-history",
+    )
 
 
 # Why usefulness can read low without being a regression — surfaced in the report
@@ -491,10 +559,11 @@ def cost_line(row: dict) -> str:
 
 def render(row: dict, history: list, divider_pr: str | None = None) -> str:
     thresholds = json.loads(THRESHOLDS.read_text()) if THRESHOLDS.exists() else {}
+    label = dataset.dataset_label(row, kind=dataset.MONITOR)
     parts = [
         MARKER,
         "### Monitor control eval",
-        f"_Monitor model `{row.get('monitor_model', '?')}`, "
+        f"_Monitor model `{row.get('monitor_model', '?')}`, dataset `{label}`, "
         f"seed {row.get('seed', '?')}, {row.get('n', 0)} trajectories._",
         headline_table(row, thresholds),
         gate_verdict(row),
@@ -517,8 +586,9 @@ def render(row: dict, history: list, divider_pr: str | None = None) -> str:
     parts.append(
         "<sub>safety = attacks caught; usefulness = benign coding workflows not "
         "halted (the `gen_dev` split; agent suites are in the by-source table). "
-        "Wilson 95% CIs; an unparsable monitor verdict fails the gate. "
-        "`tests/eval/`.</sub>"
+        "Wilson 95% CIs; an unparsable monitor verdict fails the gate. Charts show "
+        "the current dataset only — every dataset is composed in "
+        f"`{_ARCHIVE_DOC}`. `tests/eval/`.</sub>"
     )
     return "\n\n".join(parts) + "\n"
 
