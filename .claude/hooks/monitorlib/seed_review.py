@@ -371,21 +371,43 @@ def _hborder(widths: tuple[int, ...], left: str, junction: str, right: str) -> s
     return left + junction.join(_BOX_H * (w + 2) for w in widths) + right
 
 
-def _row(cells: tuple[str, ...], widths: tuple[int, ...]) -> str:
-    """One table row: each cell left-aligned, padded to its column width, fenced by
+# The repo convention for these box-drawing tables: right-align the first column,
+# center the second, left-align the rest. Threaded as the default so every review
+# table reads the same way; pass an explicit tuple to override per table.
+_DEFAULT_ALIGN = ("r", "c", "l")
+
+
+def _pad(cell: str, width: int, align: str) -> str:
+    """Pad ``cell`` to ``width`` per ``align`` ('r' right, 'c' center, else left)."""
+    if align == "r":
+        return cell.rjust(width)
+    if align == "c":
+        return cell.center(width)
+    return cell.ljust(width)
+
+
+def _row(
+    cells: tuple[str, ...], widths: tuple[int, ...], aligns: tuple[str, ...]
+) -> str:
+    """One table row: each cell padded to its column width per ``aligns``, fenced by
     vertical bars."""
-    cells_padded = (f" {c.ljust(w)} " for c, w in zip(cells, widths, strict=True))
-    return _BOX_V + _BOX_V.join(cells_padded) + _BOX_V
+    padded = (
+        f" {_pad(c, w, a)} " for c, w, a in zip(cells, widths, aligns, strict=True)
+    )
+    return _BOX_V + _BOX_V.join(padded) + _BOX_V
 
 
 def _render_table(
     headers: tuple[str, str, str],
     rows: list[tuple[str, str, str]],
     why_width: int = 44,
+    aligns: tuple[str, str, str] = _DEFAULT_ALIGN,
 ) -> list[str]:
-    """A 3-column box-drawing table (file, runs, why). The long ``why`` cell is wrapped
-    to ``why_width`` and any overflow continues on rows with a blank file/runs cell, so
-    the columns stay aligned no matter how long a reason is."""
+    """A 3-column box-drawing table (file, runs, why). Columns follow the repo
+    convention (``_DEFAULT_ALIGN``: file right, runs centered, why left) unless
+    overridden. The long ``why`` cell is wrapped to ``why_width`` and any overflow
+    continues on rows with a blank file/runs cell, so columns stay aligned no matter
+    how long a reason is."""
     wrapped = [
         (
             f,
@@ -403,14 +425,14 @@ def _render_table(
     widths = (w0, w1, w2)
     out = [
         _hborder(widths, _BOX_TL, _BOX_TT, _BOX_TR),
-        _row(headers, widths),
+        _row(headers, widths, aligns),
         _hborder(widths, _BOX_LT, _BOX_X, _BOX_RT),
     ]
     # A divider after every entry (the bottom rule after the last) so each file —
     # and its wrapped reason — reads as a distinct block.
     for i, (f, runs, whys) in enumerate(wrapped):
-        out.append(_row((f, runs, whys[0]), widths))
-        out += [_row(("", "", cont), widths) for cont in whys[1:]]
+        out.append(_row((f, runs, whys[0]), widths, aligns))
+        out += [_row(("", "", cont), widths, aligns) for cont in whys[1:]]
         if i == len(wrapped) - 1:
             out.append(_hborder(widths, _BOX_BL, _BOX_BT, _BOX_BR))
         else:
@@ -433,7 +455,8 @@ def format_result(flags: DeterministicFlags, branch: str) -> list[str]:
     )
     return [
         f"{_WARN}  Review branch {branch} before merging — it is Claude's work returning to your machine.",
-        "   These files can execute on your computer the moment you open, build, or run the merged tree:",
+        "   They run on your machine when an IDE opens this folder, you cd into it, install,",
+        "   build, or start a shell — not merely from reading the files:",
         "",
         *table,
         "",

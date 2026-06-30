@@ -354,8 +354,28 @@ def test_render_table_divides_every_entry():
     # An inner divider (├ … ┤) sits between the two entries; the last is the ┴ rule.
     inner = [ln for ln in table if ln.startswith(sr._BOX_LT)]
     assert len(inner) == 2  # the header separator + the divider between the two rows
-    assert table[-1].startswith(sr._BOX_BL)  # bottom rule closes the table, not a divider
+    assert table[-1].startswith(
+        sr._BOX_BL
+    )  # bottom rule closes the table, not a divider
     assert all(len(ln) == len(table[0]) for ln in table)  # every line aligned
+
+
+def test_pad_alignments():
+    assert sr._pad("x", 5, "r") == "    x"
+    assert sr._pad("x", 5, "c") == "  x  "
+    assert sr._pad("x", 5, "l") == "x    "
+
+
+def test_table_uses_repo_alignment_convention():
+    # The repo convention (the default): file right-aligned, runs centered, why left.
+    assert sr._DEFAULT_ALIGN == ("r", "c", "l")
+    headers = ("File on the branch", "Runs", "Why it can run on your machine")
+    table = sr._render_table(headers, [("a.sh", sr._RUNS_IF_INVOKED, "why")])
+    data = next(ln for ln in table if "a.sh" in ln)
+    file_cell, runs_cell, why_cell = data.strip(sr._BOX_V).split(sr._BOX_V)
+    assert file_cell.endswith("a.sh ")  # right-aligned: the path hugs the right edge
+    assert why_cell.startswith(" why")  # left-aligned: the text hugs the left edge
+    assert runs_cell.strip() == sr._RUNS_IF_INVOKED  # centered, padded both sides
 
 
 # --------------------------------------------------------------------------
