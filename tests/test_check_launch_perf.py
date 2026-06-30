@@ -1,12 +1,13 @@
 """Unit tests for bin/check-launch-perf.py (the launch time-to-load gate).
 
 The gate drives bin/bench-launch-host.py (which launches the real wrapper to handover)
-and gates TWO series charted on one graph — the COLD launch (no pre-warm — the full boot a
-fresh launch pays, ice blue) and the WARM launch (it adopted a pristine pre-warmed spare,
-red). The cold measurement discards a throwaway first launch (the one-time fully-uncached
+and gates THREE series charted on one graph — the COLD launch (no pre-warm — the full boot a
+fresh launch pays, ice blue), the WARM launch (it adopted a pristine pre-warmed spare,
+red), and the POST-UPDATE launch (it pays the in-container claude-code version sync, amber).
+The cold measurement discards a throwaway first launch (the one-time fully-uncached
 pnpm/Docker store fill) so the series is the normal second-and-later boot. These tests mock
-the measurement so no Docker boots: bench_host.measure_cold and bench_host.measure_warm are
-patched to return fixed millisecond summaries.
+the measurement so no Docker boots: bench_host.measure_cold, measure_warm, and
+measure_post_update are patched to return fixed millisecond summaries.
 """
 
 import importlib.util
@@ -98,7 +99,7 @@ _WARM = _side(
 _SUMMARY = {"reps": 5, "cold": _COLD, "warm": _WARM}
 
 
-def _entry(sha="abc1234", cold_mean=6.6, warm_mean=2.0):
+def _entry(sha="abc1234", cold_mean=6.6, warm_mean=2.0, post_mean=20.0):
     return {
         "timestamp": "2024-01-01T00:00:00+00:00",
         "commit_sha": sha,
@@ -109,6 +110,9 @@ def _entry(sha="abc1234", cold_mean=6.6, warm_mean=2.0):
         "warm_mean_s": warm_mean,
         "warm_ci_low_s": warm_mean - 0.1,
         "warm_ci_high_s": warm_mean + 0.1,
+        "post_update_mean_s": post_mean,
+        "post_update_ci_low_s": post_mean - 1.0,
+        "post_update_ci_high_s": post_mean + 1.0,
     }
 
 
@@ -136,10 +140,15 @@ def test_run_bench_summarizes_both_series(chk, monkeypatch):
 
     monkeypatch.setattr(chk.bench_host, "measure_cold", fake_cold)
     monkeypatch.setattr(chk.bench_host, "measure_warm", fake_warm)
+    # The post-update side is also measured now; stub it too so no launch boots.
+    monkeypatch.setattr(
+        chk.bench_host, "measure_post_update", lambda *a, **k: _RAW_WARM
+    )
     summary = chk.run_bench(reps=5)
     assert summary["reps"] == 5
     assert summary["cold"]["mean_s"] == 6.6  # 6600 ms
     assert summary["warm"]["mean_s"] == 2.0  # 2000 ms
+    assert summary["post_update"]["mean_s"] == 2.0  # 2000 ms (stubbed)
     assert summary["cold"]["ci_low_s"] == 6.3 and summary["cold"]["ci_high_s"] == 6.9
     assert summary["warm"]["min_s"] == 1.9 and summary["warm"]["max_s"] == 2.1
     assert ("start", "image_resolved", 0.5, 0.48, 0.52) in summary["cold"]["legs_s"]
@@ -326,9 +335,10 @@ def test_generate_chart_two_series_titled_launch_time(chk, monkeypatch):
     assert cap["kw"]["title"] == "Launch Time"
     assert cap["kw"]["y_label"] == "mean seconds"
     by_label = {s.label: s for s in cap["series"]}
-    assert set(by_label) == {"cold boot", "warm"}
+    assert set(by_label) == {"cold boot", "warm", "post-update"}
     assert by_label["cold boot"].color == chk._COLD_COLOR
     assert by_label["warm"].color == chk._WARM_COLOR
+    assert by_label["post-update"].color == chk._POSTUPD_COLOR
     assert by_label["cold boot"].data[-1] == 6.6
     assert by_label["warm"].data[-1] == 2.0
 
@@ -352,13 +362,20 @@ def test_generate_chart_gate_lines_match_series_colors(chk, monkeypatch):
     cap = _capture_publish(chk, monkeypatch)
     chk.generate_chart(_history(chk.MIN_BASELINE), _entry(sha="cur0000"))
     hlines = cap["kw"]["hline"]
-    assert {h["color"] for h in hlines} == {chk._COLD_COLOR, chk._WARM_COLOR}
+    assert {h["color"] for h in hlines} == {
+        chk._COLD_COLOR,
+        chk._WARM_COLOR,
+        chk._POSTUPD_COLOR,
+    }
     cold_h = next(h for h in hlines if h["color"] == chk._COLD_COLOR)
     warm_h = next(h for h in hlines if h["color"] == chk._WARM_COLOR)
+    post_h = next(h for h in hlines if h["color"] == chk._POSTUPD_COLOR)
     assert cold_h["label_color"] == chk._COLD_LABEL_COLOR
     assert warm_h["label_color"] == chk._WARM_LABEL_COLOR
+    assert post_h["label_color"] == chk._POSTUPD_LABEL_COLOR
     assert cold_h["value"] == round(6.6 * chk.GATE_RATIO, 3)
     assert warm_h["value"] == round(2.0 * chk.GATE_RATIO, 3)
+    assert post_h["value"] == round(20.0 * chk.GATE_RATIO, 3)
     assert "cold boot gate" in cold_h["label"] and "warm gate" in warm_h["label"]
 
 
