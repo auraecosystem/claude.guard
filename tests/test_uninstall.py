@@ -1003,13 +1003,10 @@ def test_purge_still_removes_unrelated_state_when_volume_ls_fails(
     tmp_path: Path,
 ) -> None:
     """A failed `docker volume ls` must not derail the REST of --purge's cleanup.
-    Regression: purge_images_and_volumes' `return 1` used to propagate as an
-    uncaught bare-command failure under set -e, aborting run_uninstall mid-function
-    — so the global firewall allowlist and saved prompt decisions (both unrelated
-    to Docker) were silently left behind, and the "Uninstall complete" trailer never
-    printed, even though the process happened to exit non-zero. The volume-purge
-    failure and the unrelated host-file cleanup must be independent: one failing
-    must not skip the other."""
+    The volume-purge failure and the unrelated host-file cleanup (the global
+    firewall allowlist, saved prompt decisions) are independent: a
+    purge_images_and_volumes failure must not skip the unrelated cleanup or the
+    "Uninstall complete" trailer, though the process must still exit non-zero."""
     home = _fake_home(tmp_path)
     stub = _stub_dir(tmp_path)
     write_exe(stub / "docker", _PURGE_DOCKER_STUB_VOLUME_LS_FAILS)

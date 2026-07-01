@@ -378,11 +378,9 @@ run_uninstall() {
   # Heavyweight Docker state is kept by default (a reinstall reuses it); --purge
   # opts into removing it too — as well as the global firewall allowlist, which a
   # plain uninstall deliberately preserves (it lives outside the repo and volumes).
-  # purge_images_and_volumes' own `return 1` (Docker daemon unreachable, nothing
-  # purged) must reach the process exit code — swallowing it here would let
-  # `--purge` report success while the volumes it couldn't enumerate are still on
-  # disk, the exact "exit 0 without the post-condition" this repo's guards refuse
-  # to do elsewhere.
+  # purge_images_and_volumes' `return 1` (Docker daemon unreachable, nothing
+  # purged) must reach the process exit code: swallowing it here would report
+  # `--purge` success while the volumes it couldn't enumerate are still on disk.
   local _purge_incomplete=false
   if "${PURGE:-false}"; then
     purge_images_and_volumes || _purge_incomplete=true
