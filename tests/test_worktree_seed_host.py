@@ -62,11 +62,14 @@ def test_secure_mkdir_rejects_symlink_planted_between_the_pre_check_and_mkdir(
     cannot see one planted in the window between that check and `mkdir -p`. A stubbed
     `mkdir` models exactly that race (a symlink appears at `$dir` where `mkdir -p`
     would have created a real directory), proving the POST-mkdir `-L` recheck — not
-    just the pre-check — actually refuses it."""
+    just the pre-check — actually refuses it. The recheck runs BEFORE `chmod 700`,
+    so the guard must refuse without ever chmod-ing through the planted link: the
+    target starts 0755 precisely so a chmod that followed the link would leave a
+    visible 0700 and fail the final assertion."""
     store = tmp_path / "seed-branches"
     target = tmp_path / "attacker-owned"
-    target.mkdir(mode=0o700)
-    os.chmod(target, 0o700)
+    target.mkdir(mode=0o755)
+    os.chmod(target, 0o755)
     stub = tmp_path / "stub"
     write_exe(
         stub / "mkdir",
@@ -79,8 +82,8 @@ def test_secure_mkdir_rejects_symlink_planted_between_the_pre_check_and_mkdir(
     )
     assert r.returncode != 0
     assert b"it is a symlink" in r.stderr
-    # The guard refused before ever touching the planted target's contents/mode.
-    assert _mode(target) == 0o700
+    # Refused before chmod: the planted target's mode is untouched.
+    assert _mode(target) == 0o755
 
 
 def test_secure_mkdir_rejects_symlink_to_an_existing_owned_directory(

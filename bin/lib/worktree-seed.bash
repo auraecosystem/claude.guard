@@ -50,9 +50,12 @@ source "$_WORKTREE_SEED_DIR/flock.bash"
 # (mode & 077 != 0) means the owner-only guarantee failed, so fail loud. `-d`/`chmod`/`stat`
 # all follow symlinks, so a pre-planted `$dir` symlink into an attacker-owned-but-0700
 # directory would otherwise pass the mode check while writing plaintext where the attacker can
-# read it — reject a symlinked `$dir` outright (both before mkdir, to skip chmod following an
-# attacker's target, and after, closing the TOCTOU where the symlink lands mid-call) and verify
-# the resulting directory's owner uid matches ours, not just its mode. The files themselves must
+# read it — reject a symlinked `$dir` outright (checked before mkdir and re-checked between
+# mkdir and chmod, so a symlink planted mid-call is refused before chmod follows it) and verify
+# the resulting directory's owner uid matches ours, not just its mode. Bash has no
+# open(O_NOFOLLOW)+fstat primitive, so each check is a separate path-resolving syscall and a
+# window between the recheck and the later stat reads remains — the checks narrow the
+# check-to-use race, they cannot eliminate it. The files themselves must
 # additionally be written under `umask 077` by the caller so they land 0600 — 0700 on the dir
 # keeps a NEW peer process out, but an existing world-readable file inside it stays readable
 # until its own mode is fixed.
@@ -63,11 +66,11 @@ worktree_secure_mkdir() {
     return 1
   fi
   mkdir -p "$dir" 2>/dev/null
-  chmod 700 "$dir" 2>/dev/null
   if [[ -L "$dir" ]]; then
     cg_error "worktree seed: refusing to use $dir — it is a symlink, not a real directory (a symlinked store could point at a location outside your control)"
     return 1
   fi
+  chmod 700 "$dir" 2>/dev/null
   if [[ ! -d "$dir" ]]; then
     cg_error "worktree seed: could not create the owner-only store directory $dir"
     return 1
