@@ -216,7 +216,7 @@ export async function storePem(value, { backend } = {}) {
     // Every BACKENDS[*].store() rejects with a genuine Error (shell()'s
     // reject(new Error(...)), atomicWrite's fs errors), so .message is safe.
     throw new Error(
-      `${err.message} ` +
+      `${/** @type {Error} */ (err).message} ` +
         `(set CLAUDE_GH_APP_KEYCHAIN=file to store the key as an unencrypted 0600 file instead)`,
       { cause: err },
     );
