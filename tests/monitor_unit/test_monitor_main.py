@@ -442,10 +442,10 @@ _HIGH_RISK_ENVELOPE = {
 }
 
 
-def test_main_cost_cap_high_risk_denies_in_ask_mode(mon, monkeypatch, capsys, tmp_path):
-    """Past the cap the paid LLM referee is silent; a HIGH-risk call (egress/
-    credentials) must DENY even though the default cap mode is 'ask', so an
-    interactive user fatigued by ask-floods can't wave the dangerous ones through."""
+def test_main_cost_cap_high_risk_asks_in_ask_mode(mon, monkeypatch, capsys, tmp_path):
+    """Past the cap the paid LLM referee is silent, so EVERY call — HIGH-risk
+    included — falls to the configured cap_mode (ASK by default): the tier no
+    longer singles HIGH-risk calls out for a hard DENY, it just halts for a human."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
     monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")  # default cap mode = ask
@@ -456,17 +456,20 @@ def test_main_cost_cap_high_risk_denies_in_ask_mode(mon, monkeypatch, capsys, tm
     monkeypatch.setattr(mon.urllib.request, "urlopen", lambda *a, **k: called.append(1))
     _stdin(monkeypatch, mon, {**_HIGH_RISK_ENVELOPE, "session_id": "capped"})
     mon.main()
-    assert _capture(capsys)["permissionDecision"] == "deny"
+    assert _capture(capsys)["permissionDecision"] == "ask"
     assert called == []  # still no paid API call
 
 
 def test_main_cost_cap_blind_notifies_once(mon, monkeypatch, capsys, tmp_path):
     """The 'monitor is now blind' alert fires exactly once per session — a sentinel
-    in CB_DIR suppresses repeats so a flood of capped calls can't bury it. (The
-    capped path makes no paid API call, so every urlopen here is an ntfy POST.)"""
+    in CB_DIR suppresses repeats so a flood of capped calls can't bury it. Uses
+    deny mode so the per-call ASK ntfy doesn't fire and only the one-time BLIND
+    alert is counted. (The capped path makes no paid API call, so every urlopen
+    here is an ntfy POST.)"""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
     monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")
+    monkeypatch.setenv("MONITOR_COST_CAP_MODE", "deny")
     conf = tmp_path / "ntfy.conf"
     conf.write_text("topic=t\n")
     monkeypatch.setenv("MONITOR_NTFY_CONF", str(conf))
@@ -495,8 +498,7 @@ def test_main_cost_cap_ask_mode_notifies_each_subsequent_call(
     """Once the one-time BLIND alert has fired (sentinel present), a LATER capped
     call whose fallback is ASK still emits a per-call ntfy carrying the cap reason —
     so an interactive user isn't asked to approve a call with no out-of-band signal
-    that the monitor is blind. (HIGH-risk would DENY and skip this; the default cap
-    mode 'ask' on a non-HIGH tool is what reaches the per-call branch.)"""
+    that the monitor is blind."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     monkeypatch.setenv("MONITOR_PROVIDER", "anthropic")
     monkeypatch.setenv("MONITOR_COST_CAP_USD", "10")  # default cap mode = ask
