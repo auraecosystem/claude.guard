@@ -1783,20 +1783,20 @@ def test_uninstall_removes_wrapper_symlinks(tmp_path: Path) -> None:
 
 
 def test_uninstall_leaves_unrelated_symlinks(tmp_path: Path) -> None:
-    """--uninstall leaves symlinks that point outside the repo untouched. The
-    target must be GONE (a deleted checkout): a wrapper link to a live foreign
-    target aborts the whole uninstall instead (test_uninstall.py covers that)."""
+    """--uninstall leaves a claude-guard symlink alone when its target isn't
+    shaped like a claude-guard checkout at all (not a `bin/<script>` path in
+    ANY checkout) — a user's own symlink to something unrelated. A symlink
+    shaped like a checkout's bin/, even a different or a deleted one, is
+    removed instead (test_uninstall.py covers the cross-checkout cases)."""
     repo = _make_minimal_repo(tmp_path)
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     local_bin = home / ".local" / "bin"
     local_bin.mkdir(parents=True)
 
-    # Plant a claude-guard symlink pointing ELSEWHERE (not into repo) whose
-    # target no longer exists, so the foreign-checkout guard lets cleanup run.
-    (local_bin / "claude-guard").symlink_to(
-        tmp_path / "deleted-checkout" / "bin" / "claude-guard"
-    )
+    # Plant a claude-guard symlink pointing at something that isn't a
+    # claude-guard checkout's bin/claude-guard at all.
+    (local_bin / "claude-guard").symlink_to("/usr/bin/true")
 
     stubs = _make_stubs_dir(
         tmp_path,
@@ -1816,9 +1816,8 @@ def test_uninstall_leaves_unrelated_symlinks(tmp_path: Path) -> None:
         cwd=str(repo),
     )
     assert r.returncode == 0, r.stderr
-    # The symlink points outside the repo (dangling) → must be left alone.
     assert (local_bin / "claude-guard").is_symlink()
-    assert "not into this repo" in r.stdout
+    assert "not a claude-guard checkout" in r.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -1894,32 +1893,20 @@ def test_install_uninstall_round_trip_leaves_only_allowlist(tmp_path: Path) -> N
     )
 
 
-def _home_snapshot(home: Path) -> dict[str, str]:
-    """Every file/symlink under $HOME mapped to its content (symlinks to their
-    target string), so any byte-level mutation — a stripped profile line, a
-    rewritten forwarder — shows up in an equality diff, not just an added or
-    removed path."""
-    snap: dict[str, str] = {}
-    for p in home.rglob("*"):
-        rel = str(p.relative_to(home))
-        if p.is_symlink():
-            snap[rel] = "-> " + os.readlink(p)
-        elif p.is_file():
-            snap[rel] = p.read_bytes().hex()
-    return snap
-
-
 @_FULL_INSTALL_LINUX_ONLY
-def test_foreign_checkout_uninstall_leaves_home_untouched(tmp_path: Path) -> None:
-    """Install from checkout A, then run `--uninstall` from checkout B: the run
-    must fail loud and $HOME must be byte-for-byte identical afterward. This is
-    the class-level invariant behind the foreign-checkout guard: an uninstall may
-    only remove what the SAME checkout's install created. Unlike the per-artifact
-    refusal test (test_uninstall.py), it drives the REAL install and diffs the
-    whole tree with content hashes, so every artifact setup.bash creates — the
-    repo-guarded symlinks AND the shared, repo-unscoped ones (claude-original
-    forwarder, profile lines, man pages), including any added in the future — is
-    covered without being enumerated."""
+def test_uninstall_from_a_different_checkout_removes_the_active_install(
+    tmp_path: Path,
+) -> None:
+    """Install from checkout A, then run `--uninstall` from checkout B: the
+    active install must be fully torn down anyway. Install itself doesn't care
+    which checkout runs it (each run relinks every wrapper to wherever IT
+    lives — last-writer-wins), so uninstall matches that model instead of only
+    removing what the INVOKING checkout would have created. Unlike the
+    per-artifact tests (test_uninstall.py), this drives the REAL install and
+    diffs the whole tree, so every artifact setup.bash creates — the
+    checkout-shaped symlinks AND the shared, marker-based ones (claude-original
+    forwarder, profile lines, man pages), including any added in the future —
+    is covered without being enumerated."""
     repo_a = _make_minimal_repo(tmp_path)
     env = _make_env(tmp_path, repo_a)
     home = Path(env["HOME"])
@@ -1927,25 +1914,28 @@ def test_foreign_checkout_uninstall_leaves_home_untouched(tmp_path: Path) -> Non
     (home / ".bash_profile").write_text(". ~/.bashrc\n")
     _make_run_reach_summary(repo_a)
     full_env = _hermetic_full_env(tmp_path, env)
-    run_capture(["bash", str(repo_a / "setup.bash")], env=full_env, cwd=str(repo_a))
-    assert (home / ".local" / "bin" / "claude-guard").is_symlink(), (
-        "install did not link the wrapper; the foreign-uninstall run would "
-        "vacuously pass with nothing to protect"
-    )
 
-    snapshot = _home_snapshot(home)
+    baseline = _home_files(home)
+    run_capture(["bash", str(repo_a / "setup.bash")], env=full_env, cwd=str(repo_a))
+    installed = _home_files(home) - baseline
+    assert {
+        ".local/bin/claude-guard",
+        ".local/bin/claude",
+        ".claude/commands",
+    } <= installed, f"install did not link the wrappers/alias/commands: {installed}"
+
     repo_b = _make_minimal_repo(tmp_path / "second-checkout")
     r = run_capture(
         ["bash", str(repo_b / "setup.bash"), "--uninstall"],
         env=full_env,
         cwd=str(repo_b),
     )
-    assert r.returncode != 0, "foreign uninstall must abort, not exit 0"
-    assert "is not this checkout" in r.stderr
-    after = _home_snapshot(home)
-    assert after == snapshot, (
-        "a foreign checkout's --uninstall mutated the live install: "
-        f"{sorted(set(snapshot) ^ set(after)) or 'content changed in place'}"
+    assert r.returncode == 0, r.stderr
+    remaining = _home_files(home) - baseline
+    assert remaining == _UNINSTALL_LEAVE_BEHINDS, (
+        "cross-checkout install→uninstall is not symmetric. "
+        f"Not cleaned and not allowlisted: {sorted(remaining - _UNINSTALL_LEAVE_BEHINDS)}. "
+        f"Expected leave-behinds now missing: {sorted(_UNINSTALL_LEAVE_BEHINDS - remaining)}."
     )
 
 
