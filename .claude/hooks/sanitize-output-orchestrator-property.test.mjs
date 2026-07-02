@@ -240,23 +240,20 @@ describe("sanitize-output Layer 4 web-ingress relabel", () => {
   const needle = "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e";
 
   // Boot a real daemon on the default socket so sanitizeText connects first-try
-  // (the dead-config respawn command is never reached here). The redactor
-  // console script lives in the project venv; spawn it by its full venv path and
-  // also prepend the venv to PATH so it resolves its own deps.
+  // (the dead-config respawn command is never reached here). Resolve the redactor
+  // console script by bare name via PATH: Stryker's sandbox excludes `.venv`, so an
+  // absolute venv path is ENOENT there. The prepended venvBin resolves it locally
+  // (real venv), and CI's ambient PATH carries the real `.venv/bin` into the sandbox.
   let daemon;
   before(async () => {
     const venvBin = join(__dirname, "..", "..", ".venv", "bin");
-    daemon = spawn(
-      join(venvBin, "agent-secret-redactor-daemon"),
-      [REDACTOR_SOCK],
-      {
-        stdio: "ignore",
-        env: {
-          ...process.env,
-          PATH: [venvBin, process.env.PATH].filter(Boolean).join(":"),
-        },
+    daemon = spawn("agent-secret-redactor-daemon", [REDACTOR_SOCK], {
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        PATH: [venvBin, process.env.PATH].filter(Boolean).join(":"),
       },
-    );
+    });
     assert.ok(
       await waitForSocket(REDACTOR_SOCK, { deadlineMs: 8000 }),
       "daemon never came up",
