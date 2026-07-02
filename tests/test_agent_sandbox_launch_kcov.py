@@ -148,7 +148,9 @@ def test_refuses_watcher_observe(tmp_path):
 
 def test_refuses_watcher_gate(tmp_path):
     repo = _git_repo(tmp_path)
-    r = _drive("refuse_unsupported", "-p", "hi", cwd=repo, STUB_WATCHER_GATE_OPTIN="true")
+    r = _drive(
+        "refuse_unsupported", "-p", "hi", cwd=repo, STUB_WATCHER_GATE_OPTIN="true"
+    )
     assert r.returncode == 1
     assert "Watcher" in r.stderr
 
@@ -452,7 +454,7 @@ def test_delegate_resolve_failure_aborts(tmp_path):
         docker_dir / "git",
         "#!/usr/bin/env bash\n"
         'case "$1" in\n'
-        "rev-parse) exec /usr/bin/git rev-parse \"${@:2}\" ;;\n"
+        'rev-parse) exec /usr/bin/git rev-parse "${@:2}" ;;\n'
         "*) exit 128 ;;\n"
         "esac\n",
     )
@@ -477,9 +479,7 @@ def _run_wrapper(cwd: Path, args: list[str], path_dir: Path, **env: str):
     stripped = ":".join(
         p
         for p in os.environ.get("PATH", "").split(":")
-        if p
-        and not Path(p, "devcontainer").exists()
-        and not Path(p, "claude").exists()
+        if p and not Path(p, "devcontainer").exists() and not Path(p, "claude").exists()
     )
     full_env = {
         **os.environ,

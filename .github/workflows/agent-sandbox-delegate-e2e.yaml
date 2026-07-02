@@ -75,6 +75,14 @@ jobs:
           IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
         run: bash .github/scripts/agent-sandbox-delegate-e2e-secret-gate.sh
 
+      # The delegated launch inherits the library's fail-closed runtime ladder,
+      # which refuses to run when gVisor's runsc isn't registered with Docker.
+      # Install it the way claude-auth-e2e does, so the e2e runs under the same
+      # runtime a real session uses instead of weakening the launch.
+      - name: Install and register runsc (gVisor)
+        if: steps.gate.outputs.run == 'true'
+        run: bash bin/check-runsc-smoke.bash --install
+
       # The check refuses to build the image itself, so produce
       # secure-claude-sandbox:local here the same way the other unstubbed
       # smokes do (firewall-egress-smoke.yaml): docker-build-retry with

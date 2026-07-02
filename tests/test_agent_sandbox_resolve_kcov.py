@@ -27,7 +27,9 @@ DRIVER = REPO_ROOT / "tests" / "drive-agent-sandbox-resolve.bash"
 PIN_SHA_MISMATCH = "0123456789abcdef0123456789abcdef01234567"
 
 
-def _drive(fn: str, *args: str, cache: Path, path_prefix: Path | None = None, **env: str):
+def _drive(
+    fn: str, *args: str, cache: Path, path_prefix: Path | None = None, **env: str
+):
     """Run one resolver function through the kcov-traced vehicle."""
     full_env = {**os.environ, "XDG_CACHE_HOME": str(cache), **env}
     if path_prefix is not None:
@@ -65,7 +67,9 @@ def _cache_path(cache: Path, sha: str) -> Path:
 
 
 def test_pin_read_prints_repo_and_commit(tmp_path):
-    pin = _write_pin(tmp_path / "pin.json", "https://example.invalid/r.git", PIN_SHA_MISMATCH)
+    pin = _write_pin(
+        tmp_path / "pin.json", "https://example.invalid/r.git", PIN_SHA_MISMATCH
+    )
     r = _drive("pin_read", str(pin), cache=tmp_path / "c")
     assert r.returncode == 0, r.stderr
     assert r.stdout == f"https://example.invalid/r.git {PIN_SHA_MISMATCH}\n"
@@ -102,7 +106,9 @@ def test_pin_read_short_commit_fails(tmp_path):
 
 def test_pin_read_uppercase_hex_commit_fails(tmp_path):
     """The pin regex is lowercase-hex only — a case-normalized SHA is the SSOT."""
-    pin = _write_pin(tmp_path / "pin.json", "https://example.invalid/r.git", PIN_SHA_MISMATCH.upper())
+    pin = _write_pin(
+        tmp_path / "pin.json", "https://example.invalid/r.git", PIN_SHA_MISMATCH.upper()
+    )
     r = _drive("pin_read", str(pin), cache=tmp_path / "c")
     assert r.returncode == 1
     assert "malformed" in r.stderr
@@ -250,11 +256,13 @@ def test_resolve_fetched_checkout_failing_verify_fails_closed(tmp_path):
         "#!/usr/bin/env bash\n"
         'case "$*" in\n'
         "*rev-parse\\ HEAD*) echo deadbeefdeadbeefdeadbeefdeadbeefdeadbeef ;;\n"
-        "init*) mkdir -p \"${@: -1}\" ;;\n"
+        'init*) mkdir -p "${@: -1}" ;;\n'
         "*) exit 0 ;;\n"
         "esac\n",
     )
-    pin = _write_pin(tmp_path / "pin.json", "https://example.invalid/r.git", PIN_SHA_MISMATCH)
+    pin = _write_pin(
+        tmp_path / "pin.json", "https://example.invalid/r.git", PIN_SHA_MISMATCH
+    )
     r = _drive("resolve", str(pin), cache=tmp_path / "cache", path_prefix=stub)
     assert r.returncode == 1
     assert "does not verify at the pinned commit" in r.stderr
