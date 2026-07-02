@@ -436,10 +436,11 @@ EXPERIMENTAL FLAGS:
                                   / bypassPermissions); auto mode is classifier-gated and its
                                   denial reason is not redactable from a hook.
     (env alias: MONITOR_REDACT_DENY_REASON=1)
-  --experimental-agent-sandbox    delegate a headless run (-p) to the pinned agent-sandbox
-                                  library instead of the sandbox-container boot. Always a
-                                  throwaway session seeded from the current git checkout; the
-                                  delegated run has no monitor process or audit log.
+  --experimental-agent-sandbox    delegate this run (interactive, or headless with -p) to the
+                                  pinned agent-sandbox library instead of the sandbox-container
+                                  boot. Always a throwaway session seeded from the current git
+                                  checkout; the delegated run has no monitor process or audit
+                                  log.
 
 APOLLO WATCHER (opt-in; routes this session to a running Apollo Watcher, which SENDS
 this session's data — your prompts, the model's responses, every tool call — to
@@ -699,11 +700,11 @@ sessions)
   ;;
 esac
 
-# Experimental delegated headless launch: hand the whole session to the pinned
-# agent-sandbox library instead of the sandbox-container boot below. Headless
-# opt-in only (the delegated agent runs with no terminal attached); a refusal
-# is a user decision to make, not a wrapper bug, so the bug-report hint stays
-# quiet.
+# Experimental delegated launch: hand the whole session to the pinned
+# agent-sandbox library instead of the sandbox-container boot below.
+# Interactive sessions attach a terminal (the library refuses before bring-up
+# when stdin is not one); a refusal is a user decision to make, not a wrapper
+# bug, so the bug-report hint stays quiet.
 if "$_agent_sandbox_optin"; then
   # shellcheck source=lib/agent-sandbox-launch.bash disable=SC1091
   source "$_self_dir/lib/agent-sandbox-launch.bash"

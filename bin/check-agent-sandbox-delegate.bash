@@ -15,8 +15,9 @@
 #   4. The exported egress log is honest: it records the api.anthropic.com
 #      CONNECT the run must make, and records NO CONNECT to any host outside
 #      .devcontainer/domain-allowlist.json.
-#   5. Token/scratch hygiene: no workload.json scratch, no per-session
-#      workload-override.json, and no agent-sandbox volumes survive the run.
+#   5. Token/scratch hygiene: no file under the run's state dir contains the
+#      token, no workload.json scratch survives, and no agent-sandbox volumes
+#      survive the run.
 #
 # Requires docker, git, jq, and a REAL CLAUDE_CODE_OAUTH_TOKEN (capture with
 # `claude setup-token`); spends one small API call per run. The sandbox image
@@ -137,9 +138,12 @@ fi
 echo "    OK"
 
 echo "==> Check 5: no on-disk token copies survived the run..."
-mapfile -t overrides < <(find "$STATE_BASE" -type f -name workload-override.json 2>/dev/null)
-[[ "${#overrides[@]}" -eq 0 ]] ||
-  dump_log_and_fail "FAIL: token-carrying workload-override.json survived under the state dir: ${overrides[*]}"
+# Content sweep, not a filename check: the state dir's file layout belongs to
+# the pinned library and moves across pin bumps; the invariant is that no
+# surviving file — whatever its name — holds the token.
+token_leaks="$(grep -rlF -- "$CLAUDE_CODE_OAUTH_TOKEN" "$STATE_BASE" || true)" # allow-exit-suppress: grep exits 1 when no file holds the token — that IS the pass case
+[[ -z "$token_leaks" ]] ||
+  dump_log_and_fail "FAIL: the OAuth token survived on disk under the state dir: $token_leaks"
 shopt -s nullglob
 scratch=("${TMPDIR:-/tmp}"/claude-guard-agent-sandbox.*)
 shopt -u nullglob

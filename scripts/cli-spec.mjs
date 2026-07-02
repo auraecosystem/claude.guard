@@ -263,19 +263,20 @@ export const flags = [
   {
     name: "--experimental-agent-sandbox",
     category: "experimental",
-    completion:
-      "delegate a headless -p run to the pinned agent-sandbox library",
+    completion: "delegate this run to the pinned agent-sandbox library",
     help: [
-      "delegate a headless run (-p) to the pinned agent-sandbox",
-      "library instead of the sandbox-container boot. Always a",
-      "throwaway session seeded from the current git checkout; the",
-      "delegated run has no monitor process or audit log.",
+      "delegate this run (interactive, or headless with -p) to the",
+      "pinned agent-sandbox library instead of the sandbox-container",
+      "boot. Always a throwaway session seeded from the current git",
+      "checkout; the delegated run has no monitor process or audit",
+      "log.",
     ],
     man: [
-      "Delegate a headless run (-p/--print) to the pinned agent-sandbox library",
-      "instead of the sandbox-container boot. Always a throwaway session seeded",
-      "from the current git checkout; the delegated run has no monitor process or",
-      "audit log.",
+      "Delegate this run to the pinned agent-sandbox library instead of the",
+      "sandbox-container boot — interactive sessions attach a terminal, headless",
+      "(-p/--print) runs do not. Always a throwaway session seeded from the",
+      "current git checkout; the delegated run has no monitor process or audit",
+      "log.",
     ],
   },
   {
