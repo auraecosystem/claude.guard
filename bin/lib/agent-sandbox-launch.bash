@@ -1,12 +1,14 @@
 # shellcheck shell=bash
 # Contract: sourced into strict-mode (set -euo pipefail) callers; do not re-set shell options.
-# Experimental delegated headless launch (--experimental-agent-sandbox): author a
+# Experimental delegated launch (--experimental-agent-sandbox): author a
 # Workload record from the live domain allowlist and run it under the pinned
-# agent-sandbox library instead of the devcontainer/compose stack. Headless-only
-# (the library execs the agent with no terminal attached); otherwise
-# deliberately unfenced — the monitor/audit/hardener/redactor processes,
-# privacy tiers, resume, and persistence simply do not exist in the delegated
-# run, and the experimental flag leaves the session shape to the experimenter.
+# agent-sandbox library instead of the devcontainer/compose stack. Headless
+# (-p/--print) runs exec with no terminal attached; interactive runs attach one
+# (Workload tty:true — the library refuses before bring-up when stdin is not a
+# real terminal). Otherwise deliberately unfenced — the monitor/audit/hardener/
+# redactor processes, privacy tiers, resume, and persistence simply do not
+# exist in the delegated run, and the experimental flag leaves the session
+# shape to the experimenter.
 
 _AS_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=msg.bash disable=SC1091
@@ -17,7 +19,7 @@ source "$_AS_LAUNCH_DIR/agent-sandbox-resolve.bash"
 source "$_AS_LAUNCH_DIR/claude-auth.bash"
 # resolve_permission_mode: the delegated entrypoint must resolve the mode the
 # same way the container launch does, not re-derive it (drift would silently
-# change the gate the headless agent runs under).
+# change the gate the delegated agent runs under).
 # shellcheck source=launch.bash disable=SC1091
 source "$_AS_LAUNCH_DIR/launch.bash"
 # shellcheck source=trace.bash disable=SC1091
@@ -29,31 +31,36 @@ agent_sandbox_mode_requested() {
   [[ "${_agent_sandbox_optin:-false}" == "true" ]]
 }
 
-# agent_sandbox_refuse_unsupported CLAUDE_ARGS... — the one structural gate:
-# the delegated launch execs the agent with no terminal attached, so only a
-# headless (-p/--print) run can function. Everything else about the session
-# shape is the experimenter's business — the flag is experimental and unfenced
-# by design (the monitor/audit/watcher/privacy layers simply do not exist in
-# the delegated run, and the library itself fails loud on a non-git cwd).
-agent_sandbox_refuse_unsupported() {
+# agent_sandbox_is_headless CLAUDE_ARGS... — true when the forwarded args carry
+# -p/--print. Picks the authored Workload's tty: a headless run execs with no
+# terminal, anything else is an interactive session that must attach one (the
+# library refuses a tty:true launch before bring-up when stdin is not a real
+# terminal, so no wrapper-side precondition is needed).
+agent_sandbox_is_headless() {
   local _a
   for _a in "$@"; do
     case "$_a" in
     -p | --print) return 0 ;;
     esac
   done
-  cg_error "--experimental-agent-sandbox supports only headless runs (add -p '<prompt>') — the delegated launch runs the agent without a terminal attached."
   return 1
 }
 
 # agent_sandbox_write_workload OUT PERM_MODE REVIEW_BRANCH CLAUDE_ARGS... —
-# author the 0600 Workload record: the main sandbox image, a headless claude
-# entrypoint under the resolved permission mode, the egress allowlist mapped
-# from the live .devcontainer/domain-allowlist.json tiers (rw -> bare host,
-# ro -> {host, access:"ro"}), the headless OAuth token as workload env, and an
-# ephemeral git-seeded workspace whose writes land on REVIEW_BRANCH. The token
-# reaches jq through ITS environment, never any argv — /proc/<pid>/cmdline is
-# world-readable for the process's lifetime, /proc/<pid>/environ is owner-only.
+# author the 0600 Workload record: the main sandbox image, a claude entrypoint
+# under the resolved permission mode (tty follows the args — interactive unless
+# -p/--print), the egress allowlist mapped from the live
+# .devcontainer/domain-allowlist.json tiers (rw -> bare host,
+# ro -> {host, access:"ro"}), and an ephemeral git-seeded workspace whose
+# writes land on REVIEW_BRANCH. The library's default-on hardener/audit
+# services are switched off: SECURITY.md documents the delegated run as
+# monitorless with the egress log as the only session record, and enabling
+# them here would silently change that boundary. Only a headless run gets the
+# OAuth token as workload env — interactive claude ignores the env token and
+# signs in itself, so an interactive Workload carries no secret at all. The
+# token reaches jq through ITS environment, never any argv —
+# /proc/<pid>/cmdline is world-readable for the process's lifetime,
+# /proc/<pid>/environ is owner-only.
 agent_sandbox_write_workload() {
   local out="$1" perm_mode="$2" review_branch="$3"
   shift 3
@@ -65,26 +72,36 @@ agent_sandbox_write_workload() {
     cg_error "domain allowlist not found at $allowlist — this install is missing its access-control list, refusing to launch."
     return 1
   }
-  local tok
-  tok="$(claude_auth_resolve_token)" || return 1
-  [[ -n "$tok" ]] || {
-    cg_error "no Claude token configured — a headless delegated run needs one (run 'claude-guard setup-token', or export CLAUDE_CODE_OAUTH_TOKEN)."
-    return 1
-  }
+  local headless=false
+  if agent_sandbox_is_headless "$@"; then
+    headless=true
+  fi
+  local tok=""
+  if [[ "$headless" == true ]]; then
+    tok="$(claude_auth_resolve_token)" || return 1
+    [[ -n "$tok" ]] || {
+      cg_error "no Claude token configured — a headless delegated run needs one (run 'claude-guard setup-token', or export CLAUDE_CODE_OAUTH_TOKEN)."
+      return 1
+    }
+  fi
   local image="${CLAUDE_GUARD_IMAGE_MAIN:-secure-claude-sandbox:local}"
   # kcov-ignore-start  subshell opener + multi-line single-quoted jq program: kcov credits the invocation to its jq line, leaving the paren and the program's interior lines unattributed (test_agent_sandbox_launch_kcov.py drives both the success and failure paths)
   (
     umask 077
     CLAUDE_CODE_OAUTH_TOKEN="$tok" jq --arg image "$image" --arg branch "$review_branch" \
+      --argjson headless "$headless" \
       '{
         image: $image,
         entrypoint: (["claude", "--permission-mode"] + $ARGS.positional),
         user: "node",
-        env: {CLAUDE_CODE_OAUTH_TOKEN: env.CLAUDE_CODE_OAUTH_TOKEN},
+        tty: ($headless | not),
+        env: (if $headless then {CLAUDE_CODE_OAUTH_TOKEN: env.CLAUDE_CODE_OAUTH_TOKEN} else {} end),
         egress_allowlist: (.domains | to_entries
           | map(if .value == "rw" then .key else {host: .key, access: .value} end)),
         ephemeral: true,
         seed_from_git: {ref: "HEAD", review_branch: $branch},
+        hardener: false,
+        audit: false,
         backend: "local"
       }' \
       --args -- "$perm_mode" "$@" <"$allowlist" >"$out"
@@ -96,17 +113,15 @@ agent_sandbox_write_workload() {
 }
 
 # agent_sandbox_delegate CLAUDE_ARGS... — the delegated session end to end:
-# refuse unsupported shapes, verify the main image exists, resolve the pinned
-# library checkout, author the Workload, and run it against a private per-run
-# state directory. The Workload record and the library's per-session compose
-# override both carry the OAuth token on disk, so both are deleted when the run
-# ends — success or failure — while the egress log is kept as the audit record.
+# verify the main image exists, resolve the pinned library checkout, author the
+# Workload, and run it against a private per-run state directory. The Workload
+# scratch is scrubbed when the run ends — success or failure — while the egress
+# log is kept as the audit record.
 agent_sandbox_delegate() {
   agent_sandbox_mode_requested || {
     cg_error "agent_sandbox_delegate reached without --experimental-agent-sandbox — refusing (wrapper dispatch bug)."
     return 1
   }
-  agent_sandbox_refuse_unsupported "$@" || return 1
 
   local image="${CLAUDE_GUARD_IMAGE_MAIN:-secure-claude-sandbox:local}"
   docker image inspect "$image" >/dev/null 2>&1 || {
@@ -126,7 +141,7 @@ agent_sandbox_delegate() {
   # One id names the whole run, so the claude/sandbox-<id> review branch and the
   # run-<id> state dir (egress log) of the same session correlate. The state dir
   # is owner-only before the run starts: the library writes its per-session
-  # compose override (carrying the token) and the egress log under it.
+  # compose override and the egress log under it.
   local run_id state_dir workload_dir workload
   run_id="$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n')"
   state_dir="${XDG_STATE_HOME:-${HOME:-}/.local/state}/claude-guard/agent-sandbox/run-$run_id"
@@ -146,15 +161,25 @@ agent_sandbox_delegate() {
   }
 
   # Subshell so the token-cleanup trap cannot clobber the wrapper's own EXIT
-  # traps. The trap deletes every on-disk copy of the token (the Workload
-  # record's scratch dir and the library's per-session compose override) even
-  # when the run aborts mid-way; the egress log stays for the audit trail.
-  # The override path hardcodes the library's sessions/<project>/ layout —
-  # a pin bump that moves or renames workload-override.json must revisit this
-  # trap AND the e2e's check for it (bin/check-agent-sandbox-delegate.bash).
+  # traps. The scratch Workload record is the only claude-guard-written token
+  # copy on disk (the library delivers workload env through a transient
+  # env-file it unlinks itself, and its per-session compose override is
+  # value-free), so the trap removes just the scratch dir — even when the run
+  # aborts mid-way — while the egress log stays for the audit trail. The e2e
+  # (bin/check-agent-sandbox-delegate.bash) sweeps the state dir for the token
+  # to keep this division of labor honest across pin bumps.
   local rc=0
   ( # kcov-ignore-line  subshell opener: kcov credits the group's commands, not the paren
-    trap 'rm -rf -- "$workload_dir"; rm -f -- "$state_dir"/sessions/*/workload-override.json' EXIT
+    trap 'rm -rf -- "$workload_dir"' EXIT
+    # A signal death must still run the EXIT trap: an interactive session puts
+    # a user's Ctrl-C on this foreground process group, and whether bash runs
+    # EXIT traps when dying of an untrapped signal varies by version (macOS
+    # ships 3.2). The handlers are no-ops, not exits: claude treats Ctrl-C as
+    # cancel-generation and keeps running, so a deferred `exit 130` handler
+    # would fire after a later clean exit and misreport a successful session —
+    # a child genuinely killed by the signal already propagates 130/143.
+    trap ':' INT
+    trap ':' TERM
     AGENT_SANDBOX_STATE_DIR="$state_dir" "$checkout/bin/agent-sandbox" run "$workload"
   ) || rc=$?
   cg_trace "${TRACE_AGENT_SANDBOX_DELEGATED:-}" image="$image" rc="$rc"

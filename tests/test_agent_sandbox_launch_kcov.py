@@ -2,20 +2,28 @@
 """Drive bin/lib/agent-sandbox-launch.bash through its kcov vehicle, plus the
 wrapper's --experimental-agent-sandbox dispatch.
 
-The delegated launch has one structural gate — headless-only, because the
-library execs the agent with no terminal attached; the experimental flag is
-otherwise deliberately unfenced. The Workload record assertions are driven
-from the live domain-allowlist SSOT, and the delegate tests pin the token
-hygiene invariants: the OAuth token reaches the Workload's env — never any
-process argv, jq's included — and every on-disk copy (workload scratch, the
-library's compose override) is deleted after the run while the egress log is
-kept.
+The delegated launch authors tty from the forwarded args — headless
+(-p/--print) runs get tty:false, anything else is an interactive session with
+tty:true (the library fails loud before bring-up when stdin is not a real
+terminal); the experimental flag is otherwise deliberately unfenced. The
+Workload record assertions are driven from the live domain-allowlist SSOT, and
+the delegate tests pin the token hygiene invariants: only a headless run
+carries the OAuth token, it reaches the Workload's env — never any process
+argv, jq's included — the workload scratch (the only claude-guard-written
+token copy) is deleted after the run, no surviving state-dir file contains
+the token, and the egress log is kept. Interactive Workloads carry no token
+at all (interactive claude ignores the env token and signs in itself).
 """
 
 import json
 import os
+import signal
 import stat
+import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 from tests._helpers import (
     REPO_ROOT,
@@ -56,20 +64,34 @@ def _git_repo(tmp_path: Path) -> Path:
 
 def _fake_agent_sandbox_checkout(tmp_path: Path) -> Path:
     """A fake pinned checkout whose agent-sandbox stub records its argv, copies
-    the Workload it was handed, and plants the session files a real run leaves
-    (compose override carrying the token, egress log)."""
+    the Workload it was handed, and plants the session files a real run leaves:
+    the value-free compose override (which survives the run) and the egress
+    log. FAKE_AS_LEAK_TOKEN makes the stub leak the token-carrying Workload
+    into the state dir instead, proving the token-sweep assertion is not
+    vacuous."""
     checkout = tmp_path / "as-checkout"
     write_exe(
         checkout / "bin" / "agent-sandbox",
         "#!/bin/bash\n"
         'printf \'%s\\n\' "$*" >>"$FAKE_AS_LOG"\n'
         'cp "$2" "$FAKE_AS_STATE/workload-copy.json"\n'
+        '[[ -z "${FAKE_AS_SLEEP:-}" ]] || sleep "$FAKE_AS_SLEEP"\n'
         'mkdir -p "$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test"\n'
-        'cp "$2" "$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test/workload-override.json"\n'
+        'echo \'{"services":{"workload":{}}}\' >"$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test/workload-override.json"\n'
+        '[[ -z "${FAKE_AS_LEAK_TOKEN:-}" ]] || cp "$2" "$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test/leaked.json"\n'
         'echo "CONNECT api.anthropic.com:443" >"$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test/egress.log"\n'
         'exit "${FAKE_AS_RC:-0}"\n',
     )
     return checkout
+
+
+def _assert_no_token_in_state_dir(run_dir: Path) -> None:
+    """The library's surviving session files are value-free; no file under the
+    run's state dir may contain the token (matching check 5 of
+    bin/check-agent-sandbox-delegate.bash)."""
+    needle = TOKEN.encode()
+    leaks = [p for p in run_dir.rglob("*") if p.is_file() and needle in p.read_bytes()]
+    assert leaks == []
 
 
 def _delegate_env(tmp_path: Path, checkout: Path, docker_dir: Path) -> dict[str, str]:
@@ -93,6 +115,14 @@ def _docker_dir(tmp_path: Path, arms: str) -> Path:
     return d
 
 
+def _tokenless_env(tmp_path: Path) -> dict[str, str]:
+    """Host env with every Claude token source removed: the env var stripped
+    and XDG_CONFIG_HOME pointed at an empty dir so no token file resolves."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_OAUTH_TOKEN"}
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "empty-config")
+    return env
+
+
 # ── mode opt-in ──────────────────────────────────────────────────────────────
 
 
@@ -106,26 +136,25 @@ def test_mode_requested_false_without_opt_in(tmp_path):
     assert r.returncode == 1
 
 
-# ── the one structural gate: headless-only ───────────────────────────────────
+# ── headless detection (picks the Workload's tty) ────────────────────────────
 
 
-def test_refuses_interactive_without_print(tmp_path):
+def test_is_headless_with_short_print(tmp_path):
     repo = _git_repo(tmp_path)
-    r = _drive("refuse_unsupported", cwd=repo)
+    r = _drive("is_headless", "-p", "hi", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+
+def test_is_headless_with_long_print(tmp_path):
+    repo = _git_repo(tmp_path)
+    r = _drive("is_headless", "--print", "hi", cwd=repo)
+    assert r.returncode == 0, r.stderr
+
+
+def test_is_interactive_without_print(tmp_path):
+    repo = _git_repo(tmp_path)
+    r = _drive("is_headless", cwd=repo)
     assert r.returncode == 1
-    assert "supports only headless runs" in r.stderr
-
-
-def test_accepts_supported_headless_shape(tmp_path):
-    repo = _git_repo(tmp_path)
-    r = _drive("refuse_unsupported", "-p", "hi", cwd=repo)
-    assert r.returncode == 0, r.stderr
-
-
-def test_accepts_long_print_form(tmp_path):
-    repo = _git_repo(tmp_path)
-    r = _drive("refuse_unsupported", "--print", "hi", cwd=repo)
-    assert r.returncode == 0, r.stderr
 
 
 # ── workload authoring ───────────────────────────────────────────────────────
@@ -155,10 +184,15 @@ def test_write_workload_exact_record(tmp_path):
         "Reply with exactly OK",
     ]
     assert data["user"] == "node"
+    assert data["tty"] is False
     assert data["env"] == {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}
     assert data["ephemeral"] is True
     assert data["backend"] == "local"
     assert data["seed_from_git"] == {"ref": "HEAD", "review_branch": BRANCH}
+    # The library's hardener/audit services default ON; the delegated run pins
+    # them off so SECURITY.md's "those layers are absent" boundary stays true.
+    assert data["hardener"] is False
+    assert data["audit"] is False
     # Tier mapping driven from the SSOT the firewall reads: rw -> bare host,
     # ro -> {host, access}. Exact equality so a tier flip or a dropped domain
     # breaks here, not just in the live e2e.
@@ -168,6 +202,43 @@ def test_write_workload_exact_record(tmp_path):
         for key, val in domains.items()
     ]
     assert data["egress_allowlist"] == expected
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+def test_write_workload_interactive_exact_record_without_token(tmp_path):
+    """No -p/--print means an interactive session: the entrypoint is just
+    claude under the resolved mode and tty:true attaches the launcher's
+    terminal (the library refuses pre-bring-up without one). Interactive
+    claude ignores the env token and signs in itself, so no configured token
+    is required and the record carries no secret — nothing to seed means
+    nothing to leak. Exact equality on the full record so the security-
+    boundary keys (hardener/audit off, the allowlist tiers) are pinned in
+    this mode too, not only on the headless record."""
+    repo = _git_repo(tmp_path)
+    out = tmp_path / "workload.json"
+    r = run_capture(
+        [str(DRIVER), "write_workload", str(out), "auto", BRANCH],
+        env=_tokenless_env(tmp_path),
+        cwd=repo,
+    )
+    assert r.returncode == 0, r.stderr
+    domains = json.loads(ALLOWLIST.read_text())["domains"]
+    assert json.loads(out.read_text()) == {
+        "image": "secure-claude-sandbox:local",
+        "entrypoint": ["claude", "--permission-mode", "auto"],
+        "user": "node",
+        "tty": True,
+        "env": {},
+        "egress_allowlist": [
+            key if val == "rw" else {"host": key, "access": val}
+            for key, val in domains.items()
+        ],
+        "ephemeral": True,
+        "seed_from_git": {"ref": "HEAD", "review_branch": BRANCH},
+        "hardener": False,
+        "audit": False,
+        "backend": "local",
+    }
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
 
 
@@ -279,8 +350,6 @@ def test_write_workload_corrupt_allowlist_fails_loud(tmp_path):
 
 def test_write_workload_without_token_fails_loud(tmp_path):
     repo = _git_repo(tmp_path)
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_OAUTH_TOKEN"}
-    env["XDG_CONFIG_HOME"] = str(tmp_path / "empty-config")
     r = run_capture(
         [
             str(DRIVER),
@@ -291,7 +360,7 @@ def test_write_workload_without_token_fails_loud(tmp_path):
             "-p",
             "hi",
         ],
-        env=env,
+        env=_tokenless_env(tmp_path),
         cwd=repo,
     )
     assert r.returncode == 1
@@ -305,7 +374,7 @@ def test_write_workload_bad_token_file_perms_fail_closed(tmp_path):
     tok_file.parent.mkdir(parents=True)
     tok_file.write_text(TOKEN)
     tok_file.chmod(0o644)
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_OAUTH_TOKEN"}
+    env = _tokenless_env(tmp_path)
     env["XDG_CONFIG_HOME"] = str(cfg)
     r = run_capture(
         [
@@ -332,13 +401,6 @@ def test_delegate_refuses_without_opt_in(tmp_path):
     r = _drive("delegate", "-p", "hi", cwd=repo, STUB_AGENT_SANDBOX_OPTIN="false")
     assert r.returncode == 1
     assert "wrapper dispatch bug" in r.stderr
-
-
-def test_delegate_runs_refusals_first(tmp_path):
-    repo = _git_repo(tmp_path)
-    r = _drive("delegate", cwd=repo)
-    assert r.returncode == 1
-    assert "supports only headless runs" in r.stderr
 
 
 def test_delegate_missing_image_fails_loud(tmp_path):
@@ -378,10 +440,82 @@ def test_delegate_happy_path_runs_workload_and_cleans_token_files(tmp_path):
     run_id = runs[0].name.removeprefix("run-")
     assert data["seed_from_git"]["review_branch"] == f"claude/sandbox-{run_id}"
 
-    # Token-carrying files are gone; the egress log (audit record) is kept.
+    # The token-carrying scratch is gone, no surviving state-dir file holds the
+    # token, and the egress log (audit record) is kept alongside the library's
+    # value-free compose override.
     session = runs[0] / "sessions" / "agent-sandbox-test"
-    assert not (session / "workload-override.json").exists()
+    assert (session / "workload-override.json").exists()
+    _assert_no_token_in_state_dir(runs[0])
     assert (session / "egress.log").read_text().startswith("CONNECT api.anthropic.com")
+    assert list((tmp_path / "scratch").glob("claude-guard-agent-sandbox.*")) == []
+
+
+def test_delegate_interactive_workload_reaches_the_library(tmp_path):
+    """An interactive delegate (no -p) authors tty:true with the bare claude
+    entrypoint and hands it to the library unchanged — the library, not the
+    wrapper, owns the stdin-must-be-a-terminal refusal."""
+    repo = _git_repo(tmp_path)
+    checkout = _fake_agent_sandbox_checkout(tmp_path)
+    docker_dir = _docker_dir(tmp_path, "image) exit 0 ;;")
+    env = _delegate_env(tmp_path, checkout, docker_dir)
+    r = _drive("delegate", cwd=repo, **env)
+    assert r.returncode == 0, r.stderr
+    data = json.loads((Path(env["FAKE_AS_STATE"]) / "workload-copy.json").read_text())
+    assert data["entrypoint"] == ["claude", "--permission-mode", "auto"]
+    assert data["tty"] is True
+    assert data["env"] == {}
+
+
+def test_delegate_token_sweep_catches_a_planted_leak(tmp_path):
+    """Non-vacuity guard for the state-dir token sweep: a stub that leaks the
+    token-carrying Workload into the state dir must be caught by the same
+    helper the happy-path test relies on."""
+    repo = _git_repo(tmp_path)
+    checkout = _fake_agent_sandbox_checkout(tmp_path)
+    docker_dir = _docker_dir(tmp_path, "image) exit 0 ;;")
+    env = _delegate_env(tmp_path, checkout, docker_dir)
+    env["FAKE_AS_LEAK_TOKEN"] = "1"
+    r = _drive("delegate", "-p", "hi", cwd=repo, **env)
+    assert r.returncode == 0, r.stderr
+    runs = list((tmp_path / "state" / "claude-guard" / "agent-sandbox").glob("run-*"))
+    with pytest.raises(AssertionError):
+        _assert_no_token_in_state_dir(runs[0])
+
+
+def test_delegate_sigint_still_cleans_token_scratch(tmp_path):
+    """A user's Ctrl-C lands on the whole foreground process group — an
+    interactive session's normal interrupt path — and the token-carrying
+    scratch dir must still be scrubbed (the cleanup subshell traps INT/TERM
+    so a signal death cannot skip its EXIT trap)."""
+    repo = _git_repo(tmp_path)
+    checkout = _fake_agent_sandbox_checkout(tmp_path)
+    docker_dir = _docker_dir(tmp_path, "image) exit 0 ;;")
+    env = _delegate_env(tmp_path, checkout, docker_dir)
+    env["FAKE_AS_SLEEP"] = "30"
+    full_env = dict(os.environ)
+    full_env.pop("CLAUDE_PERMISSION_MODE", None)
+    full_env.update(env)
+    proc = subprocess.Popen(
+        [str(DRIVER), "delegate", "-p", "hi"],
+        env=full_env,
+        cwd=repo,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # The stub writes its argv log before sleeping; its existence means the
+    # library call is in flight and the scratch workload.json is on disk.
+    argv_log = Path(env["FAKE_AS_LOG"])
+    deadline = time.monotonic() + 20
+    while not argv_log.exists():
+        assert time.monotonic() < deadline, "stub never started"
+        time.sleep(0.05)
+    os.killpg(proc.pid, signal.SIGINT)
+    rc = proc.wait(timeout=20)
+    # Exactly 130 — bash reaps the interrupted child and exits normally. A
+    # driver dying OF the signal (rc -SIGINT) is the very failure the
+    # subshell's INT/TERM traps prevent, so it must fail here.
+    assert rc == 130
     assert list((tmp_path / "scratch").glob("claude-guard-agent-sandbox.*")) == []
 
 
@@ -395,7 +529,7 @@ def test_delegate_propagates_workload_exit_status_and_still_cleans_up(tmp_path):
     assert r.returncode == 7
     runs = list((tmp_path / "state" / "claude-guard" / "agent-sandbox").glob("run-*"))
     session = runs[0] / "sessions" / "agent-sandbox-test"
-    assert not (session / "workload-override.json").exists()
+    _assert_no_token_in_state_dir(runs[0])
     assert (session / "egress.log").exists()
     assert list((tmp_path / "scratch").glob("claude-guard-agent-sandbox.*")) == []
 
@@ -444,9 +578,8 @@ def test_delegate_write_workload_failure_removes_scratch(tmp_path):
     docker_dir = _docker_dir(tmp_path, "image) exit 0 ;;")
     env = _delegate_env(tmp_path, checkout, docker_dir)
     env.pop("CLAUDE_CODE_OAUTH_TOKEN")
-    clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_OAUTH_TOKEN"}
+    clean_env = _tokenless_env(tmp_path)
     clean_env.update(env)
-    clean_env["XDG_CONFIG_HOME"] = str(tmp_path / "empty-config")
     r = run_capture([str(DRIVER), "delegate", "-p", "hi"], env=clean_env, cwd=repo)
     assert r.returncode == 1
     assert "no Claude token configured" in r.stderr
@@ -497,16 +630,6 @@ def _run_wrapper(cwd: Path, args: list[str], path_dir: Path, **env: str):
     return run_capture([str(WRAPPER), *args], env=full_env, cwd=cwd)
 
 
-def test_wrapper_dispatch_refusal_is_user_error_not_bug(tmp_path):
-    repo = _git_repo(tmp_path)
-    path_dir = tmp_path / "bin"
-    path_dir.mkdir()
-    r = _run_wrapper(repo, ["--experimental-agent-sandbox"], path_dir)
-    assert r.returncode == 1
-    assert "supports only headless runs" in r.stderr
-    assert "--bug-report" not in r.stderr
-
-
 def test_wrapper_dispatch_delegates_end_to_end(tmp_path):
     repo = _git_repo(tmp_path)
     checkout = _fake_agent_sandbox_checkout(tmp_path)
@@ -525,3 +648,17 @@ def test_wrapper_dispatch_delegates_end_to_end(tmp_path):
     assert TOKEN not in argv_log
     data = json.loads((Path(env["FAKE_AS_STATE"]) / "workload-copy.json").read_text())
     assert data["entrypoint"] == ["claude", "--permission-mode", "auto", "-p", "hi"]
+    assert data["tty"] is False
+
+
+def test_wrapper_dispatch_interactive_end_to_end(tmp_path):
+    repo = _git_repo(tmp_path)
+    checkout = _fake_agent_sandbox_checkout(tmp_path)
+    docker_dir = _docker_dir(tmp_path, "image) exit 0 ;;")
+    env = _delegate_env(tmp_path, checkout, docker_dir)
+    env.pop("PATH")
+    r = _run_wrapper(repo, ["--experimental-agent-sandbox"], docker_dir, **env)
+    assert r.returncode == 0, r.stderr
+    data = json.loads((Path(env["FAKE_AS_STATE"]) / "workload-copy.json").read_text())
+    assert data["entrypoint"] == ["claude", "--permission-mode", "auto"]
+    assert data["tty"] is True

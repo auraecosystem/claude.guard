@@ -22,7 +22,7 @@ fn="$1"
 shift
 case "$fn" in
 mode_requested) agent_sandbox_mode_requested "$@" || exit $? ;;
-refuse_unsupported) agent_sandbox_refuse_unsupported "$@" || exit $? ;;
+is_headless) agent_sandbox_is_headless "$@" || exit $? ;;
 write_workload) agent_sandbox_write_workload "$@" || exit $? ;;
 delegate) agent_sandbox_delegate "$@" || exit $? ;;
 *)
