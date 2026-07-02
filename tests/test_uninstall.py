@@ -578,6 +578,20 @@ def test_managed_settings_stripped_when_marker_names_another_checkout(
     assert "Stripped" in r.stdout
 
 
+def test_managed_settings_left_when_no_marker(tmp_path: Path) -> None:
+    """A managed-settings file with no CLAUDE_GUARD_DIR marker at all — a user's own
+    hand-written policy claude-guard never touched — is left untouched: uninstall
+    only acts on files it can prove it (or another checkout) wrote."""
+    home = _fake_home(tmp_path)
+    body = json.dumps({"env": {}, "hooks": {}})
+    out = _write_managed(tmp_path, body)
+
+    r = _run(home, _stub_dir(tmp_path), tmp_path, managed=str(out))
+    assert r.returncode == 0, r.stderr
+    assert out.read_text() == body
+    assert "wasn't written by claude-guard" in r.stderr
+
+
 def test_managed_settings_absent_is_noop(tmp_path: Path) -> None:
     """No managed-settings file → reported and skipped (also exercises the absent
     daemon.json path)."""
