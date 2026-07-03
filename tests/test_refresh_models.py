@@ -160,6 +160,42 @@ def test_main_writes_when_changed(rm, tmp_path, monkeypatch):
     assert written["_comment"] == "c"  # preserved
 
 
+def test_main_failed_commit_preserves_prior_models_json(rm, tmp_path, monkeypatch):
+    # If the atomic swap fails mid-write, the previous models.json must survive
+    # byte-for-byte — a non-atomic write_text would already have truncated it.
+    # (Fails pre-fix: the direct write_text never raises here and clobbers the file.)
+    models = _seed(tmp_path)
+    original = models.read_bytes()
+    monkeypatch.setattr(
+        rm,
+        "fetch_litellm",
+        lambda *a, **k: {"claude-haiku-4-6": {"litellm_provider": "anthropic"}},
+    )
+
+    def boom(src, dst):
+        raise OSError("commit failed")
+
+    monkeypatch.setattr("os.replace", boom)
+    with pytest.raises(OSError, match="commit failed"):
+        rm.main(["--models-file", str(models)])
+    assert models.read_bytes() == original  # prior store untouched
+
+
+def test_main_write_leaves_no_temp_sibling(rm, tmp_path, monkeypatch):
+    # A successful write swaps the temp file into place, leaving no ".tmp" sibling.
+    models = _seed(tmp_path)
+    monkeypatch.setattr(
+        rm,
+        "fetch_litellm",
+        lambda *a, **k: {"claude-haiku-4-6": {"litellm_provider": "anthropic"}},
+    )
+    assert rm.main(["--models-file", str(models)]) is None
+    assert (
+        json.loads(models.read_text())["monitor_anthropic_weak"] == "claude-haiku-4-6"
+    )
+    assert not (tmp_path / "models.json.tmp").exists()
+
+
 def test_main_noop_when_current(rm, tmp_path, monkeypatch, capsys):
     models = _seed(tmp_path)
     monkeypatch.setattr(
