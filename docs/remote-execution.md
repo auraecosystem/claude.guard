@@ -7,8 +7,7 @@ nobody runs protects nobody. `claude-guard remote` is that command.
 The architecture and the security reasoning behind it live in
 [`remote-execution-design.md`](remote-execution-design.md) (the topology-B
 design brief). This page is the operator guide: what the command does and how to
-use it. **Modal and RunPod are wired up today**; Lambda is recognised and fails
-loudly until implemented.
+use it. **Modal, RunPod, and Lambda (vm-host) are wired up today.**
 
 ## Why ship the box to the compute (topology B)
 
@@ -183,6 +182,75 @@ available now is to mint a scoped, burnable key and pair it with spend caps, so 
 leak is bounded rather than open-ended. A relay design — the pod holds only a
 sentinel while a host-side component injects the real credential on requests
 bound for Anthropic's API — is tracked as a GitHub issue.
+
+## Lambda (vm-host)
+
+```bash
+export LAMBDA_API_KEY=…            # https://cloud.lambdalabs.com/api-keys
+export ANTHROPIC_API_KEY=…         # or CLAUDE_CODE_OAUTH_TOKEN — the agent's inference cred
+export GIT_TOKEN=… WANDB_API_KEY=…     # optional setup-phase creds, read from your shell env
+
+claude-guard remote lambda --repo https://github.com/me/experiment \
+  --instance-type gpu_1x_a10 --region us-east-1 --ssh-key-name my-lambda-key \
+  -- -p "run the eval and summarize results"
+```
+
+A Lambda on-demand instance is a **full VM** with root and Docker but **no
+KVM/nested-virt**, so Docker Sandboxes / Kata can't run there. gVisor's `runsc`
+with its default **systrap** platform needs no KVM and runs on any Linux VM, so
+this tier builds a real boundary the managed-pod tiers can't: the orchestrator
+runs **locally** under `python3` (stdlib only, no SDK) and drives the
+[Lambda Cloud API](https://cloud.lambdalabs.com/api/v1) to launch the VM, then
+SSHes in to:
+
+1. install a **pinned `runsc`** (a specific gVisor release, its download SHA-512
+   verified before install) and register it as a Docker runtime;
+2. start an in-VM **squid** egress proxy on a Docker `internal` network with no
+   route off it except through squid, enforcing this repo's
+   [`domain-allowlist.json`](../.devcontainer/domain-allowlist.json) hosts;
+3. run the agent container under **`--runtime=runsc`** on that internal network
+   with its proxy env pointed at squid — the agent's only egress path.
+
+This is also the documented recipe for **any full-VM host** (EC2, Hetzner): the
+same shape provisions any VM you can SSH into as root; Lambda is just the API
+driven here.
+
+The two-phase model still applies inside the agent container: the bootstrap
+clones the repo with the setup secrets present, then drops them (`env -i`) before
+running `claude` in `auto` mode (never a bypass mode, never the skip-permissions
+flag). The VM is always terminated in a `finally` — on completion **or** timeout,
+not in response to what the agent does.
+
+Three flags are required and enforced up front (a Lambda VM boots clean, so there
+is no local-tree mount):
+
+- **`--repo`** — the workspace arrives by cloning in the setup phase.
+- **`--instance-type`** — a Lambda instance-type name (e.g. `gpu_1x_a10`); the GPU
+  is encoded here, so `--gpu` is unused for lambda.
+- **`--region`** — a Lambda region name (e.g. `us-east-1`).
+- **`--ssh-key-name`** — the name of an SSH key **already registered** in your
+  Lambda account; the VM authorizes it and the launcher connects with the matching
+  local private key (`--ssh-key-path`, default `~/.ssh/<ssh-key-name>`). The VM's
+  host key is **pinned on first connect**; host-key checking is never disabled, so
+  a MITM on the provisioning channel fails hard rather than receiving the root
+  bootstrap and its secrets.
+
+### What this tier deliberately excludes
+
+To keep the vm-host tier slim it runs **only** runsc + the squid allowlist. It does
+**not** carry the image's hardener/monitor/ccr monitor processes, the
+iptables/ipset dynamic-refresh firewall (needs `NET_ADMIN` the runsc container
+isn't granted), a custom seccomp profile, or prewarm. The squid allowlist is
+**name-level only** (no ssl-bump): it admits or denies by hostname and cannot split
+read-only from read-write the way the local squid's per-method ACLs do — the honest,
+coarser boundary of this tier. **squid's access log is the egress record.** As with
+RunPod, no behavioral monitor runs outside the VM.
+
+The rendering, two-phase/secret-scrub, host-key-pinning, and squid-allowlist
+structure are covered by tests; the live VM lifecycle (Lambda API calls, SSH
+provisioning, teardown) is exercisable only against a real Lambda account, so
+validate it on your first live run. Inspect what would run with `--print-app` or
+`CLAUDE_REMOTE_DRY_RUN=1` first — neither touches Lambda.
 
 ## Credentials: minted narrow, never in the agent
 
