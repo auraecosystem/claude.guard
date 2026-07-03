@@ -7,8 +7,16 @@
 - No running commentary or filler — don't narrate tool use, restate my request, or recap after each step. Just do the work.
 - Save explanation for the END: a short overview of what changed and how it fits, plus anything I need to run it. Proportional to the change.
 - Be direct. Flag real risks once; skip unrequested caveats. Don't claim it works unless you ran it or read the code.
-- When proposing next steps or options, keep them broad and high-level — name the direction, not a fully-specified implementation. I'll ask for specifics once I've picked one. Don't pre-design hyper-specific solutions for paths I haven't chosen.
+- When proposing next steps or options, keep them broad and high-level — name the direction, not a fully-specified implementation. I'll ask for specifics once I've picked one. Don't pre-design hyper-specific solutions for paths I haven't chosen. (This governs proposing _future_ work in conversation; it is not license to checkpoint during an already-assigned task — see Autonomy below.)
 - Once per session, teach me something I likely don't know — a non-obvious fact, mechanism, or trade-off from what we touched. I'm a PhD AI researcher who architected this project, so skip CS/AI fundamentals and things I designed. I lack deep systems/infra/networking background (especially networking — no coursework); that's where the new material is, so build networking insights from CS-undergrad first principles, not jargon. Pick the most non-obvious thing, not the most teachable.
+
+## Autonomy: front-load questions, then run to completion
+
+- **Concentrate questions at the start.** Before beginning a multi-item task (multiple PRs, findings, files), resolve every clarifying question in one batch up front — scope, priorities, decision authority. Once work begins, no further questions.
+- **Never checkpoint mid-run.** Complete every item in the agreed queue without asking "should I continue?" or "move on to the next one?" — the answer is always yes. Stop mid-task only for a destructive/irreversible action or a genuine scope change the user must decide.
+- **Mid-run decisions are logged, not asked.** When a reversible design choice surfaces after work has begun, pick a sensible default, keep going, and record it under a `## Decisions made` heading in the PR description: what came up, the default chosen, and what would change under the alternative. The user reviews decisions asynchronously in the PR, not live in chat.
+- **Maintain a status checklist.** For multi-item tasks, post the item list at the start (in chat or the PR description) and tick items off as they complete — that is the supervision surface for a user running parallel sessions.
+- **Silent turns on non-actionable events.** A webhook/notification wake-up that needs no action (duplicate event, superseded-SHA cancellation, CI still running) gets no reply — end the turn with no text. Never post "all clear" / "nothing to do."
 
 ## GitHub access: `gh` locally, MCP tools on the web
 
