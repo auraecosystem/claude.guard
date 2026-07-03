@@ -987,26 +987,26 @@ def test_install_runsc_aborts_on_checksum_mismatch(tmp_path: Path) -> None:
     must abort non-zero at the `sha512sum -c` check — before the root `install` step
     — so a tampered binary never reaches /usr/local/bin. Runs as non-root precisely
     because the checksum failure aborts before any privileged step."""
-    # A fake curl: for a `.sha512` target write a valid-shaped but WRONG digest line
-    # naming the artifact; for the artifact itself write bytes that can't match it.
+    # A fake curl for the single `-O <url> -O <url> …` download: for each `-O`, write
+    # the url's basename. A `.sha512` gets a valid-shaped but WRONG digest naming its
+    # artifact; the artifact itself gets bytes that can't match it.
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     write_exe(
         fake_bin / "curl",
         r"""#!/usr/bin/env bash
-        out=""
         while [[ $# -gt 0 ]]; do
-          case "$1" in
-            -o) out="$2"; shift 2 ;;
-            *) shift ;;
-          esac
+          if [[ "$1" == "-O" ]]; then
+            name="${2##*/}"; shift 2
+            if [[ "$name" == *.sha512 ]]; then
+              printf '%0128d  %s\n' 0 "${name%.sha512}" > "$name"
+            else
+              printf 'tampered-bytes-that-match-no-checksum\n' > "$name"
+            fi
+          else
+            shift
+          fi
         done
-        if [[ "$out" == *.sha512 ]]; then
-          base="${out%.sha512}"; base="${base##*/}"
-          printf '%0128d  %s\n' 0 "$base" > "$out"
-        else
-          printf 'tampered-bytes-that-match-no-checksum\n' > "$out"
-        fi
         """,
     )
     proc = subprocess.run(

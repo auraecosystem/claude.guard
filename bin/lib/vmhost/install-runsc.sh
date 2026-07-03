@@ -31,15 +31,14 @@ workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 cd "$workdir" || exit 1
 
-# Download each artifact alongside gVisor's published SHA-512 and verify before
-# install. `sha512sum -c` fails loud (non-zero) on any mismatch, and `set -e`
-# aborts the whole provision -- a corrupted or tampered download never reaches
-# /usr/local/bin.
-for artifact in runsc containerd-shim-runsc-v1; do
-  curl -fsSL -o "$artifact" "${base}/${artifact}"
-  curl -fsSL -o "${artifact}.sha512" "${base}/${artifact}.sha512"
-  sha512sum -c "${artifact}.sha512"
-done
+# Download every artifact AND its gVisor-published .sha512 in a single curl, then
+# verify them all before install -- the check sits immediately after the download.
+# `sha512sum -c` fails loud (non-zero) on any mismatch and `set -e` aborts the whole
+# provision, so a corrupted or tampered download never reaches /usr/local/bin.
+curl -fsSL \
+  -O "${base}/runsc" -O "${base}/runsc.sha512" \
+  -O "${base}/containerd-shim-runsc-v1" -O "${base}/containerd-shim-runsc-v1.sha512"
+sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
 
 # Enforce the out-of-band pin on the runsc binary itself when provided.
 if [[ -n "$RUNSC_SHA512" ]]; then
