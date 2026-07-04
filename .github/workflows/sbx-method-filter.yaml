@@ -68,6 +68,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends squid-openssl
+          # The package's postinst enables and starts the systemd squid.service,
+          # which claims the default /run/squid.pid and binds port 3128 on every
+          # local address. A second squid sharing that pid file aborts with
+          # "Squid is already running" no matter which port it listens on, so the
+          # driver's throwaway instance can't start until this ambient one is gone.
+          sudo systemctl disable --now squid
 
       # Run the driver directly (not via pytest): it dies loud when squid is
       # missing, so this stays a real gate. The runner's passwordless sudo lets it

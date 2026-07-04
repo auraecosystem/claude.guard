@@ -287,6 +287,10 @@ write_squid_conf 127.0.0.2 "$RO_DOMAINS" >"$TMP/squid.conf" ||
 # loads hosts_file into its DNS cache at startup, so no external resolver is
 # consulted for the .test name and the request reaches the loopback origin.
 printf 'hosts_file %s\n' "$HOSTS_FILE" >>"$TMP/squid.conf"
+# Own pid file (not the default /run/squid.pid): squid aborts with "already
+# running" if another instance — e.g. a package-started system squid — holds the
+# default one, so keep this throwaway instance isolated from any ambient squid.
+printf 'pid_filename %s/squid.pid\n' "$TMP" >>"$TMP/squid.conf"
 
 # ── Load into a real squid and start it ──────────────────────────────────────
 status "validating and starting squid"
