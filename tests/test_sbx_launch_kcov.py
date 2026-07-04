@@ -76,29 +76,63 @@ def test_cli_available_false_when_absent(tmp_path):
 # ── sbx-detect: sbx_kvm_available ─────────────────────────────────────────
 
 
-def test_kvm_available_matches_host():
-    # /dev/kvm is not present in CI; the function reads the literal path, so we
-    # can't relocate it — instead assert the macOS arm (always true) and the
-    # Linux arm via the real /dev/kvm existence, whichever this host is.
-    r = _run(DETECT, "kvm_available")
-    kvm_here = Path("/dev/kvm").exists() or os.uname().sysname == "Darwin"
-    assert (r.returncode == 0) == kvm_here
+def test_kvm_available_true_when_device_present(tmp_path):
+    # A Linux uname stub plus an existing device node (via SBX_KVM_DEVICE) makes
+    # the KVM arm pass deterministically regardless of the host's /dev/kvm.
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    write_exe(stub / "uname", "#!/bin/bash\necho Linux\n")
+    dev = tmp_path / "kvm-node"
+    dev.write_text("")
+    r = _run(DETECT, "kvm_available", path_prefix=stub, SBX_KVM_DEVICE=str(dev))
+    assert r.returncode == 0, r.stderr
+
+
+def test_kvm_available_false_when_device_absent(tmp_path):
+    # Linux uname + SBX_KVM_DEVICE pointing at a missing node forces the
+    # no-virtualization result on any host, covering the negative arm.
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    write_exe(stub / "uname", "#!/bin/bash\necho Linux\n")
+    r = _run(
+        DETECT,
+        "kvm_available",
+        path_prefix=stub,
+        SBX_KVM_DEVICE=str(tmp_path / "absent"),
+    )
+    assert r.returncode == 1
+
+
+def test_kvm_available_true_on_macos(tmp_path):
+    # The Darwin arm returns 0 before any device check, even with SBX_KVM_DEVICE
+    # pointing at a missing node.
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    write_exe(stub / "uname", "#!/bin/bash\necho Darwin\n")
+    r = _run(
+        DETECT,
+        "kvm_available",
+        path_prefix=stub,
+        SBX_KVM_DEVICE=str(tmp_path / "absent"),
+    )
+    assert r.returncode == 0, r.stderr
 
 
 # ── sbx-detect: sbx_preflight ─────────────────────────────────────────────
 
 
 def test_preflight_fails_without_kvm_on_linux(tmp_path):
-    # A fake uname printing Linux + a tmp dir with no /dev/kvm-analog forces the
-    # no-virtualization guard deterministically. sbx_kvm_available reads the
-    # literal /dev/kvm, absent on CI runners, so on a KVM-equipped dev host this
-    # branch is instead covered by the real-uname kvm_available test above; here
-    # we assert the guard whenever /dev/kvm is genuinely absent.
-    if Path("/dev/kvm").exists():
-        return
+    # A Linux uname stub + SBX_KVM_DEVICE pointing at a missing node forces the
+    # no-virtualization guard deterministically on any host — including a
+    # KVM-equipped runner where the real /dev/kvm exists.
     stub = _stub_bin(tmp_path, sbx="#!/bin/bash\nexit 0\n")
     write_exe(stub / "uname", "#!/bin/bash\necho Linux\n")
-    r = _run(DETECT, "preflight", path_prefix=stub)
+    r = _run(
+        DETECT,
+        "preflight",
+        path_prefix=stub,
+        SBX_KVM_DEVICE=str(tmp_path / "absent"),
+    )
     assert r.returncode == 1
     assert "virtualization" in r.stderr.lower()
 

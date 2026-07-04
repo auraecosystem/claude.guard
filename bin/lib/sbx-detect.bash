@@ -15,12 +15,16 @@ sbx_cli_available() {
   command -v sbx >/dev/null 2>&1
 }
 
-# sbx_kvm_available — true when this host can run sbx's microVMs: /dev/kvm on
-# Linux, always true on macOS (Apple Silicon ships its own hypervisor; sbx
-# itself refuses Intel Macs with its own message).
+# sbx_kvm_available — true when this host can run sbx's microVMs: the KVM
+# character device on Linux, always true on macOS (Apple Silicon ships its own
+# hypervisor; sbx itself refuses Intel Macs with its own message). The device
+# path is read from SBX_KVM_DEVICE (default /dev/kvm) so a host exposing KVM at
+# a nonstandard node — and the coverage harness, which must reach the
+# no-virtualization branch on a runner that does expose /dev/kvm — can point it
+# elsewhere.
 sbx_kvm_available() {
   [[ "$(uname -s)" == "Darwin" ]] && return 0
-  [[ -e /dev/kvm ]]
+  [[ -e "${SBX_KVM_DEVICE:-/dev/kvm}" ]]
 }
 
 # sbx_preflight — verify this host can launch the sbx backend; on failure print
