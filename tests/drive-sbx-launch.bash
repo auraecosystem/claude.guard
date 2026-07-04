@@ -26,6 +26,7 @@ state_dir) _sbx_state_dir "$@" || exit $? ;;
 ensure_template) sbx_ensure_template "$@" || exit $? ;;
 session_base) sbx_session_base "$@" || exit $? ;;
 sandbox_name) sbx_sandbox_name "$@" || exit $? ;;
+session_kit) _sbx_session_kit "$@" || exit $? ;;
 teardown) sbx_teardown "$@" || exit $? ;;
 delegate) sbx_delegate "$@" || exit $? ;;
 *)

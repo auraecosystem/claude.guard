@@ -354,6 +354,84 @@ def test_sandbox_name_appends_workspace_basename(tmp_path):
     assert r.stdout.strip() == "cg-abcd1234-myrepo"
 
 
+# ── sbx-launch: _sbx_session_kit ──────────────────────────────────────────
+
+KIT_DIR = REPO_ROOT / "sbx-kit" / "kit"
+
+
+def test_session_kit_no_args_returns_template_unchanged(tmp_path):
+    # With no forwarded args, the shared in-tree template is used verbatim (no
+    # throwaway dir minted).
+    r = _run(LAUNCH, "session_kit", str(KIT_DIR), XDG_STATE_HOME=str(tmp_path / "s"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str(KIT_DIR)
+
+
+def test_session_kit_appends_args_to_entrypoint_argv(tmp_path):
+    # A synthesized kit preserves the baked entrypoint script and appends each
+    # forwarded arg as a JSON string before the run: array's closing bracket.
+    r = _run(
+        LAUNCH,
+        "session_kit",
+        str(KIT_DIR),
+        "--resume",
+        "with space",
+        XDG_STATE_HOME=str(tmp_path / "s"),
+    )
+    assert r.returncode == 0, r.stderr
+    out = Path(r.stdout.strip())
+    assert out.parent.name == "sbx" and out.name.startswith("session-kit.")
+    spec = (out / "spec.yaml").read_text()
+    assert (
+        '    run: ["/usr/local/bin/agent-entrypoint.sh", "--resume", "with space"]'
+        in spec
+    )
+
+
+def test_session_kit_json_encodes_special_chars(tmp_path):
+    # An arg carrying a double-quote must be JSON-escaped, not break the array.
+    r = _run(
+        LAUNCH,
+        "session_kit",
+        str(KIT_DIR),
+        'a"b',
+        XDG_STATE_HOME=str(tmp_path / "s"),
+    )
+    assert r.returncode == 0, r.stderr
+    spec = (Path(r.stdout.strip()) / "spec.yaml").read_text()
+    assert r'"a\"b"]' in spec
+
+
+def test_session_kit_fails_loud_when_mktemp_fails(tmp_path):
+    # The state dir is created fine (mkdir), but minting the throwaway kit dir
+    # fails — fail loud rather than proceed with no dir.
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    write_exe(stub / "mktemp", "#!/bin/bash\nexit 1\n")
+    r = _run(
+        LAUNCH,
+        "session_kit",
+        str(KIT_DIR),
+        "--resume",
+        path_prefix=stub,
+        XDG_STATE_HOME=str(tmp_path / "s"),
+    )
+    assert r.returncode == 1
+    assert "per-session kit directory" in r.stderr
+
+
+def test_session_kit_fails_loud_when_no_run_array(tmp_path):
+    # A spec missing the entrypoint run: array cannot carry forwarded args.
+    bad = tmp_path / "badkit"
+    bad.mkdir()
+    (bad / "spec.yaml").write_text("kind: sandbox\nname: x\n")
+    r = _run(
+        LAUNCH, "session_kit", str(bad), "--resume", XDG_STATE_HOME=str(tmp_path / "s")
+    )
+    assert r.returncode == 1
+    assert "could not find the entrypoint run:" in r.stderr
+
+
 # ── sbx-launch: sbx_teardown ──────────────────────────────────────────────
 
 
@@ -533,31 +611,91 @@ def test_delegate_refuses_ccr_base_url(tmp_path):
     assert "cannot honor" in r.stderr
 
 
-def test_delegate_refuses_forwarded_args(tmp_path):
+def _spec_dumping_sbx(log: Path) -> str:
+    """A fake sbx that logs its argv and, on `create --kit <dir> <base>`, also
+    appends the kit's rendered spec.yaml so a test can prove which entrypoint
+    argv the session kit carried."""
+    return (
+        "#!/bin/bash\n"
+        f'echo "$@" >>"{log}"\n'
+        'if [ "$1" = create ] && [ "$2" = --kit ]; then\n'
+        f'  {{ echo "--- spec $3 ---"; cat "$3/spec.yaml"; }} >>"{log}"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def test_delegate_forwards_args_into_session_kit(tmp_path):
+    # A forwarded claude arg (--resume) must reach the kit entrypoint argv: the
+    # delegate materializes a per-session kit whose spec.yaml appends the arg to
+    # the baked run: array, and create/run point at that synthesized kit.
+    log = tmp_path / "sbx.log"
+    docker = (
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  build) exit 0 ;;\n"
+        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
+        '         [ "$2" = save ] && exit 0 ;;\n'
+        "esac\nexit 0\n"
+    )
+    stub = _stub_bin(
+        tmp_path,
+        sbx=_spec_dumping_sbx(log),
+        docker=docker,
+        python3=SBX_SERVICES_PYTHON3_STUB,
+        darwin=True,
+    )
     r = _run(
         LAUNCH,
         "delegate",
         "--resume",
+        path_prefix=stub,
         CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
+        SBX_MONITOR_PORT=str(free_port()),
+        SBX_AUDIT_SINK_PORT=str(free_port()),
+        CLAUDE_GUARD_SBX_ALLOW_FLATTENED="1",
+        XDG_STATE_HOME=str(tmp_path / "s"),
+        SBX_MONITOR_POLL_INTERVAL="0.05",
     )
-    assert r.returncode == 1
-    assert "does not forward" in r.stderr
+    assert r.returncode == 0, r.stderr
+    body = log.read_text()
+    # create/run point at a synthesized session kit under the state dir…
+    assert "create --kit " in body and "/session-kit." in body
+    assert "run --kit " in body
+    # …whose spec preserves the baked entrypoint and appends the forwarded arg.
+    assert '"/usr/local/bin/agent-entrypoint.sh", "--resume"]' in body
 
 
-def test_delegate_refuses_args_after_privacy_flag(tmp_path):
-    # --privacy is consumed, but anything after it is still an unforwardable
-    # claude argument.
+def test_delegate_forwards_args_after_privacy_flag(tmp_path):
+    # --privacy is consumed by the delegate; args after it are forwarded to
+    # claude via the session kit, appended AFTER the baked "--privacy e2ee" argv.
+    log = tmp_path / "sbx.log"
+    docker = (
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  build) exit 0 ;;\n"
+        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
+        '         [ "$2" = save ] && exit 0 ;;\n'
+        "esac\nexit 0\n"
+    )
+    stub = _stub_bin(tmp_path, sbx=_spec_dumping_sbx(log), docker=docker, darwin=True)
     r = _run(
         LAUNCH,
         "delegate",
         "--privacy",
         "e2ee",
         "--resume",
+        path_prefix=stub,
         CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
+        SBX_MONITOR_PORT=str(free_port()),
+        SBX_AUDIT_SINK_PORT=str(free_port()),
+        XDG_STATE_HOME=str(tmp_path / "s"),
     )
-    assert r.returncode == 1
-    assert "does not forward" in r.stderr
-    assert "--resume" in r.stderr
+    assert r.returncode == 0, r.stderr
+    body = log.read_text()
+    assert (
+        '"/usr/local/bin/agent-entrypoint.sh", "--privacy", "e2ee", "--resume"]' in body
+    )
 
 
 def test_delegate_refuses_unknown_privacy_mode(tmp_path):
@@ -856,6 +994,38 @@ def test_delegate_privacy_refuses_skip_firewall_and_tears_down(tmp_path):
     assert "policy allow network all" not in body
     assert "run --kit" not in body
     assert "rm cg-" in body
+
+
+def test_delegate_aborts_when_create_fails(tmp_path):
+    # `sbx create` fails: the delegate reaps the host services, cleans any
+    # synthesized session kit, and never reaches `sbx run`.
+    log = tmp_path / "sbx.log"
+    docker = (
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  build) exit 0 ;;\n"
+        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
+        '         [ "$2" = save ] && exit 0 ;;\n'
+        "esac\nexit 0\n"
+    )
+    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\n[ "$1" = create ] && exit 1\nexit 0\n'
+    stub = _stub_bin(
+        tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
+    )
+    r = _run(
+        LAUNCH,
+        "delegate",
+        path_prefix=stub,
+        CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
+        SBX_MONITOR_PORT=str(free_port()),
+        SBX_AUDIT_SINK_PORT=str(free_port()),
+        CLAUDE_GUARD_SBX_ALLOW_FLATTENED="1",
+        XDG_STATE_HOME=str(tmp_path / "s"),
+        SBX_MONITOR_POLL_INTERVAL="0.05",
+    )
+    assert r.returncode == 1
+    assert "could not create sandbox" in r.stderr
+    assert "run --kit" not in log.read_text()
 
 
 def test_delegate_surfaces_teardown_leak_on_clean_session(tmp_path):
