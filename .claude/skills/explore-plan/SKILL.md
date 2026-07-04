@@ -32,7 +32,7 @@ immediately** — do not stop, do not call `ExitPlanMode`/`AskUserQuestion`, do 
 unapproved plan and go idle. If exploration surfaces a wrong premise or a design fork, pick the
 sensible default, record it under `## Decisions made`, and keep going; the plan file is a live
 working document you update as you go, never a gate. The user launched work to come back to
-*results*, not to a plan prompt.
+_results_, not to a plan prompt.
 
 ## 3. Review (fresh, unbiased)
 
