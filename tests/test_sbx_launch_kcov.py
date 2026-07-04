@@ -22,10 +22,6 @@ from tests._helpers import REPO_ROOT, run_capture, write_exe
 DETECT = REPO_ROOT / "tests" / "drive-sbx-detect.bash"
 LAUNCH = REPO_ROOT / "tests" / "drive-sbx-launch.bash"
 
-# A KVM shim so a Linux CI host without /dev/kvm still exercises the "KVM
-# present" arm: sbx_kvm_available checks a path we point at a real file.
-_FAKE_KVM = "#!/bin/bash\nexit 0\n"
-
 
 def _stub_bin(
     tmp_path: Path,
@@ -80,7 +76,7 @@ def test_cli_available_false_when_absent(tmp_path):
 # ── sbx-detect: sbx_kvm_available ─────────────────────────────────────────
 
 
-def test_kvm_available_true_when_dev_kvm_present(tmp_path, monkeypatch):
+def test_kvm_available_matches_host():
     # /dev/kvm is not present in CI; the function reads the literal path, so we
     # can't relocate it — instead assert the macOS arm (always true) and the
     # Linux arm via the real /dev/kvm existence, whichever this host is.
