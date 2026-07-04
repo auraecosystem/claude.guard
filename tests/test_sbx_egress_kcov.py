@@ -289,6 +289,14 @@ def _archive_stub(tmp_path: Path, policy_json: str = POLICY_JSON) -> Path:
     return d
 
 
+def _only_snapshot(dest: Path) -> Path:
+    """The single finished snapshot in dest (forensic_snapshot_name stamps are
+    unpredictable, so tests locate the snapshot by glob, not by name)."""
+    snaps = sorted(dest.glob("*.json"))
+    assert len(snaps) == 1, snaps
+    return snaps[0]
+
+
 def test_archive_writes_the_policy_log_snapshot(tmp_path):
     stub = _archive_stub(tmp_path)
     root = tmp_path / "egress"
@@ -298,11 +306,29 @@ def test_archive_writes_the_policy_log_snapshot(tmp_path):
         "cg-t-repo",
         path_prefix=stub,
         CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
-        SBX_EGRESS_SNAPSHOT_STAMP="20260704T120000Z",
     )
     assert r.returncode == 0, r.stderr
-    snap = root / "cg-t-repo" / "20260704T120000Z.json"
-    assert snap.read_text() == POLICY_JSON + "\n"
+    dest = root / "cg-t-repo"
+    assert _only_snapshot(dest).read_text() == POLICY_JSON + "\n"
+
+
+def test_archive_snapshot_is_owner_only(tmp_path):
+    """The policy log is the session's credential-adjacent traffic record:
+    the snapshot must land 0600 in a 0700 dir (the forensic_persist_snapshot
+    guarantee the compose archive gets), never at the ambient umask."""
+    stub = _archive_stub(tmp_path)
+    root = tmp_path / "egress"
+    r = _run(
+        EGRESS,
+        "archive",
+        "cg-t-repo",
+        path_prefix=stub,
+        CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
+    )
+    assert r.returncode == 0, r.stderr
+    dest = root / "cg-t-repo"
+    assert dest.stat().st_mode & 0o777 == 0o700
+    assert _only_snapshot(dest).stat().st_mode & 0o777 == 0o600
 
 
 def test_archive_skips_an_empty_log(tmp_path):
@@ -365,11 +391,9 @@ def test_archive_writes_an_object_shape_log_with_entries(tmp_path):
         "cg-t-repo",
         path_prefix=stub,
         CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
-        SBX_EGRESS_SNAPSHOT_STAMP="20260704T120000Z",
     )
     assert r.returncode == 0, r.stderr
-    snap = root / "cg-t-repo" / "20260704T120000Z.json"
-    assert snap.read_text() == body + "\n"
+    assert _only_snapshot(root / "cg-t-repo").read_text() == body + "\n"
 
 
 def test_archive_keeps_an_unparseable_log(tmp_path):
@@ -382,11 +406,9 @@ def test_archive_keeps_an_unparseable_log(tmp_path):
         "cg-t-repo",
         path_prefix=stub,
         CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
-        SBX_EGRESS_SNAPSHOT_STAMP="20260704T120000Z",
     )
     assert r.returncode == 0, r.stderr
-    snap = root / "cg-t-repo" / "20260704T120000Z.json"
-    assert snap.read_text() == "not json at all\n"
+    assert _only_snapshot(root / "cg-t-repo").read_text() == "not json at all\n"
 
 
 def test_archive_keeps_only_the_newest_snapshots(tmp_path):
@@ -394,6 +416,9 @@ def test_archive_keeps_only_the_newest_snapshots(tmp_path):
     root = tmp_path / "egress"
     dest = root / "cg-t-repo"
     dest.mkdir(parents=True)
+    # Pre-seeded stamps sort lexically (== chronologically) before any stamp
+    # the archive mints now, so keep=2 must retain the newest pre-seed plus
+    # the fresh snapshot and prune the two older pre-seeds.
     for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
         (dest / f"{stamp}.json").write_text("[]")
     r = _run(
@@ -403,13 +428,12 @@ def test_archive_keeps_only_the_newest_snapshots(tmp_path):
         path_prefix=stub,
         CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
         CLAUDE_EGRESS_ARCHIVE_KEEP="2",
-        SBX_EGRESS_SNAPSHOT_STAMP="20260704T120000Z",
     )
     assert r.returncode == 0, r.stderr
-    assert sorted(p.name for p in dest.iterdir()) == [
-        "20260103T000000Z.json",
-        "20260704T120000Z.json",
-    ]
+    names = sorted(p.name for p in dest.iterdir())
+    assert len(names) == 2, names
+    assert names[0] == "20260103T000000Z.json"
+    assert (dest / names[1]).read_text() == POLICY_JSON + "\n"
 
 
 def test_archive_fails_loud_when_policy_log_unreadable(tmp_path):
@@ -439,25 +463,26 @@ def test_archive_fails_loud_when_dest_uncreatable(tmp_path):
         CLAUDE_EGRESS_ARCHIVE_DIR=str(blocker / "egress"),
     )
     assert r.returncode == 1
-    assert "archive directory" in r.stderr
+    assert "NOT archived" in r.stderr
 
 
-def test_archive_fails_loud_when_snapshot_unwritable(tmp_path):
-    # The predicted snapshot path already exists as a DIRECTORY, so the write
-    # itself fails after mkdir succeeded — the write guard, not the dir guard.
+def test_archive_fails_loud_when_dest_is_a_file(tmp_path):
+    # The per-sandbox dest itself is squatted by a regular file, so
+    # forensic_persist_snapshot's post-condition check fails after
+    # `mkdir -p` exits 0 — the persist guard, not the parent-dir guard.
     stub = _archive_stub(tmp_path)
     root = tmp_path / "egress"
-    (root / "cg-t-repo" / "20260704T120000Z.json").mkdir(parents=True)
+    root.mkdir()
+    (root / "cg-t-repo").write_text("not a dir")
     r = _run(
         EGRESS,
         "archive",
         "cg-t-repo",
         path_prefix=stub,
         CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
-        SBX_EGRESS_SNAPSHOT_STAMP="20260704T120000Z",
     )
     assert r.returncode == 1
-    assert "could not write" in r.stderr
+    assert "NOT archived" in r.stderr
 
 
 # ── sbx_delegate / sbx_teardown wiring (via the sbx-launch vehicle) ───────
@@ -563,10 +588,9 @@ def test_teardown_archives_the_policy_log_before_removal(tmp_path):
         "cg-x-repo",
         path_prefix=stub,
         CLAUDE_EGRESS_ARCHIVE_DIR=str(root),
-        SBX_EGRESS_SNAPSHOT_STAMP="20260704T120000Z",
     )
     assert r.returncode == 0, r.stderr
-    snap = root / "cg-x-repo" / "20260704T120000Z.json"
+    snap = _only_snapshot(root / "cg-x-repo")
     assert snap.read_text() == '[{"host":"x","decision":"deny"}]\n'
     lines = log.read_text().splitlines()
     assert lines.index("policy log cg-x-repo --json") < lines.index("rm cg-x-repo")

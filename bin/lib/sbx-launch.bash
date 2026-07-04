@@ -187,7 +187,7 @@ sbx_delegate() {
     return 1
   }
   sbx_egress_apply "$name" || {
-    sbx_teardown "$name" || true
+    sbx_teardown "$name" || true # allow-exit-suppress: the apply failure is the error being returned; teardown prints its own fail-loud leak message
     return 1
   }
 

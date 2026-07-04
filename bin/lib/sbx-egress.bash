@@ -19,6 +19,8 @@ source "$_SBX_EGRESS_DIR/msg.bash"
 source "$_SBX_EGRESS_DIR/trace.bash"
 # shellcheck source=forensic-registry.bash disable=SC1091
 source "$_SBX_EGRESS_DIR/forensic-registry.bash"
+# shellcheck source=forensic-volume.bash disable=SC1091
+source "$_SBX_EGRESS_DIR/forensic-volume.bash"
 
 # Datadog's telemetry intake stays blocked BY DESIGN (the sbx CLI's own
 # telemetry gets no egress hole punched for it — bin/check-sbx-lifecycle.bash
@@ -97,16 +99,16 @@ sbx_egress_log() {
 }
 
 # sbx_egress_archive NAME — snapshot NAME's policy log to
-# <egress archive root>/NAME/<UTC>.json, keeping the newest
-# $CLAUDE_EGRESS_ARCHIVE_KEEP (default 10) snapshots — the same root and
-# retention shape as the compose squid-log archive, so post-session readers
-# look in one place regardless of backend. An empty log archives nothing
-# (mirrors the compose path); any failure is loud, because after `sbx rm` this
-# snapshot is the only record of the session's outbound traffic.
-# SBX_EGRESS_SNAPSHOT_STAMP overrides the timestamp (test seam — snapshot
-# names must be predictable to drive the retention and write-failure arms).
+# <egress archive root>/NAME/<UTC>.json via forensic_persist_snapshot (0600
+# snapshot in a 0700 dir, atomic rename, same-second-safe names), keeping the
+# newest $CLAUDE_EGRESS_ARCHIVE_KEEP (default 10) snapshots — the same root,
+# write path, and retention shape as the compose squid-log archive, so
+# post-session readers look in one place regardless of backend. An empty log
+# archives nothing (mirrors the compose path); any failure is loud, because
+# after `sbx rm` this snapshot is the only record of the session's outbound
+# traffic.
 sbx_egress_archive() {
-  local name="$1" keep="${CLAUDE_EGRESS_ARCHIVE_KEEP:-10}" root dest snap log
+  local name="$1" keep="${CLAUDE_EGRESS_ARCHIVE_KEEP:-10}" root dest log
   root="$(forensic_stream_field egress archive_root)"
   dest="$root/$name"
   log="$(sbx_egress_log "$name")" || {
@@ -123,18 +125,8 @@ sbx_egress_archive() {
   if jq -e '[.. | objects | select(has("host"))] | length == 0' <<<"$log" >/dev/null 2>&1; then
     return 0
   fi
-  mkdir -p "$dest" 2>/dev/null
-  [[ -d "$dest" ]] || {
-    cg_error "could not create the archive directory $dest — the session's outgoing-traffic record was NOT archived."
+  forensic_persist_snapshot "$log" "$dest" json "$keep" || {
+    cg_error "could not write the policy-log snapshot under $dest — the session's outgoing-traffic record was NOT archived."
     return 1
   }
-  snap="$dest/${SBX_EGRESS_SNAPSHOT_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}.json"
-  printf '%s\n' "$log" >"$snap" 2>/dev/null || {
-    cg_error "could not write $snap — the session's outgoing-traffic record was NOT archived."
-    return 1
-  }
-  local old
-  while IFS= read -r old; do
-    rm -f -- "$old"
-  done < <(find "$dest" -maxdepth 1 -name '*.json' | sort -r | tail -n +$((keep + 1)))
 }
