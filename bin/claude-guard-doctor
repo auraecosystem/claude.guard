@@ -342,6 +342,245 @@ def report_version() -> None:
     kv("version", stack_version())
 
 
+def selected_backend() -> str:
+    """The sandbox backend the next launch dispatches to, resolved exactly as the
+    wrapper does: CLAUDE_GUARD_SANDBOX_BACKEND, defaulting (like `:-`, so an empty
+    value too) to sbx."""
+    return os.environ.get("CLAUDE_GUARD_SANDBOX_BACKEND") or "sbx"
+
+
+def skip_unless_compose(label: str) -> bool:
+    """Gate for compose-only sections: when the compose backend is not selected,
+    print the one-line dim skip row under `label` and return True so the caller
+    returns — an sbx-backend install must not be failed (or misled) by compose
+    machinery a launch would never touch."""
+    if selected_backend() == "compose":
+        return False
+    kv(label, Text("skipped — compose backend not selected", style="dim"))
+    return True
+
+
+def report_backend() -> None:
+    """Which sandbox backend the next launch uses — the headline fact the rest of
+    the report is read against. An unrecognized value makes the wrapper refuse
+    every launch, so that alone is UNPROTECTED."""
+    section("Sandbox backend")
+    backend = selected_backend()
+    if backend == "sbx":
+        kv(
+            "backend",
+            Text.assemble(
+                ("sbx", "bold"),
+                ("  — microVM sandboxes (Docker Sandboxes), the default", "dim"),
+            ),
+        )
+        return
+    if backend == "compose":
+        kv(
+            "backend",
+            Text.assemble(
+                ("compose", "bold"),
+                (
+                    "  — container sandboxes (CLAUDE_GUARD_SANDBOX_BACKEND=compose)",
+                    "dim",
+                ),
+            ),
+        )
+        return
+    kv(
+        "backend",
+        mark(
+            BAD_SYMBOL,
+            f"unknown CLAUDE_GUARD_SANDBOX_BACKEND '{backend}' — expected 'compose' or 'sbx'",
+            "red",
+        ),
+    )
+    unprotected.append(
+        f"unknown CLAUDE_GUARD_SANDBOX_BACKEND '{backend}' — every launch refuses "
+        "to start; expected 'compose' or 'sbx'"
+    )
+
+
+def report_sbx_backend() -> None:
+    """Health of the sbx microVM backend (Docker Sandboxes): the sbx CLI, hardware
+    virtualization, login, the host squid the read-only web filter needs, and the
+    flattened opt-out. Informational skip when sbx is not the selected backend."""
+    section("sbx backend (Docker Sandboxes)")
+    backend = selected_backend()
+    if backend == "compose":
+        kv(
+            "sbx backend",
+            Text("not selected — sessions use the compose backend", style="dim"),
+        )
+        return
+    if backend != "sbx":
+        kv(
+            "sbx backend",
+            Text(
+                "skipped — the backend setting is not recognized "
+                "(see 'Sandbox backend' above)",
+                style="dim",
+            ),
+        )
+        return
+    for lib in ("sbx-detect.bash", "sbx-method-filter.bash"):
+        if not (LIB / lib).is_file():
+            errs.print(
+                mark(BAD_SYMBOL, f"lib/{lib} not found — cannot check the sbx backend")
+            )
+            unprotected.append(f"{lib} missing (broken install)")
+            return
+
+    # One bash invocation yields every sbx fact via the same libs the launcher's
+    # preflight and method-filter use, emitted as a single JSON object read by
+    # field name. `sbx version` doubles as the CLI-works check (the same probe
+    # sbx_preflight runs); `sbx ls` is the cheapest already-used login signal.
+    # _sbx_mf_require_binaries resolves squid + certgen with its own candidate
+    # lists — a var it left empty is that binary missing.
+    probe = run_bash(
+        f'source "{LIB}/json.bash"\n'
+        f'source "{LIB}/sbx-detect.bash"\n'
+        f'source "{LIB}/sbx-method-filter.bash"\n'
+        "sbx_cli_available && cli=true || cli=false\n"
+        "sbx_kvm_available && kvm=true || kvm=false\n"
+        "_sbx_mf_flattened_accepted && fl=true || fl=false\n"
+        "_sbx_mf_require_binaries 2>/dev/null || true\n"
+        '[ -n "${_SBX_MF_SQUID:-}" ] && squid=true || squid=false\n'
+        '[ -n "${_SBX_MF_CERTGEN:-}" ] && certgen=true || certgen=false\n'
+        'ver=""; ver_ok=false; login=not-checked\n'
+        'if [ "$cli" = true ] && out="$(sbx version 2>/dev/null)"; then\n'
+        "  ver_ok=true\n"
+        "  ver=\"${out%%$'\\n'*}\"\n"
+        "fi\n"
+        'if [ "$ver_ok" = true ]; then\n'
+        "  if sbx ls >/dev/null 2>&1; then login=ok; else login=failed; fi\n"
+        "fi\n"
+        'printf \'{"cli":%s,"kvm":%s,"flattened":%s,"squid":%s,"certgen":%s,'
+        '"version_ok":%s,"version":%s,"login":%s}\\n\' '
+        '"$cli" "$kvm" "$fl" "$squid" "$certgen" "$ver_ok" '
+        '"$(json_string "$ver")" "$(json_string "$login")"\n',
+        timeout=DOCTOR_DOCKER_TIMEOUT,
+    )
+    facts = probe_facts(probe)
+    if facts is MALFORMED_PROBE:
+        errs.print(mark(BAD_SYMBOL, "sbx probe BROKEN (probe emitted non-JSON)"))
+        unprotected.append("sbx probe BROKEN — emitted non-JSON output")
+        return
+    if facts is None:
+        errs.print(
+            mark(BAD_SYMBOL, "sbx probe failed — could not check the sbx backend")
+        )
+        unprotected.append("sbx probe failed — could not verify the sbx backend")
+        return
+
+    if facts["kvm"]:
+        kv(
+            "microVM support",
+            mark(OK_SYMBOL, "hardware virtualization available", "green"),
+        )
+    else:
+        kv(
+            "microVM support",
+            mark(BAD_SYMBOL, "NO hardware virtualization (/dev/kvm)", "red"),
+        )
+        unprotected.append(
+            "the sbx sandbox needs hardware virtualization (/dev/kvm), which this "
+            "host does not expose — there is no software fallback; inside a VM, "
+            "enable nested virtualization; on bare metal, enable VT-x/AMD-V in "
+            "firmware (macOS on Apple Silicon is also supported)"
+        )
+
+    if not facts["cli"]:
+        kv("sbx CLI", mark(BAD_SYMBOL, "not found on PATH", "red"))
+        unprotected.append(
+            "the 'sbx' CLI is not installed — a sandboxed launch cannot start; "
+            "install the docker-sbx package (https://docs.docker.com/ai/sandboxes/) "
+            "and run 'sbx login' once"
+        )
+    elif facts["version_ok"]:
+        ver = facts["version"]
+        kv(
+            "sbx CLI",
+            mark(OK_SYMBOL, f"working ({ver})" if ver else "working", "green"),
+        )
+    else:
+        kv("sbx CLI", mark(BAD_SYMBOL, "installed but 'sbx version' fails", "red"))
+        unprotected.append(
+            "'sbx version' failed — the sbx CLI is installed but not working (is "
+            "your user in the kvm group, and have you run 'sbx login'?)"
+        )
+
+    login = facts["login"]
+    if login == "ok":
+        kv("login", mark(OK_SYMBOL, "logged in ('sbx ls' succeeds)", "green"))
+    elif login == "failed":
+        kv(
+            "login",
+            mark(
+                WARN_SYMBOL,
+                "'sbx ls' fails — run 'sbx login' (or check that the sbx service is running)",
+                "yellow",
+            ),
+        )
+        degraded.append(
+            "'sbx ls' failed — the sbx CLI cannot list sandboxes (most often 'sbx "
+            "login' has not been run); a launch would fail at 'sbx create'"
+        )
+    else:
+        kv("login", Text("not checked — the sbx CLI is not working", style="dim"))
+
+    # Read-only web tier: without the host squid filter, sbx's own network policy
+    # has a single writable tier, so a launch refuses to start (fail-closed) unless
+    # the operator explicitly accepted the flattened posture.
+    if facts["flattened"]:
+        kv(
+            "read-only filter",
+            mark(
+                WARN_SYMBOL,
+                "OFF by choice (CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1) — every "
+                "allowed domain is writable (upload-capable)",
+                "yellow",
+            ),
+        )
+        degraded.append(
+            "CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1 — sessions run WITHOUT the "
+            "read-only tier: every allowed domain is writable (upload-capable); "
+            "unset it to restore the read-only/read-write distinction"
+        )
+    elif not facts["squid"]:
+        kv("read-only filter", mark(BAD_SYMBOL, "'squid' not found on the host", "red"))
+        unprotected.append(
+            "the sbx read-only filter needs 'squid' (with ssl-bump) on the host, "
+            "but it was not found — a launch refuses to start without it. Install "
+            "it (Debian/Ubuntu: 'apt-get install squid-openssl'; macOS: 'brew "
+            "install squid'), or set CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1 to run "
+            "WITHOUT the read-only tier — a security trade-off: every allowed "
+            "domain becomes writable (upload-capable)"
+        )
+    elif not facts["certgen"]:
+        kv(
+            "read-only filter",
+            mark(
+                BAD_SYMBOL,
+                "squid found but its 'security_file_certgen' helper is missing",
+                "red",
+            ),
+        )
+        unprotected.append(
+            "found squid but not its 'security_file_certgen' helper — this squid "
+            "build lacks ssl-bump support, and a launch refuses to start without "
+            "it. Install an ssl-bump-enabled squid (Debian/Ubuntu: 'apt-get "
+            "install squid-openssl'), or set CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1 "
+            "to run WITHOUT the read-only tier — a security trade-off: every "
+            "allowed domain becomes writable (upload-capable)"
+        )
+    else:
+        kv(
+            "read-only filter",
+            mark(OK_SYMBOL, "squid + security_file_certgen found on the host", "green"),
+        )
+
+
 def on_wsl2() -> bool:
     """True on WSL2, which reports uname as Linux but tags /proc/version with
     'microsoft'. Used to explain why a KVM-less WSL2 host gets runsc, not Kata."""
@@ -353,6 +592,8 @@ def on_wsl2() -> bool:
 
 def report_container_runtime() -> None:
     section("Container runtime")
+    if skip_unless_compose("runtime"):
+        return
     if not (LIB / "runtime-detect.bash").is_file():
         errs.print(
             mark(
@@ -535,17 +776,21 @@ def report_container_runtime() -> None:
 
 
 def report_required_tools() -> None:
-    # docker/devcontainer/uv/timeout/python3 are load-bearing — without them
-    # `claude` cannot start a container. The wrapper bounds `devcontainer up` with
-    # `timeout` and has no fallback (unlike session-setup.sh, which guards it), so
-    # a missing `timeout` makes every sandboxed launch die with a misleading "exit
-    # 127" before the sandbox comes up — on macOS setup.bash installs a
-    # gtimeout→timeout shim for exactly this reason. python3 backs this doctor and
-    # the launcher's redaction/secret-scan helpers (redact-debug-stream.py,
-    # secret-ignore.py). jq/curl/dig only back host-mode firewall+monitor
-    # plumbing, so their absence degrades not blocks.
+    # docker/uv/timeout/python3 are load-bearing on every backend — without them
+    # `claude` cannot start a sandbox. The devcontainer CLI boots only the compose
+    # stack (the sbx backend builds and runs microVMs without it), so it is
+    # critical only when the compose backend is selected. The wrapper bounds
+    # `devcontainer up` with `timeout` and has no fallback (unlike
+    # session-setup.sh, which guards it), so a missing `timeout` makes every
+    # sandboxed launch die with a misleading "exit 127" before the sandbox comes
+    # up — on macOS setup.bash installs a gtimeout→timeout shim for exactly this
+    # reason. python3 backs this doctor and the launcher's redaction/secret-scan
+    # helpers (redact-debug-stream.py, secret-ignore.py). jq/curl/dig only back
+    # host-mode firewall+monitor plumbing, so their absence degrades not blocks.
     section("Required tools")
-    critical = ("docker", "devcontainer", "uv", "timeout", "python3")
+    critical = ["docker", "uv", "timeout", "python3"]
+    if selected_backend() == "compose":
+        critical.insert(1, "devcontainer")
     # orb is the OrbStack management CLI; macOS-only since OrbStack doesn't run on Linux.
     advisory = ("jq", "curl", "dig") + (("orb",) if sys.platform == "darwin" else ())
 
@@ -687,6 +932,8 @@ def report_resources() -> None:
     so flag the shortfall here instead. Informational when memory is sufficient or
     the daemon doesn't report a parseable MemTotal (no false degrade)."""
     section("Resources")
+    if skip_unless_compose("resources"):
+        return
     if (
         not which("docker")
         or run_bash("docker ps", timeout=DOCTOR_DOCKER_TIMEOUT).returncode != 0
@@ -741,6 +988,8 @@ def report_docker_cli_plugins() -> None:
     # satisfied by the plugin OR a standalone docker-compose (the devcontainer
     # CLI's fallback).
     section("Docker CLI plugins")
+    if skip_unless_compose("plugins"):
+        return
     if not which("docker"):
         kv("plugins", Text("n/a (docker not installed)", style="dim"))
         return
@@ -845,6 +1094,8 @@ def report_launch_preconditions() -> None:
     a cryptic `docker compose up` error. Degrades only when the subnet pool is
     actually exhausted; the launcher auto-fixes the rest, so those are notes."""
     section("Launch preconditions")
+    if skip_unless_compose("preconditions"):
+        return
     if (
         not which("docker")
         or run_bash("docker ps", timeout=DOCTOR_DOCKER_TIMEOUT).returncode != 0
@@ -1732,6 +1983,8 @@ def report_launch_plan() -> None:
     CLAUDE_GUARD_NO_PREBUILT). Reuses the facts the doctor already gathers; it does
     NOT re-validate the environment (the readiness checklist owns that)."""
     section("Launch plan (preview)")
+    if skip_unless_compose("plan"):
+        return
 
     state, ref = _launch_plan_image()
     cosign_ok = bool(which("cosign"))
@@ -1808,6 +2061,8 @@ def report_prebuilt_image() -> None:
     # surface any error and leave it ready — a build that fails is UNPROTECTED (a
     # sandboxed launch cannot happen), not a silent OK.
     section("Prebuilt sandbox image")
+    if skip_unless_compose("image status"):
+        return
     cosign = which("cosign")
     kv_state(
         "cosign",
@@ -1961,6 +2216,8 @@ def report_sandbox_claude_version() -> None:
     so a surprising in-container version is diagnosable from the host. Informational:
     the baked claude is always a working fallback, so nothing here gates the verdict."""
     section("Sandbox Claude Code version")
+    if skip_unless_compose("sandbox claude-code"):
+        return
     pkg = SELF_DIR.parent / "package.json"
     if not ((LIB / "claude-resolve.bash").is_file() and pkg.is_file()):
         kv(
@@ -2345,6 +2602,7 @@ def main() -> None:
     )
     console.print()
     report_version()
+    report_backend()
     # --plan is a focused launch preview, not the full environment checklist: show
     # what the next launch would do (and how slow), optionally verify the key live.
     if args.plan:
@@ -2352,6 +2610,7 @@ def main() -> None:
         if args.monitor_test:
             report_monitor_auth()
         _print_verdict_and_bundle(args.bug_report)
+    report_sbx_backend()
     report_container_runtime()
     report_required_tools()
     report_docker_daemon()

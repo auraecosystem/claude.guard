@@ -209,6 +209,11 @@ def _run(
         "PATH": path,
         "HOME": str(home),
         "CLAUDE_GUARD_MANAGED_SETTINGS": str(home / "managed-settings.json"),
+        # This suite drives the compose-backend sections (container runtime,
+        # launch preconditions, prebuilt image), which the doctor gates behind
+        # the selected backend now that the default is sbx. The sbx section has
+        # its own in-process coverage in test_doctor_unit.py.
+        "CLAUDE_GUARD_SANDBOX_BACKEND": "compose",
         **env_overrides,
     }
     return run_capture([str(DOCTOR), *extra_args], env=env, cwd=cwd)
@@ -983,7 +988,13 @@ def _run_on_pty(stubs: Path, home: Path, **env_overrides: str) -> str:
     path = f"{stubs}:/usr/bin:/bin"
     # A real terminal sets TERM; without it bash defaults to "dumb", which the
     # doctor (correctly) treats as no-color. Simulate an ordinary terminal.
-    env = {"PATH": path, "HOME": str(home), "TERM": "xterm", **env_overrides}
+    env = {
+        "PATH": path,
+        "HOME": str(home),
+        "TERM": "xterm",
+        "CLAUDE_GUARD_SANDBOX_BACKEND": "compose",
+        **env_overrides,
+    }
     leader, follower = pty.openpty()
     pid = os.fork()
     if pid == 0:  # child: redirect stdout+stderr to the pty follower, then exec
@@ -1851,6 +1862,7 @@ def _run_supp(stubs: Path, home: Path, **env_overrides: str):
         "PATH": path,
         "HOME": str(home),
         "CLAUDE_GUARD_MANAGED_SETTINGS": str(home / "managed-settings.json"),
+        "CLAUDE_GUARD_SANDBOX_BACKEND": "compose",
         **env_overrides,
     }
     return run_capture([str(DOCTOR)], env=env)
