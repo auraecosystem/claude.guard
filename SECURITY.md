@@ -805,6 +805,9 @@ doesn't close it.
   hard boundary behind all of this is the sandbox. The agent-facing SessionStart
   note names the walls but not this list, to avoid handing a prompt-injected
   agent its bypass map; the gaps live here, for maintainers.
+- **Remote execution (`claude-guard remote`) does not carry these layers.** Each
+  provider tier has a different, generally weaker posture — see the tier table
+  in [`docs/remote-execution.md`](docs/remote-execution.md#security-posture-by-tier).
 
 ---
 
