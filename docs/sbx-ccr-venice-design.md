@@ -221,7 +221,8 @@ sbx secret set-custom --help   # confirm the argument shape FIRST (see the
                                # positional-scope gotcha above), then store the
                                # key bound to the `venice` service name
 # in a kit with the network: block above, from inside a FRESHLY CREATED sandbox:
-curl -s https://api.venice.ai/api/v1/models -H 'Authorization: Bearer proxy-managed'
+curl -s https://api.venice.ai/api/v1/models \
+  -H 'Authorization: Bearer proxy-managed' # gitleaks:allow — the literal sentinel, not a secret
 # expect: an authenticated model listing (proxy swapped the sentinel);
 # a 401 means the swap did not happen — check `sbx policy log --json` and the
 # secret's scope, then RECREATE (not restart) the sandbox.
