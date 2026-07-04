@@ -132,9 +132,19 @@ def test_check_allow_rejects_ripgrep(mon, command):
 
 # The safe-list is a latency optimization that only applies when a human
 # approves each Bash call. The prompting/non-prompting classification is the
-# _MODE_HAS_HUMAN_PROMPT SSOT in allowlist.py; driving the test from the enum
-# means a new PermissionMode member gets a case automatically, and the
-# totality test below forces it to be classified at all.
+# _MODE_HAS_HUMAN_PROMPT SSOT in allowlist.py; the expectations below are an
+# INDEPENDENT copy on purpose — deriving them from the SSOT would make a
+# flipped classification (a mutant, or an accidental edit) flip the
+# expectation with it and pass vacuously. Driving the cases from the enum
+# means a new PermissionMode member gets a case automatically (KeyError here
+# until classified), and the totality test below forces the SSOT entry too.
+_EXPECTED_MODE_SKIP = {
+    "default": True,
+    "auto": False,
+    "acceptEdits": True,
+    "bypassPermissions": False,
+    "plan": True,
+}
 
 
 def test_mode_prompt_classification_is_total(mon):
@@ -143,13 +153,21 @@ def test_mode_prompt_classification_is_total(mon):
     assert set(mon.allowlist._MODE_HAS_HUMAN_PROMPT) == set(mon.PermissionMode)
 
 
+def test_mode_prompt_classification_matches_expected(mon):
+    # Pin each SSOT value against the independent copy, so a flipped
+    # classification is caught even for modes whose skip path another test
+    # doesn't independently exercise.
+    got = {m.value: v for m, v in mon.allowlist._MODE_HAS_HUMAN_PROMPT.items()}
+    assert got == _EXPECTED_MODE_SKIP
+
+
 def _mode_cases():
     from tests.monitor_unit._support import _load
 
     m = _load()
     return [
-        pytest.param(mode, has_prompt, id=f"bash-{mode.value}")
-        for mode, has_prompt in m.allowlist._MODE_HAS_HUMAN_PROMPT.items()
+        pytest.param(mode, _EXPECTED_MODE_SKIP[mode.value], id=f"bash-{mode.value}")
+        for mode in m.PermissionMode
     ]
 
 
