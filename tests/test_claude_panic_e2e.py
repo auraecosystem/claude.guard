@@ -40,6 +40,13 @@ from tests._helpers import (
     run_capture,
     write_exe,
 )
+from tests.test_claude_panic import (
+    SBX_BASE,
+    SBX_LS_LISTING,
+    SBX_NAME,
+    sbx_stub_body,
+    seed_sbx_state,
+)
 
 # covers: bin/claude-guard-panic
 PANIC = REPO_ROOT / "bin" / "claude-guard-panic"
@@ -123,6 +130,9 @@ def e2e_sandbox(tmp_path: Path):
     workspace.mkdir()
     stub_dir = tmp_path / "stubs"
     write_exe(stub_dir / "docker", _REAL_READER_DOCKER)
+    # The sbx stub keeps this suite hermetic on a host with a real `sbx`
+    # (whose sandboxes panic would otherwise list and remove).
+    write_exe(stub_dir / "sbx", sbx_stub_body())
     panic_dir = tmp_path / "panic"
     panic_dir.mkdir()
     fake_home = tmp_path / "home"
@@ -293,6 +303,29 @@ def test_e2e_report_sha256_matches_real_archived_bytes(e2e_sandbox) -> None:
 # ──────────────────────────────────────────────────────────────────────────── #
 # Kill switch + evidence retention, exercised against the real archive chain.
 # ──────────────────────────────────────────────────────────────────────────── #
+
+
+def test_e2e_sbx_session_files_flow_to_snapshot_and_are_hashed(e2e_sandbox) -> None:
+    """The sbx host-side session files ride the same real cp + sha256 chain as
+    the docker artifacts: the bytes in the snapshot are the seeded bytes, and
+    the report's integrity anchor hashes exactly those bytes."""
+    sb = e2e_sandbox
+    (sb["audit_fix"] / "audit.jsonl").write_text('{"seq":0}\n')
+    seed_sbx_state(sb["panic_dir"])
+
+    r = _run_panic(sb, FAKE_SBX_LS=SBX_LS_LISTING)
+    assert r.returncode == 0, r.stderr
+    snap = _latest_snapshot(sb["panic_dir"])
+    report = (snap / "panic-report.md").read_text(encoding="utf-8")
+    for name in (
+        f"sbx-{SBX_BASE}-audit.jsonl",
+        f"sbx-{SBX_BASE}-filter-access.log",
+        f"sbx-{SBX_NAME}-outgoing-traffic.json",
+    ):
+        digest = hashlib.sha256((snap / name).read_bytes()).hexdigest()
+        assert f"{name}: {digest}" in report, (
+            f"report sha256 for {name} does not match the bytes on disk"
+        )
 
 
 def test_e2e_stops_containers_but_retains_volumes(e2e_sandbox) -> None:

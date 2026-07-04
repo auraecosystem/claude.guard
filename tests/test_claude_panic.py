@@ -4,8 +4,9 @@ claude-guard-panic is best-effort by design: each step (archive audit, archive
 egress, per-container docker logs, stop) is isolated so a partial failure
 yields a partial-but-useful snapshot. The tests pin that contract — they
 verify the snapshot layout, the report contents, the ntfy behavior, and the
-isolation between steps. Docker and curl are both stubbed on PATH so the
-suite is hermetic.
+isolation between steps. Docker, sbx, and curl are all stubbed on PATH so the
+suite is hermetic — the sbx stub is mandatory, not optional: on a host with a
+real `sbx`, an unstubbed run would list REAL sandboxes and `sbx rm` them.
 """
 
 import os
@@ -119,6 +120,70 @@ def _docker_stub_body(*, has_containers: bool = True) -> str:
     )
 
 
+def sbx_stub_body() -> str:
+    """A fake `sbx` CLI for the panic tests (imported by the sibling panic
+    suites). STATE fake (issue #373 doctrine): it stands in for *the host's
+    sandbox runtime state* — which sandboxes exist, their outgoing-traffic
+    logs, whether removal succeeds — not for the real CLI's argument contract.
+    Env knobs:
+      SBX_LOG              file recording every invocation's argv (one line each)
+      FAKE_SBX_LS          `sbx ls` stdout (unset/empty: no sandboxes)
+      FAKE_SBX_LS_RC       `sbx ls` exit code (default 0)
+      FAKE_SBX_POLICY_LOG  `sbx policy log NAME --json` stdout
+                           (default: policy-log-for-<NAME>)
+      FAKE_SBX_POLICY_RC   its exit code (default 0)
+      FAKE_SBX_RM_RC       `sbx rm NAME` exit code (default 0)
+    The default arm fails loud: an unstubbed subcommand means the test reached
+    an sbx call it never modelled."""
+    return (
+        "#!/bin/bash\n"
+        '[[ -n "${SBX_LOG:-}" ]] && printf "%s\\n" "$*" >>"$SBX_LOG"\n'
+        'case "$1" in\n'
+        "  ls)\n"
+        '    [[ -n "${FAKE_SBX_LS:-}" ]] && printf "%s\\n" "$FAKE_SBX_LS"\n'
+        '    exit "${FAKE_SBX_LS_RC:-0}" ;;\n'
+        "  policy)\n"
+        # argv is `policy log <name> --json`, so $3 is the sandbox name.
+        '    printf "%s\\n" "${FAKE_SBX_POLICY_LOG:-policy-log-for-$3}"\n'
+        '    exit "${FAKE_SBX_POLICY_RC:-0}" ;;\n'
+        "  rm)\n"
+        '    exit "${FAKE_SBX_RM_RC:-0}" ;;\n'
+        '  *) echo "fake sbx: unhandled subcommand $1" >&2; exit 1 ;;\n'
+        "esac\n"
+    )
+
+
+# One session's worth of sbx names: the services/method-filter state dirs are
+# keyed by the BASE (sbx_session_base's cg-<8 hex>), the live sandbox by
+# BASE-<workspace dirname> (sbx_sandbox_name).
+SBX_BASE = "cg-aabbccdd"
+SBX_NAME = f"{SBX_BASE}-workspace"
+# A realistic `sbx ls`: a header line and a non-claude-guard sandbox, both of
+# which the conservative parse must skip.
+SBX_LS_LISTING = f"NAME STATUS\n{SBX_NAME} RUNNING\nother-sandbox RUNNING"
+
+
+def seed_sbx_state(state_home: Path, base: str = SBX_BASE) -> dict[str, Path]:
+    """Seed the host-side per-session sbx state panic snapshots (imported by
+    the sibling panic suites): services/<base>/ with the audit log, service
+    logs, signing key, and the poll.stop teardown flag (which must NOT be
+    copied), plus method-filter-run/<base>/ with the filter's logs and an
+    ssl_db subdir (a non-file entry the copy loop must skip)."""
+    services = state_home / "claude-guard" / "sbx" / "services" / base
+    services.mkdir(parents=True)
+    (services / "audit.jsonl").write_text('{"ts":"t","tool":"Bash"}\n')
+    (services / "monitor.log").write_text("monitor started\n")
+    (services / "audit-sink.log").write_text("sink started\n")
+    (services / "secret").write_text("deadbeef" * 8 + "\n")
+    (services / "poll.stop").write_text("")
+    mf = state_home / "claude-guard" / "sbx" / "method-filter-run" / base
+    mf.mkdir(parents=True)
+    (mf / "access.log").write_text("1.2.3.4 CONNECT api.anthropic.com:443\n")
+    (mf / "squid.log").write_text("squid ready\n")
+    (mf / "ssl_db").mkdir()
+    return {"services": services, "method_filter": mf}
+
+
 def _clean_env(panic_dir: Path, stub_dir: Path, **extra: str) -> dict[str, str]:
     """Env that points claude-guard-panic at our temp panic dir, prepends the docker
     stub to PATH, and drops anything that would change resolution."""
@@ -128,6 +193,7 @@ def _clean_env(panic_dir: Path, stub_dir: Path, **extra: str) -> dict[str, str]:
         CLAUDE_PANIC_DIR=str(panic_dir),
         XDG_STATE_HOME=str(panic_dir.parent),
         DOCKER_LOG=str(stub_dir / "docker.log"),
+        SBX_LOG=str(stub_dir / "sbx.log"),
         HOME=str(panic_dir.parent),  # so ntfy config is not picked up
     )
     env.update(extra)
@@ -147,7 +213,11 @@ def panic_sandbox(tmp_path: Path):
 
 
 def _install_stub(stub_dir: Path, body: str) -> None:
+    """Install the docker stub AND the default sbx stub. The sbx stub is not
+    cosmetic: without it, a host with a real `sbx` would have panic list — and
+    `sbx rm` — the developer's real sandboxes."""
     write_exe(stub_dir / "docker", body)
+    write_exe(stub_dir / "sbx", sbx_stub_body())
 
 
 def _latest_snapshot(panic_dir: Path) -> Path:
@@ -496,6 +566,173 @@ def test_no_containers_yields_warns_but_does_not_crash(panic_sandbox) -> None:
     report = (snap / "panic-report.md").read_text(encoding="utf-8")
     assert "[WARN] identify containers" in report
     assert "[WARN] stop containers" in report
+
+
+# ──────────────────────────────────────────────────────────────────────────── #
+# sbx sandbox arm: snapshot the host-side session state, capture the network
+# decision log, remove every claude-guard sandbox (and only those).
+# ──────────────────────────────────────────────────────────────────────────── #
+
+
+def test_sbx_sessions_snapshotted_and_removed(panic_sandbox) -> None:
+    """The whole sbx arm end to end: host-side session files land in the
+    snapshot (poll.stop and the ssl_db subdir skipped), the per-sandbox
+    outgoing-traffic log is captured, the `sbx ls` listing is preserved, and
+    every claude-guard sandbox — and ONLY claude-guard's (cg-…) — is removed."""
+    workspace, stub_dir, panic_dir = panic_sandbox
+    _install_stub(stub_dir, _docker_stub_body(has_containers=False))
+    seeded = seed_sbx_state(panic_dir.parent)
+    r = run_capture(
+        [str(PANIC), "--workspace", str(workspace)],
+        env=_clean_env(panic_dir, stub_dir, FAKE_SBX_LS=SBX_LS_LISTING),
+    )
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    snap = _latest_snapshot(panic_dir)
+
+    listing = (snap / "sbx-sandboxes.txt").read_text(encoding="utf-8")
+    assert SBX_NAME in listing and "other-sandbox" in listing
+
+    # Session files copied byte-for-byte, keyed by the session base.
+    for name in ("audit.jsonl", "monitor.log", "audit-sink.log", "secret"):
+        copied = snap / f"sbx-{SBX_BASE}-{name}"
+        assert copied.read_text(encoding="utf-8") == (
+            seeded["services"] / name
+        ).read_text(encoding="utf-8"), f"{name} not copied verbatim"
+    assert not (snap / f"sbx-{SBX_BASE}-poll.stop").exists(), (
+        "poll.stop is a teardown flag, not evidence"
+    )
+    for name in ("access.log", "squid.log"):
+        copied = snap / f"sbx-{SBX_BASE}-filter-{name}"
+        assert copied.read_text(encoding="utf-8") == (
+            seeded["method_filter"] / name
+        ).read_text(encoding="utf-8"), f"filter {name} not copied verbatim"
+
+    # The network decision log was captured for the LIVE sandbox name.
+    policy = (snap / f"sbx-{SBX_NAME}-outgoing-traffic.json").read_text(
+        encoding="utf-8"
+    )
+    assert policy == f"policy-log-for-{SBX_NAME}\n"
+
+    report = (snap / "panic-report.md").read_text(encoding="utf-8")
+    assert "[OK] identify sandboxes — 1 sandbox(es)" in report, report
+    assert "[OK] remove sandboxes — removed 1" in report, report
+    assert "sandboxes removed: 1 of 1" in report, report
+    # Every sbx artifact is anchored in the sha256 section like any other.
+    assert f"sbx-{SBX_BASE}-audit.jsonl:" in report, report
+
+    sbx_log = (stub_dir / "sbx.log").read_text(encoding="utf-8")
+    assert re.search(rf"(?m)^rm {SBX_NAME}$", sbx_log), sbx_log
+    assert "rm other-sandbox" not in sbx_log, (
+        f"panic must only remove claude-guard's own sandboxes:\n{sbx_log}"
+    )
+
+
+def test_keep_running_does_not_remove_sandboxes(panic_sandbox) -> None:
+    """--keep-running still captures the outgoing-traffic evidence but leaves
+    every sandbox running (the evidence-only snapshot mode)."""
+    workspace, stub_dir, panic_dir = panic_sandbox
+    _install_stub(stub_dir, _docker_stub_body(has_containers=False))
+    r = run_capture(
+        [str(PANIC), "--workspace", str(workspace), "--keep-running"],
+        env=_clean_env(panic_dir, stub_dir, FAKE_SBX_LS=SBX_LS_LISTING),
+    )
+    assert r.returncode == 0, r.stderr
+    snap = _latest_snapshot(panic_dir)
+    assert (snap / f"sbx-{SBX_NAME}-outgoing-traffic.json").exists(), (
+        "evidence capture must not be skipped by --keep-running"
+    )
+    report = (snap / "panic-report.md").read_text(encoding="utf-8")
+    assert "[OK] remove sandboxes — skipped (--keep-running)" in report, report
+    assert "sandboxes removed: no" in report, report
+    sbx_log = (stub_dir / "sbx.log").read_text(encoding="utf-8")
+    assert not re.search(r"(?m)^rm\b", sbx_log), (
+        f"sbx rm must not run under --keep-running:\n{sbx_log}"
+    )
+
+
+def test_sbx_rm_failure_recorded_as_fail_and_exits_nonzero(panic_sandbox) -> None:
+    """A sandbox that cannot be removed is still on disk with session state —
+    that must be a FAIL and a nonzero exit, never a silent 'dead' claim."""
+    workspace, stub_dir, panic_dir = panic_sandbox
+    _install_stub(stub_dir, _docker_stub_body(has_containers=False))
+    r = run_capture(
+        [str(PANIC), "--workspace", str(workspace)],
+        env=_clean_env(
+            panic_dir, stub_dir, FAKE_SBX_LS=SBX_LS_LISTING, FAKE_SBX_RM_RC="1"
+        ),
+    )
+    assert r.returncode == 1, r.stderr
+    report = (_latest_snapshot(panic_dir) / "panic-report.md").read_text(
+        encoding="utf-8"
+    )
+    assert "[FAIL] remove sandboxes — 1 of 1 could not be removed" in report, report
+    assert "sandboxes removed: 0 of 1" in report, report
+
+
+def test_sbx_cli_absent_still_snapshots_state_dirs(panic_sandbox) -> None:
+    """Hostile pre-state: no `sbx` on PATH at all. The host-side session state
+    is plain files, so it must still be captured — with the report saying the
+    tool was unavailable — and the run must not fail (a docker-only host is
+    normal, not an incident)."""
+    from tests._helpers import mirror_path_excluding
+
+    workspace, stub_dir, panic_dir = panic_sandbox
+    _install_stub(stub_dir, _docker_stub_body(has_containers=False))
+    (stub_dir / "sbx").unlink()
+    seed_sbx_state(panic_dir.parent)
+    mirror = mirror_path_excluding(workspace.parent, "sbx")
+    env = _clean_env(panic_dir, stub_dir, PATH=f"{stub_dir}:{mirror}")
+    r = run_capture([str(PANIC), "--workspace", str(workspace)], env=env)
+    assert r.returncode == 0, r.stderr
+    snap = _latest_snapshot(panic_dir)
+    report = (snap / "panic-report.md").read_text(encoding="utf-8")
+    assert "[WARN] identify sandboxes" in report and "not installed" in report, report
+    assert (snap / f"sbx-{SBX_BASE}-audit.jsonl").exists(), (
+        "host-side session files must be captured even without the sbx tool"
+    )
+    assert not (snap / "sbx-sandboxes.txt").exists(), (
+        "no listing artifact without a working sbx tool"
+    )
+    assert "sandboxes removed: none" in report, report
+
+
+def test_sbx_ls_failure_is_fail_but_state_still_snapshotted(panic_sandbox) -> None:
+    """Hostile pre-state: `sbx` exists but `sbx ls` errors. That is a FAIL
+    (nonzero exit — live sandboxes may be missed), yet the host-side files are
+    still captured and nothing is blindly removed."""
+    workspace, stub_dir, panic_dir = panic_sandbox
+    _install_stub(stub_dir, _docker_stub_body(has_containers=False))
+    seed_sbx_state(panic_dir.parent)
+    r = run_capture(
+        [str(PANIC), "--workspace", str(workspace)],
+        env=_clean_env(panic_dir, stub_dir, FAKE_SBX_LS_RC="1"),
+    )
+    assert r.returncode == 1, r.stderr
+    snap = _latest_snapshot(panic_dir)
+    report = (snap / "panic-report.md").read_text(encoding="utf-8")
+    assert "[FAIL] identify sandboxes" in report and "'sbx ls' failed" in report, report
+    assert (snap / f"sbx-{SBX_BASE}-audit.jsonl").exists()
+    sbx_log = (stub_dir / "sbx.log").read_text(encoding="utf-8")
+    assert not re.search(r"(?m)^rm\b", sbx_log), (
+        f"no removal without a trustworthy sandbox list:\n{sbx_log}"
+    )
+
+
+def test_no_archive_skips_sbx_evidence_but_removes(panic_sandbox) -> None:
+    """--no-archive is the fast evidence-free kill: no sbx artifacts land in
+    the snapshot, but the sandboxes are still removed."""
+    workspace, stub_dir, panic_dir = panic_sandbox
+    _install_stub(stub_dir, _docker_stub_body(has_containers=False))
+    seed_sbx_state(panic_dir.parent)
+    r = run_capture(
+        [str(PANIC), "--workspace", str(workspace), "--no-archive"],
+        env=_clean_env(panic_dir, stub_dir, FAKE_SBX_LS=SBX_LS_LISTING),
+    )
+    assert r.returncode == 0, r.stderr
+    snap = _latest_snapshot(panic_dir)
+    assert not list(snap.glob("sbx-*")), "no sbx artifacts under --no-archive"
+    sbx_log = (stub_dir / "sbx.log").read_text(encoding="utf-8")
+    assert re.search(rf"(?m)^rm {SBX_NAME}$", sbx_log), sbx_log
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
