@@ -180,10 +180,10 @@ DOCKER_PLUGINS_LIB = REPO_ROOT / "bin" / "lib" / "docker-plugins.bash"
 # the lib spawns it: the first probe of a port reports it free (satisfying
 # the pre-spawn _sbx_require_port_free check), every later probe reports a
 # listener answering (satisfying the readiness gate) — tracked per caller
-# and port in a state file beside the stub. The audit sink (-m) stays
-# serving until the reap kills it, and the monitor-key registry read (stdin
-# script, "-") fails quietly — resolve_monitor_key treats that as "no key
-# found".
+# and port in a state file beside the stub. The audit sink (-m) and the
+# monitor server (invoked by script path) stay serving until the reap kills
+# them, and the monitor-key registry read (stdin script, "-") fails quietly
+# — resolve_monitor_key treats that as "no key found".
 SBX_SERVICES_PYTHON3_STUB = """#!/bin/bash
 case "$1" in
 -c)
@@ -193,6 +193,7 @@ case "$1" in
   exit 1
   ;;
 -m) exec sleep 30 ;;
+*monitor-server.py) exec sleep 30 ;;
 esac
 exit 1
 """

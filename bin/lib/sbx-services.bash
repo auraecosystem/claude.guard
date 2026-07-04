@@ -103,11 +103,6 @@ _sbx_pid_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
-# _sbx_container_running NAME — true while the named container is running.
-_sbx_container_running() {
-  [[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" == "true" ]]
-}
-
 # _sbx_wait_service_ready LABEL HOST PORT LIVENESS_FN LIVENESS_ARG LOG_HINT —
 # fail-closed readiness gate for a just-started service: ready when the port
 # answers AND our service is still alive; a service that died first and one
@@ -162,50 +157,38 @@ _sbx_start_audit_sink() {
   cg_trace "${TRACE_AUDIT_SINK_STARTED:-}" bind="$bind" port="$port"
 }
 
-# _sbx_start_monitor BASE DIR — the LLM monitor in a throwaway HOST-side
-# container. monitor-server.py bakes its script/policy paths to /monitor (the
-# compose container contract, no env override), so a bare host process cannot
-# run it; a local container in the launcher's trust position can, with the
-# server, policy, and monitorlib mounted read-only and only the services dir
-# writable (the shared audit log). --user pins the container to the
-# launcher's uid so it can read the 0600 signing key and write the
-# launcher-owned audit log without chowning any host file; the container
-# binds all interfaces internally while -p publishes it only on the
-# configured host address. Sets _SBX_MONITOR_CONTAINER.
+# _sbx_start_monitor DIR — the LLM monitor as a supervised bare host process,
+# in the launcher's trust position like the audit sink: monitor-server.py
+# from the repo checkout, with MONITOR_SCRIPT/MONITOR_POLICY pointed at the
+# checkout's monitor.py and policy. API keys travel by inherited ENVIRONMENT,
+# never argv (any host user can `ps` argv): the export must happen here in
+# the parent — a key set as an unexported shell variable is visible to
+# ${!var} but invisible to the python3 child. Sets _SBX_MONITOR_PID.
 _sbx_start_monitor() {
-  local base="$1" dir="$2" bind="${SBX_SERVICES_BIND:-127.0.0.1}" port="${SBX_MONITOR_PORT:-9199}"
-  local image
-  image="$(claude_monitor_image)"
+  local dir="$1" bind="${SBX_SERVICES_BIND:-127.0.0.1}" port="${SBX_MONITOR_PORT:-9199}"
   _sbx_require_port_free "monitor" "$bind" "$port" SBX_MONITOR_PORT || return 1
-  _SBX_MONITOR_CONTAINER="cg-sbx-monitor-$base"
-  local -a run_args=(run -d --name "$_SBX_MONITOR_CONTAINER" --user "$(id -u):$(id -g)")
-  run_args+=(-p "$bind:$port:$port")
-  run_args+=(-v "$_SBX_SERVICES_REPO_ROOT/.devcontainer/monitor-server.py:/monitor/monitor-server.py:ro")
-  run_args+=(-v "$_SBX_SERVICES_REPO_ROOT/.claude/hooks/monitor.py:/monitor/monitor.py:ro")
-  run_args+=(-v "$_SBX_SERVICES_REPO_ROOT/.devcontainer/monitor-policy.txt:/monitor/policy.txt:ro")
-  run_args+=(-v "$_SBX_SERVICES_REPO_ROOT/.claude/hooks/monitorlib:/monitor/monitorlib:ro")
-  run_args+=(-v "$dir:/run/cg-sbx")
-  run_args+=(-e PYTHONPATH=/monitor -e MONITOR_BIND=0.0.0.0 -e "MONITOR_PORT=$port")
-  run_args+=(-e MONITOR_SECRET_PATH=/run/cg-sbx/secret -e AUDIT_LOG=/run/cg-sbx/audit.jsonl)
-  # API keys travel by NAME (-e NAME): docker copies the value out of THIS
-  # process's environment, so the secret never appears in argv where any host
-  # user can `ps` it. The export must happen here in the parent — a key set as
-  # an unexported shell variable is visible to ${!var} but invisible to the
-  # docker child until exported.
   local key_var
   local -a key_vars=()
   mapfile -t key_vars < <(_sbx_monitor_key_vars)
   for key_var in "${key_vars[@]+"${key_vars[@]}"}"; do
     export "${key_var?}"
-    run_args+=(-e "$key_var")
   done
-  run_args+=(--entrypoint python3 "$image" /monitor/monitor-server.py)
-  docker "${run_args[@]}" >/dev/null || {
-    cg_error "could not start the host-side monitor container — see the docker error above."
-    return 1
-  }
+  # CLAUDE_GUARD_TRACE=off for the child: the server's own
+  # announce_monitor_engaged producer shares this host filesystem, so it
+  # would write a second monitor_started line into the trace file this
+  # launcher announces on after the readiness gate below.
+  env CLAUDE_GUARD_TRACE=off \
+    PYTHONPATH="$_SBX_SERVICES_REPO_ROOT/.claude/hooks" \
+    MONITOR_SCRIPT="$_SBX_SERVICES_REPO_ROOT/.claude/hooks/monitor.py" \
+    MONITOR_POLICY="$_SBX_SERVICES_REPO_ROOT/.devcontainer/monitor-policy.txt" \
+    MONITOR_BIND="$bind" \
+    MONITOR_PORT="$port" \
+    MONITOR_SECRET_PATH="$dir/secret" \
+    AUDIT_LOG="$dir/audit.jsonl" \
+    python3 "$_SBX_SERVICES_REPO_ROOT/.devcontainer/monitor-server.py" >>"$dir/monitor.log" 2>&1 &
+  _SBX_MONITOR_PID=$!
   _sbx_wait_service_ready "monitor" "$bind" "$port" \
-    _sbx_container_running "$_SBX_MONITOR_CONTAINER" "docker logs $_SBX_MONITOR_CONTAINER" || return 1
+    _sbx_pid_alive "$_SBX_MONITOR_PID" "$dir/monitor.log" || return 1
   cg_trace "${TRACE_MONITOR_STARTED:-}" bind="$bind" port="$port"
 }
 
@@ -301,11 +284,10 @@ sbx_watch_redactor_ready() {
 }
 
 # _sbx_services_reap — stop every supervised service process; the shared
-# teardown for an aborted start and a normal stop. Returns non-zero when the
-# monitor container cannot be removed (a host-side process left running with
-# this session's signing key is a leak the caller must surface).
+# teardown for an aborted start and a normal stop. Every service is this
+# shell's own child, so kill + wait cannot leave one running: wait returns
+# only once the kernel has reaped the child.
 _sbx_services_reap() {
-  local rc=0
   if [[ -n "${_SBX_REDACTOR_WATCH_PID:-}" ]]; then
     kill "$_SBX_REDACTOR_WATCH_PID" 2>/dev/null || true # allow-exit-suppress: the watcher may have already finished
     wait "$_SBX_REDACTOR_WATCH_PID" 2>/dev/null || true # allow-exit-suppress: reap only; its exit status was already reported
@@ -322,15 +304,11 @@ _sbx_services_reap() {
     wait "$_SBX_AUDIT_SINK_PID" 2>/dev/null || true # allow-exit-suppress: reap only
     _SBX_AUDIT_SINK_PID=""
   fi
-  if [[ -n "${_SBX_MONITOR_CONTAINER:-}" ]]; then
-    if docker rm -f "$_SBX_MONITOR_CONTAINER" >/dev/null 2>&1; then
-      _SBX_MONITOR_CONTAINER=""
-    else
-      cg_error "could not remove the host-side monitor container '$_SBX_MONITOR_CONTAINER' — it is still running with this session's signing key. Remove it manually: docker rm -f $_SBX_MONITOR_CONTAINER"
-      rc=1
-    fi
+  if [[ -n "${_SBX_MONITOR_PID:-}" ]]; then
+    kill "$_SBX_MONITOR_PID" 2>/dev/null || true # allow-exit-suppress: a monitor that died mid-session was already surfaced by its readiness gate / the session's dispatch failures
+    wait "$_SBX_MONITOR_PID" 2>/dev/null || true # allow-exit-suppress: reap only
+    _SBX_MONITOR_PID=""
   fi
-  return "$rc"
 }
 
 # _sbx_archive_audit DIR — persist this session's audit log into the shared
@@ -360,7 +338,7 @@ _sbx_archive_audit() {
 sbx_services_start() {
   local base="$1" name="$2" dir
   _SBX_AUDIT_SINK_PID=""
-  _SBX_MONITOR_CONTAINER=""
+  _SBX_MONITOR_PID=""
   _SBX_POLL_PID=""
   _SBX_REDACTOR_WATCH_PID=""
   _SBX_DISPATCH_MODE=""
@@ -373,7 +351,7 @@ sbx_services_start() {
     _sbx_services_reap
     return 1
   }
-  _sbx_start_monitor "$base" "$dir" || {
+  _sbx_start_monitor "$dir" || {
     _sbx_services_reap
     return 1
   }
@@ -397,7 +375,7 @@ sbx_services_stop() {
   fi
   local was_polling=""
   [[ "${_SBX_DISPATCH_MODE:-}" == "poll" ]] && was_polling=1
-  _sbx_services_reap || rc=1
+  _sbx_services_reap
   if [[ -n "$was_polling" ]]; then
     _sbx_poll_transcript_once "$_SBX_SERVICES_SANDBOX_NAME" "$_SBX_SERVICES_RUN_DIR"
   fi

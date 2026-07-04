@@ -41,7 +41,7 @@ monitor_cycle)
 monitor_cycle_unexported_key)
   # Proves the parent-side export in _sbx_start_monitor: the key arrives as a
   # plain (unexported) shell variable, as when the launcher read it from a
-  # keychain into the shell, and must still reach the docker child's env.
+  # keychain into the shell, and must still reach the python3 child's env.
   # shellcheck disable=SC2034 # read indirectly (${!var}) by _sbx_monitor_key_vars
   MONITOR_API_KEY="$1"
   shift

@@ -505,7 +505,7 @@ def _delegate_stub(tmp_path: Path, sbx_body: str) -> tuple[Path, Path]:
     """PATH prefix with fake sbx/docker/python3/uname for a full sbx_delegate
     run (mirrors test_sbx_launch_kcov's happy-path stub; Darwin uname makes the
     KVM preflight pass deterministically on any host, the python3 stub stands
-    in for the host-services port probes and audit sink)."""
+    in for the host-services port probes, audit sink, and monitor server)."""
     d = tmp_path / "stub"
     d.mkdir(exist_ok=True)
     log = tmp_path / "sbx.log"
@@ -515,7 +515,6 @@ def _delegate_stub(tmp_path: Path, sbx_body: str) -> tuple[Path, Path]:
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n",

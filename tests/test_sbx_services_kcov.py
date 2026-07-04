@@ -4,13 +4,13 @@ The lib is sourced into bin/lib/sbx-launch.bash and never run directly, so
 kcov can only trace it when a registered argv[0] sources it —
 tests/drive-sbx-services.bash is the vehicle (see KCOV_GATED_VIA_VEHICLE in
 tests/_kcov.py). These tests drive every function through every branch with
-stubbed `python3`/`docker`/`sbx` on PATH so each line executes; no real
-server, container, or sandbox is ever started.
+stubbed `python3`/`sbx` on PATH so each line executes; no real
+server or sandbox is ever started.
 
 Behaviour is asserted with exact outcomes so this is not a hollow line-runner:
 each fail-loud guard (uncreatable state dir, unmintable signing key, a service
-that dies or never serves, a pre-occupied or stolen port, an unremovable
-monitor container, a lost audit snapshot) is asserted on its specific message, and each trace event on its
+that dies or never serves, a pre-occupied or stolen port, a lost audit
+snapshot) is asserted on its specific message, and each trace event on its
 event name.
 """
 
@@ -51,31 +51,61 @@ _PY_PROBE_OK = '#!/bin/bash\n[ "$1" = -c ] && exit 0\nexit 1\n'
 _KEY_NEEDLE = "q9X2mN7pK4rT8wY1cV5bZ3dF6gH0jL2e"
 
 
-# docker stub for the monitor container lifecycle: log every call, report the
-# container as running, succeed on run/rm.
-def _docker_ok(log: Path) -> str:
+# python3 stub for the bare-process monitor: a monitor-server arm that records
+# its argv and the env contract the launcher must deliver, then stays alive
+# like the real server. The port probe answers only once that env record
+# exists — like a real port that answers only once the server is up — so the
+# readiness gate (and the reap that follows it) cannot outrun the child.
+def _py_monitor(argv_log: Path, env_log: Path) -> str:
     return (
         "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
-        '[ "$1" = inspect ] && { echo true; exit 0; }\n'
-        "exit 0\n"
+        f'echo "$@" >>"{argv_log}"\n'
+        'case "$1" in\n'
+        "-c)\n"
+        f'  [ -s "{env_log}" ] && exit 0\n'
+        "  exit 1\n"
+        "  ;;\n"
+        "*monitor-server.py)\n"
+        "  {\n"
+        '    echo "script=${MONITOR_SCRIPT:-UNSET}"\n'
+        '    echo "policy=${MONITOR_POLICY:-UNSET}"\n'
+        '    echo "bind=${MONITOR_BIND:-UNSET}"\n'
+        '    echo "port=${MONITOR_PORT:-UNSET}"\n'
+        '    echo "secret=${MONITOR_SECRET_PATH:-UNSET}"\n'
+        '    echo "audit=${AUDIT_LOG:-UNSET}"\n'
+        '    echo "trace=${CLAUDE_GUARD_TRACE:-UNSET}"\n'
+        '    echo "key=${MONITOR_API_KEY:-UNSET}"\n'
+        f'  }} >>"{env_log}"\n'
+        "  exec sleep 30\n"
+        "  ;;\n"
+        "esac\n"
+        "exit 1\n"
     )
+
+
+# _py_monitor plus the registry rows the monitor-key scan walks, so the
+# key-forwarding loop in _sbx_start_monitor has a member to export.
+def _py_monitor_with_registry(argv_log: Path, env_log: Path) -> str:
+    return (
+        "#!/bin/bash\n"
+        'if [ "$1" = - ]; then\n'
+        '  printf "*\\tMONITOR_API_KEY\\t\\t\\t\\t\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+    ) + _py_monitor(argv_log, env_log).removeprefix("#!/bin/bash\n")
 
 
 def _stub(
     tmp_path: Path,
     *,
     python3: str | None = None,
-    docker: str | None = None,
     sbx: str | None = None,
 ) -> Path:
-    """A PATH prefix dir carrying fake python3/docker/sbx executables."""
+    """A PATH prefix dir carrying fake python3/sbx executables."""
     d = tmp_path / "stub"
     d.mkdir(exist_ok=True)
     if python3 is not None:
         write_exe(d / "python3", python3)
-    if docker is not None:
-        write_exe(d / "docker", docker)
     if sbx is not None:
         write_exe(d / "sbx", sbx)
     return d
@@ -375,111 +405,87 @@ def test_audit_sink_refuses_pre_occupied_port(tmp_path):
 # ── _sbx_start_monitor ────────────────────────────────────────────────────
 
 
-def test_monitor_cycle_runs_host_side_container(tmp_path):
-    log = tmp_path / "docker.log"
-    stub = _stub(tmp_path, python3=SBX_SERVICES_PYTHON3_STUB, docker=_docker_ok(log))
+def test_monitor_cycle_runs_bare_host_process(tmp_path):
+    argv_log = tmp_path / "python3-argv.log"
+    env_log = tmp_path / "python3-env.log"
+    stub = _stub(tmp_path, python3=_py_monitor(argv_log, env_log))
     trace = tmp_path / "trace.jsonl"
     r = _run(
         "monitor_cycle",
-        "cg-b1",
         str(tmp_path),
         path_prefix=stub,
         CLAUDE_GUARD_TRACE="info",
         CLAUDE_GUARD_TRACE_FILE=str(trace),
     )
     assert r.returncode == 0, r.stderr
-    body = log.read_text()
-    assert "run -d --name cg-sbx-monitor-cg-b1" in body
-    assert "-p 127.0.0.1:9199:9199" in body
-    assert "--entrypoint python3" in body
-    assert "/monitor/monitor-server.py" in body
-    assert "rm -f cg-sbx-monitor-cg-b1" in body
-    assert '"event":"monitor_started"' in trace.read_text()
-
-
-def test_monitor_forwards_api_keys_by_name_never_value(tmp_path):
-    log = tmp_path / "docker.log"
-    stub = _stub(tmp_path, python3=_PY_WITH_REGISTRY, docker=_docker_ok(log))
-    r = _run(
-        "monitor_cycle",
-        "cg-b2",
-        str(tmp_path),
-        path_prefix=stub,
-        MONITOR_API_KEY="k3ymat",
-    )
-    assert r.returncode == 0, r.stderr
-    body = log.read_text()
-    assert "-e MONITOR_API_KEY" in body
-    # By NAME only: the value in argv would be readable by any local user.
-    assert "k3ymat" not in body
+    assert "/.devcontainer/monitor-server.py" in argv_log.read_text()
+    env = env_log.read_text()
+    assert f"script={REPO_ROOT}/.claude/hooks/monitor.py" in env
+    assert f"policy={REPO_ROOT}/.devcontainer/monitor-policy.txt" in env
+    assert "bind=127.0.0.1" in env
+    assert "port=9199" in env
+    assert f"secret={tmp_path}/secret" in env
+    assert f"audit={tmp_path}/audit.jsonl" in env
+    # The server announces monitor_started itself on this same host
+    # filesystem, so it must be spawned trace-off — the launcher's announce
+    # after the readiness gate is the single line.
+    assert "trace=off" in env
+    assert trace.read_text().count('"event":"monitor_started"') == 1
+    # The server's output lands in the supervised child's log file.
+    assert (tmp_path / "monitor.log").exists()
 
 
 def test_monitor_refuses_pre_occupied_port(tmp_path):
-    log = tmp_path / "docker.log"
-    stub = _stub(tmp_path, python3=_PY_PROBE_OK, docker=_docker_ok(log))
-    r = _run("monitor_cycle", "cg-b6", str(tmp_path), path_prefix=stub)
+    # Something already answers on the monitor port before anything was
+    # spawned — refuse before spawning: no monitor process is ever started.
+    argv_log = tmp_path / "python3-argv.log"
+    py = f'#!/bin/bash\necho "$@" >>"{argv_log}"\n[ "$1" = -c ] && exit 0\nexit 1\n'
+    stub = _stub(tmp_path, python3=py)
+    r = _run("monitor_cycle", str(tmp_path), path_prefix=stub)
     assert r.returncode == 1
     assert "cannot start the monitor" in r.stderr
     assert "already listening on 127.0.0.1:9199" in r.stderr
     assert "SBX_MONITOR_PORT" in r.stderr
-    # Refused before docker ran: no container exists, none to leak.
-    assert not log.exists()
+    assert "monitor-server.py" not in argv_log.read_text()
 
 
-def test_monitor_delivers_unexported_key_value_to_container_env(monkeypatch, tmp_path):
+def test_monitor_delivers_unexported_key_by_env_never_argv(monkeypatch, tmp_path):
     # The launcher may hold the key as a plain (unexported) shell variable —
-    # read from a keychain, never in its own environment. Forwarding is by
-    # NAME (-e NAME), so docker copies the value from the launcher's env:
-    # unless the parent exports it first, the container silently gets
-    # nothing. The docker stub records what actually arrived in its env.
+    # read from a keychain, never in its own environment. The key must reach
+    # the python3 child's environment (requiring the parent-side export) and
+    # must never appear in argv, where any local user can `ps` it.
     monkeypatch.delenv("MONITOR_API_KEY", raising=False)
-    log = tmp_path / "docker.log"
-    envlog = tmp_path / "docker-env.log"
-    docker = (
-        "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
-        f'[ "$1" = run ] && echo "key=${{MONITOR_API_KEY:-UNSET}}" >>"{envlog}"\n'
-        '[ "$1" = inspect ] && { echo true; exit 0; }\n'
-        "exit 0\n"
-    )
-    stub = _stub(tmp_path, python3=_PY_WITH_REGISTRY, docker=docker)
+    argv_log = tmp_path / "python3-argv.log"
+    env_log = tmp_path / "python3-env.log"
+    stub = _stub(tmp_path, python3=_py_monitor_with_registry(argv_log, env_log))
     r = _run(
         "monitor_cycle_unexported_key",
         _KEY_NEEDLE,
-        "cg-b5",
         str(tmp_path),
         path_prefix=stub,
     )
     assert r.returncode == 0, r.stderr
-    assert envlog.read_text() == f"key={_KEY_NEEDLE}\n"
-    body = log.read_text()
-    assert "-e MONITOR_API_KEY" in body
-    # By NAME only: the value in argv would be readable by any local user.
-    assert _KEY_NEEDLE not in body
+    assert f"key={_KEY_NEEDLE}" in env_log.read_text()
+    assert _KEY_NEEDLE not in argv_log.read_text()
 
 
-def test_monitor_start_fails_loud_when_docker_run_fails(tmp_path):
-    docker = '#!/bin/bash\n[ "$1" = run ] && exit 1\nexit 0\n'
-    stub = _stub(tmp_path, python3=SBX_SERVICES_PYTHON3_STUB, docker=docker)
-    r = _run("start_monitor", "cg-b3", str(tmp_path), path_prefix=stub)
-    assert r.returncode == 1
-    assert "could not start the host-side monitor container" in r.stderr
-
-
-def test_monitor_start_fails_loud_when_container_dies(tmp_path):
-    docker = '#!/bin/bash\n[ "$1" = inspect ] && { echo false; exit 0; }\nexit 0\n'
-    py = '#!/bin/bash\n[ "$1" = -c ] && exit 1\nexit 1\n'
-    stub = _stub(tmp_path, python3=py, docker=docker)
+def test_monitor_start_fails_loud_when_process_dies(tmp_path):
+    py = (
+        '#!/bin/bash\ncase "$1" in\n'
+        "-c) exit 1 ;;\n"
+        "*monitor-server.py) exit 3 ;;\n"
+        "esac\nexit 1\n"
+    )
+    stub = _stub(tmp_path, python3=py)
     r = _run(
         "start_monitor",
-        "cg-b4",
         str(tmp_path),
         path_prefix=stub,
         SBX_SERVICES_WAIT_TIMEOUT="5",
     )
     assert r.returncode == 1
     assert "the monitor exited before serving" in r.stderr
-    assert "docker logs cg-sbx-monitor-cg-b4" in r.stderr
+    assert f"{tmp_path}/monitor.log" in r.stderr
 
 
 # ── _sbx_resolve_dispatch_mode ────────────────────────────────────────────
@@ -687,15 +693,35 @@ def test_archive_audit_fails_loud_when_snapshot_unwritable(tmp_path):
 # ── sbx_services_start / sbx_services_stop ────────────────────────────────
 
 
-def _full_stub(tmp_path: Path, sbxlog: Path, dockerlog: Path) -> Path:
-    """The whole happy stack: registry-emitting python3 whose sink also writes
-    an audit record, a running-container docker, and an sbx that mirrors the
-    hook log and accepts the redactor/policy probes."""
+def _full_stub(tmp_path: Path, sbxlog: Path, reaplog: Path) -> Path:
+    """The whole happy stack: registry-emitting python3 whose sink writes an
+    audit record and whose monitor arm records the reap's TERM (each service
+    gates its own port probe on an "up" marker dropped after its trap is set,
+    so readiness never outruns the child), and an sbx that mirrors the hook
+    log and accepts the redactor/policy probes."""
     py = (
         "#!/bin/bash\n"
         'if [ "$1" = - ]; then printf "*\\tMONITOR_API_KEY\\t\\t\\t\\t\\n"; exit 0; fi\n'
-        'if [ "$1" = -m ]; then echo "{\\"seq\\":1}" >"$AUDIT_LOG"; exec sleep 30; fi\n'
-    ) + SBX_SERVICES_PYTHON3_STUB.removeprefix("#!/bin/bash\n")
+        'if [ "$1" = -m ]; then\n'
+        '  echo "{\\"seq\\":1}" >"$AUDIT_LOG"\n'
+        '  : >"$(dirname "$0")/sink-up"\n'
+        "  exec sleep 30\n"
+        "fi\n"
+        'case "$1" in\n'
+        "-c)\n"
+        '  [ "$4" = 9198 ] && marker=sink-up || marker=monitor-up\n'
+        '  [ -e "$(dirname "$0")/$marker" ] && exit 0\n'
+        "  exit 1\n"
+        "  ;;\n"
+        "*monitor-server.py)\n"
+        f"  trap 'echo monitor-reaped >>\"{reaplog}\"; exit 0' TERM\n"
+        '  : >"$(dirname "$0")/monitor-up"\n'
+        "  sleep 30 & wait $!\n"
+        "  exit 0\n"
+        "  ;;\n"
+        "esac\n"
+        "exit 1\n"
+    )
     sbx = (
         "#!/bin/bash\n"
         f'echo "$@" >>"{sbxlog}"\n'
@@ -705,13 +731,13 @@ def _full_stub(tmp_path: Path, sbxlog: Path, dockerlog: Path) -> Path:
         "done\n"
         "exit 0\n"
     )
-    return _stub(tmp_path, python3=py, docker=_docker_ok(dockerlog), sbx=sbx)
+    return _stub(tmp_path, python3=py, sbx=sbx)
 
 
 def test_services_cycle_supervises_and_archives(tmp_path):
     sbxlog = tmp_path / "sbx.log"
-    dockerlog = tmp_path / "docker.log"
-    stub = _full_stub(tmp_path, sbxlog, dockerlog)
+    reaplog = tmp_path / "reap.log"
+    stub = _full_stub(tmp_path, sbxlog, reaplog)
     trace = tmp_path / "trace.jsonl"
     archive = tmp_path / "archive"
     r = _run(
@@ -740,8 +766,8 @@ def test_services_cycle_supervises_and_archives(tmp_path):
     snaps = list(archive.glob("vol-*-audit/*.jsonl"))
     assert len(snaps) == 1
     assert snaps[0].read_text() == '{"seq":1}\n'
-    # Both supervised services were torn down.
-    assert "rm -f cg-sbx-monitor-cg-c1" in dockerlog.read_text()
+    # The stop's reap delivered TERM to the supervised monitor process.
+    assert reaplog.read_text() == "monitor-reaped\n"
 
 
 def test_services_start_fails_loud_when_state_dir_uncreatable(tmp_path):
@@ -786,22 +812,27 @@ def test_services_start_aborts_when_sink_fails(tmp_path):
 
 
 def test_services_start_reaps_sink_when_monitor_fails(tmp_path):
-    # Probe: the sink port answers, the monitor port never does; the monitor
-    # container reports dead -> start fails AND the already-started services
-    # are reaped (the monitor container is removed, never left behind).
-    dockerlog = tmp_path / "docker.log"
-    # Sink port (9198): shared first-free-then-answering dynamics; monitor
-    # port (9199): never answers.
+    # The sink starts, then the monitor dies before serving: start fails AND
+    # the already-started sink is reaped (its TERM recorded), never left
+    # behind holding this session's signing key.
+    reaplog = tmp_path / "reap.log"
     py = (
-        '#!/bin/bash\nif [ "$1" = -c ] && [ "$4" != 9198 ]; then exit 1; fi\n'
-    ) + SBX_SERVICES_PYTHON3_STUB.removeprefix("#!/bin/bash\n")
-    docker = (
         "#!/bin/bash\n"
-        f'echo "$@" >>"{dockerlog}"\n'
-        '[ "$1" = inspect ] && { echo false; exit 0; }\n'
-        "exit 0\n"
+        'case "$1" in\n'
+        "-c)\n"
+        '  [ "$4" = 9198 ] && [ -e "$(dirname "$0")/sink-up" ] && exit 0\n'
+        "  exit 1\n"
+        "  ;;\n"
+        "-m)\n"
+        f"  trap 'echo sink-reaped >>\"{reaplog}\"; exit 0' TERM\n"
+        '  : >"$(dirname "$0")/sink-up"\n'
+        "  sleep 30 & wait $!\n"
+        "  exit 0\n"
+        "  ;;\n"
+        "*monitor-server.py) exit 3 ;;\n"
+        "esac\nexit 1\n"
     )
-    stub = _stub(tmp_path, python3=py, docker=docker)
+    stub = _stub(tmp_path, python3=py)
     r = _run(
         "services_start",
         "cg-c5",
@@ -812,13 +843,12 @@ def test_services_start_reaps_sink_when_monitor_fails(tmp_path):
     )
     assert r.returncode == 1
     assert "the monitor exited before serving" in r.stderr
-    assert "rm -f cg-sbx-monitor-cg-c5" in dockerlog.read_text()
+    assert reaplog.read_text() == "sink-reaped\n"
 
 
 def test_services_stop_reports_sink_that_died_mid_session(tmp_path):
     sbxlog = tmp_path / "sbx.log"
-    dockerlog = tmp_path / "docker.log"
-    stub = _full_stub(tmp_path, sbxlog, dockerlog)
+    stub = _full_stub(tmp_path, sbxlog, tmp_path / "reap.log")
     r = _run(
         "cycle_sink_dies",
         "cg-c6",
@@ -832,22 +862,6 @@ def test_services_stop_reports_sink_that_died_mid_session(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "the audit sink exited during the session" in r.stderr
     assert "audit record may be incomplete" in r.stderr
-
-
-def test_services_stop_fails_loud_on_leaked_monitor(tmp_path):
-    # `docker rm -f` fails: a host-side monitor container left running with
-    # this session's signing key must be surfaced, never swallowed.
-    docker = (
-        "#!/bin/bash\n"
-        '[ "$1" = rm ] && exit 1\n'
-        '[ "$1" = inspect ] && { echo true; exit 0; }\n'
-        "exit 0\n"
-    )
-    stub = _stub(tmp_path, python3=SBX_SERVICES_PYTHON3_STUB, docker=docker)
-    r = _run("monitor_cycle", "cg-c7", str(tmp_path), path_prefix=stub)
-    assert r.returncode == 1
-    assert "could not remove the host-side monitor container" in r.stderr
-    assert "docker rm -f cg-sbx-monitor-cg-c7" in r.stderr
 
 
 def test_services_stop_bare_is_a_silent_noop(tmp_path):

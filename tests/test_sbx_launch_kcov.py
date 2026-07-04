@@ -502,7 +502,6 @@ def test_delegate_happy_path_runs_and_tears_down(tmp_path):
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n"
@@ -533,7 +532,6 @@ def test_delegate_aborts_when_services_fail(tmp_path):
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n"
@@ -555,23 +553,29 @@ def test_delegate_aborts_when_services_fail(tmp_path):
 
 
 def test_delegate_surfaces_services_stop_failure_on_clean_session(tmp_path):
-    # Session and sandbox teardown succeed, but the host-side monitor
-    # container cannot be removed: the leak must surface as the exit status.
+    # Session and sandbox teardown succeed, but the services stop loses the
+    # audit snapshot (unwritable archive dir): the loss must surface as the
+    # exit status, not be masked by the clean session.
     docker = (
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  rm) exit 1 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n"
     )
+    # The sink writes an audit record so the stop has something to archive.
+    py = (
+        "#!/bin/bash\n"
+        'if [ "$1" = -m ]; then echo "{\\"seq\\":1}" >"$AUDIT_LOG"; exec sleep 30; fi\n'
+    ) + SBX_SERVICES_PYTHON3_STUB.removeprefix("#!/bin/bash\n")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir")
     stub = _stub_bin(
         tmp_path,
         sbx="#!/bin/bash\nexit 0\n",
         docker=docker,
-        python3=SBX_SERVICES_PYTHON3_STUB,
+        python3=py,
         darwin=True,
     )
     r = _run(
@@ -580,10 +584,11 @@ def test_delegate_surfaces_services_stop_failure_on_clean_session(tmp_path):
         path_prefix=stub,
         CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
         XDG_STATE_HOME=str(tmp_path / "s"),
+        CLAUDE_AUDIT_ARCHIVE_DIR=str(blocker / "sub"),
         SBX_MONITOR_POLL_INTERVAL="0.05",
     )
     assert r.returncode == 1
-    assert "could not remove the host-side monitor container" in r.stderr
+    assert "could not archive this session's audit log" in r.stderr
 
 
 def test_delegate_surfaces_teardown_leak_on_clean_session(tmp_path):
@@ -593,7 +598,6 @@ def test_delegate_surfaces_teardown_leak_on_clean_session(tmp_path):
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n"
@@ -622,7 +626,6 @@ def test_delegate_propagates_nonzero_session_exit(tmp_path):
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n"
@@ -654,7 +657,6 @@ def test_delegate_signal_reaps_services_and_sandbox(tmp_path):
         "#!/bin/bash\n"
         'case "$1" in\n'
         "  build) exit 0 ;;\n"
-        "  inspect) echo true; exit 0 ;;\n"
         '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
         '         [ "$2" = save ] && exit 0 ;;\n'
         "esac\nexit 0\n"

@@ -151,7 +151,7 @@ sbx_teardown() {
 
 # _sbx_signal_cleanup SIG NAME — teardown for a launcher killed mid-session:
 # a straight death here would leak a running microVM with session state and
-# the host-side monitor container holding this session's signing key. Reap
+# the host-side service processes holding this session's signing key. Reap
 # both (NAME is empty before the sandbox exists), then die by SIG so the
 # caller still sees a signal exit.
 _sbx_signal_cleanup() {
@@ -231,9 +231,8 @@ sbx_delegate() {
   cg_trace "${TRACE_SBX_SANDBOX_CREATED:-}" name="$name" image="$SBX_KIT_IMAGE" rc="$rc"
 
   # Services stop BEFORE teardown so the final transcript pull can still
-  # reach the sandbox; a services-stop failure (a leaked monitor container,
-  # a lost audit snapshot) is surfaced but ranked below the session's own
-  # exit and a leaked sandbox.
+  # reach the sandbox; a services-stop failure (a lost audit snapshot) is
+  # surfaced but ranked below the session's own exit and a leaked sandbox.
   local services_rc=0
   sbx_services_stop || services_rc=$?
   local teardown_rc=0
