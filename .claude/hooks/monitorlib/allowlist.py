@@ -25,8 +25,9 @@ class PermissionMode(str, enum.Enum):
 # safe-list skip rests on. Every PermissionMode member MUST be classified here
 # (tests assert totality), and check_allow_list fails CLOSED on a mode it does
 # not recognize, so a future non-prompting mode can never inherit the skip by
-# falling through an unknown-string default.
-_MODE_HAS_HUMAN_PROMPT = {
+# falling through an unknown-string default. Typed over str (which the str-mixin
+# keys satisfy) because the lookup key is the raw envelope string.
+_MODE_HAS_HUMAN_PROMPT: dict[str, bool] = {
     PermissionMode.DEFAULT: True,
     PermissionMode.AUTO: False,
     PermissionMode.ACCEPT_EDITS: True,
