@@ -559,9 +559,7 @@ def test_sbx_kvm_absent_is_unprotected(monkeypatch) -> None:
 def test_sbx_kvm_present_but_not_rw_is_unprotected_with_group_hint(monkeypatch) -> None:
     """Device present but not rw and the user is not in the kvm group: UNPROTECTED
     with the add-to-group remediation (the flip of the clean rw case)."""
-    doctor, rows = _drive_sbx_backend(
-        monkeypatch, kvm_rw=False, in_kvm_group=False
-    )
+    doctor, rows = _drive_sbx_backend(monkeypatch, kvm_rw=False, in_kvm_group=False)
     assert "not readable+writable" in rows["/dev/kvm"]
     assert "'kvm' group" in rows["/dev/kvm"]
     hit = next(u for u in doctor.unprotected if "not accessible to this user" in u)

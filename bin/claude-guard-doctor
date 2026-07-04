@@ -1078,28 +1078,28 @@ def report_sbx_backend() -> None:
         '[[ -e "$dev" ]] && kvm_present=true || kvm_present=false\n'
         '[[ -r "$dev" && -w "$dev" ]] && kvm_rw=true || kvm_rw=false\n'
         "id -nG 2>/dev/null | tr ' ' '\\n' | grep -qx kvm && in_kvm_group=true || in_kvm_group=false\n"
-        'command -v docker >/dev/null 2>&1 && docker=true || docker=false\n'
-        'command -v python3 >/dev/null 2>&1 && python3=true || python3=false\n'
-        'command -v openssl >/dev/null 2>&1 && openssl=true || openssl=false\n'
-        'sbx_cli_available && sbx_cli=true || sbx_cli=false\n'
-        'sbx_version_ok=false; sbx_login_ok=false\n'
+        "command -v docker >/dev/null 2>&1 && docker=true || docker=false\n"
+        "command -v python3 >/dev/null 2>&1 && python3=true || python3=false\n"
+        "command -v openssl >/dev/null 2>&1 && openssl=true || openssl=false\n"
+        "sbx_cli_available && sbx_cli=true || sbx_cli=false\n"
+        "sbx_version_ok=false; sbx_login_ok=false\n"
         'if [[ "$sbx_cli" == true ]] && sbx version >/dev/null 2>&1; then\n'
-        '  sbx_version_ok=true\n'
+        "  sbx_version_ok=true\n"
         '  sbx "${CLAUDE_GUARD_SBX_LOGIN_CHECK:-whoami}" >/dev/null 2>&1 && sbx_login_ok=true || sbx_login_ok=false\n'
-        'fi\n'
-        '_sbx_mf_flattened_accepted && flattened=true || flattened=false\n'
+        "fi\n"
+        "_sbx_mf_flattened_accepted && flattened=true || flattened=false\n"
         'squid="$(_sbx_mf_locate squid /usr/sbin/squid /usr/local/sbin/squid || true)"\n'
         'certgen="$(_sbx_mf_locate security_file_certgen '
-        '/usr/lib/squid/security_file_certgen /usr/libexec/squid/security_file_certgen '
-        '/usr/local/libexec/squid/security_file_certgen '
+        "/usr/lib/squid/security_file_certgen /usr/libexec/squid/security_file_certgen "
+        "/usr/local/libexec/squid/security_file_certgen "
         '/opt/homebrew/opt/squid/libexec/security_file_certgen || true)"\n'
         'bind="${CLAUDE_GUARD_SBX_FILTER_BIND:-$(_sbx_mf_default_bind)}"\n'
         'parent="${CLAUDE_GUARD_SBX_PARENT_PROXY:-${bind:-gateway.docker.internal}:3128}"\n'
-        'parent_checked=false; parent_reachable=false\n'
+        "parent_checked=false; parent_reachable=false\n"
         'if [[ "$flattened" != true && -n "$bind" ]]; then\n'
-        '  parent_checked=true\n'
+        "  parent_checked=true\n"
         '  _sbx_mf_port_ready "${parent%:*}" "${parent##*:}" && parent_reachable=true || parent_reachable=false\n'
-        'fi\n'
+        "fi\n"
         # Host-side session services (sbx-services.bash): the monitor and audit sink
         # run as launcher-supervised HOST processes, and each refuses to start when
         # something already answers on its port (_sbx_require_port_free), aborting
@@ -1204,7 +1204,7 @@ def _report_sbx_virtualization(facts: dict) -> None:
         grp = (
             ""
             if facts["in_kvm_group"]
-            else ' — add yourself to the \'kvm\' group (sudo usermod -aG kvm "$USER"), then re-login'
+            else " — add yourself to the 'kvm' group (sudo usermod -aG kvm \"$USER\"), then re-login"
         )
         kv(
             dev,
@@ -1221,7 +1221,11 @@ def _report_sbx_virtualization(facts: dict) -> None:
         return
     kv(
         dev,
-        mark(OK_SYMBOL, "present and accessible (hardware virtualization available)", "green"),
+        mark(
+            OK_SYMBOL,
+            "present and accessible (hardware virtualization available)",
+            "green",
+        ),
     )
 
 
