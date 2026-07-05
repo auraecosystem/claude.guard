@@ -75,7 +75,21 @@ def _fake_agent_sandbox_checkout(tmp_path: Path) -> Path:
         "#!/bin/bash\n"
         'printf \'%s\\n\' "$*" >>"$FAKE_AS_LOG"\n'
         'cp "$2" "$FAKE_AS_STATE/workload-copy.json"\n'
-        '[[ -z "${FAKE_AS_SLEEP:-}" ]] || sleep "$FAKE_AS_SLEEP"\n'
+        # The in-flight block dies OF the delivered signal (WIFSIGNALED), never a
+        # normal exit — that is what makes the SIGINT test non-vacuous (the lib's
+        # subshell must convert this signal-death into a clean 130 + scratch
+        # scrub). Re-raise from the stub itself rather than lean on a forked
+        # `sleep` child receiving the group signal: os.killpg races the fork, so
+        # under load the child can miss it and run its full timeout while bash
+        # defers on the foreground wait. The trap is armed before the child so no
+        # delivery window is uncovered; `wait` returns to run it on signal.
+        'if [[ -n "${FAKE_AS_SLEEP:-}" ]]; then\n'
+        "  trap 'trap - INT TERM; kill \"${_sp:-}\" 2>/dev/null; kill -s INT \"$$\"' INT\n"
+        "  trap 'trap - INT TERM; kill \"${_sp:-}\" 2>/dev/null; kill -s TERM \"$$\"' TERM\n"
+        '  sleep "$FAKE_AS_SLEEP" &\n'
+        "  _sp=$!\n"
+        '  wait "$_sp"\n'
+        "fi\n"
         'mkdir -p "$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test"\n'
         'echo \'{"services":{"workload":{}}}\' >"$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test/workload-override.json"\n'
         '[[ -z "${FAKE_AS_LEAK_TOKEN:-}" ]] || cp "$2" "$AGENT_SANDBOX_STATE_DIR/sessions/agent-sandbox-test/leaked.json"\n'
