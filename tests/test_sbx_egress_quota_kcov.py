@@ -16,7 +16,6 @@ guard fails a specific, named case, and the watchdog's kill-on-breach is observe
 import os
 import subprocess
 import time
-from pathlib import Path
 
 from tests._helpers import REPO_ROOT, run_capture
 
