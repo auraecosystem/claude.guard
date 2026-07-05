@@ -196,7 +196,9 @@ def test_allow_rules_add_flattened_project_domains(tmp_path):
     rules = r.stdout.splitlines()
     assert "proj-ro.test:443" in rules
     assert "proj-rw.test:443" in rules
-    assert sorted(rules) == sorted([*EXPECTED_RULES, "proj-ro.test:443", "proj-rw.test:443"])
+    assert sorted(rules) == sorted(
+        [*EXPECTED_RULES, "proj-ro.test:443", "proj-rw.test:443"]
+    )
 
 
 def test_allow_rules_filter_posture_grants_project_rw_only(tmp_path):
@@ -204,9 +206,7 @@ def test_allow_rules_filter_posture_grants_project_rw_only(tmp_path):
     # policy (reached through the filter, like the global ro tier); only the
     # project read-write host is granted directly.
     ws = _project_ws(tmp_path, ro=["proj-ro.test"], rw=["proj-rw.test"])
-    r = _run(
-        EGRESS, "allow_rules", cwd=ws, SBX_METHOD_FILTER_ENDPOINT="http://gw:3129"
-    )
+    r = _run(EGRESS, "allow_rules", cwd=ws, SBX_METHOD_FILTER_ENDPOINT="http://gw:3129")
     assert r.returncode == 0, r.stderr
     rules = r.stdout.splitlines()
     assert "proj-rw.test:443" in rules

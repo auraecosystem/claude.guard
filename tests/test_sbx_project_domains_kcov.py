@@ -13,8 +13,6 @@ import json
 import os
 from pathlib import Path
 
-import pytest
-
 from tests._helpers import REPO_ROOT, run_capture
 
 # covers: bin/lib/sbx-project-domains.bash
@@ -137,7 +135,9 @@ def test_duplicate_hosts_are_deduped(tmp_path):
 
 
 def test_malformed_domain_is_skipped_with_warning(tmp_path):
-    ws = _ws(tmp_path, _net(allowedDomains=["good.test", "bad_host!", "also-good.test"]))
+    ws = _ws(
+        tmp_path, _net(allowedDomains=["good.test", "bad_host!", "also-good.test"])
+    )
     r = _run("ro", ws)
     assert r.returncode == 0, r.stderr
     assert sorted(r.stdout.split()) == ["also-good.test", "good.test"]
