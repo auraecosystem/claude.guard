@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Managed PreToolUse monitor dispatch for the Docker sbx microVM backend.
 //
 // Referenced only by the root-owned, mode-0555 log-pretooluse.sh hook and itself
