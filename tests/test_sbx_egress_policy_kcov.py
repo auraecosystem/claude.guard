@@ -170,5 +170,7 @@ def test_project_domains_forbidden_host_tracks_the_policy_ssot():
     fail here, forcing the constant-based paths to be taught the full list too."""
     src = (REPO_ROOT / "bin" / "lib" / "sbx-project-domains.bash").read_text()
     m = re.search(r'_SBX_FORBIDDEN_EGRESS_HOST="(?P<host>[^"]+)"', src)
-    assert m, "_SBX_FORBIDDEN_EGRESS_HOST assignment not found in sbx-project-domains.bash"
+    assert m, (
+        "_SBX_FORBIDDEN_EGRESS_HOST assignment not found in sbx-project-domains.bash"
+    )
     assert [m.group("host")] == FORBIDDEN_HOSTS
