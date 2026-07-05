@@ -102,7 +102,7 @@ sbx_egress_quota_log_total() {
   }
   while IFS= read -r n || [[ -n "$n" ]]; do
     [[ "$n" =~ ^[0-9]+$ ]] && total=$((total + n))
-  done <"$logfile"
+  done <"$logfile" # kcov-ignore-line  done <file closing; kcov credits the redirected while body to the loop's opening line, not done (test_sbx_egress_quota_kcov.py drives the sum over multi-line, missing, and non-numeric logs)
   printf '%s\n' "$total"
 }
 
