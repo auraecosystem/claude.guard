@@ -400,13 +400,17 @@ sbx_method_filter_start() {
     sbx_egress_quota_watch "$run_dir/quota-bytes.log" "$qmb" "$_SBX_MF_PID" "$run_dir/quota.stop" &
     _SBX_MF_QUOTA_PID=$!
     # Smoke-check the watchdog actually took: a fire-and-forget process that died
-    # at once (the quota log is empty this early, so it cannot have exited on a
-    # breach) means the cap is not being enforced — refuse rather than run a
-    # session that only *looks* capped.
+    # at once means the cap is not being enforced — refuse rather than run a
+    # session that only *looks* capped. The interval is already validated above and
+    # the quota log is empty this early (so the watchdog cannot have exited on a
+    # breach), so this arm cannot be driven deterministically — it is a defensive
+    # tripwire for a watchdog that dies for an unforeseen reason.
     _sbx_mf_pid_alive "$_SBX_MF_QUOTA_PID" || {
+      # kcov-ignore-start  see above: undrivable without racing the just-forked watchdog to death
       cg_error "the outgoing-traffic watchdog exited immediately after arming — the ${qmb} MiB EGRESS_QUOTA_MB cap would not be enforced. Refusing to launch."
       sbx_method_filter_stop
       return 1
+      # kcov-ignore-end
     }
     cg_info "EGRESS_QUOTA_MB=${qmb} — this session's outgoing traffic is capped at ${qmb} MiB; exceeding it stops the sandbox's outgoing access for the rest of the session."
   fi
