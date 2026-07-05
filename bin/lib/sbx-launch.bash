@@ -197,6 +197,62 @@ sbx_ensure_template() {
   return 1
 }
 
+# _sbx_session_kit KIT_DIR ARGS... — the kit dir `sbx create/run --kit` should
+# point at for this session. With no ARGS this is KIT_DIR itself (the shared,
+# cache-friendly template). With ARGS, a kind:sandbox kit bakes its entrypoint
+# argv into spec.yaml and sbx has no per-run arg channel (sbx-releases #242), so
+# forwarding claude arguments means materializing a throwaway kit dir whose spec
+# appends the JSON-encoded args to the baked entrypoint argv (the entrypoint
+# execs `claude … "$@"`, so trailing argv flows to claude). Prints the dir to
+# use; the caller removes a synthesized one after the session. A synthesized dir
+# always sits under the owner-only sbx state dir, which is how sbx_delegate tells
+# it apart from the in-tree template to clean up.
+_sbx_session_kit() {
+  local kit_dir="$1"
+  shift
+  if [[ "$#" -eq 0 ]]; then
+    printf '%s\n' "$kit_dir"
+    return 0
+  fi
+  local state_dir sess_dir
+  state_dir="$(_sbx_state_dir)" || return 1
+  sess_dir="$(mktemp -d "$state_dir/session-kit.XXXXXX")" || {
+    cg_error "could not create a per-session kit directory under $state_dir for argument forwarding."
+    return 1
+  }
+  local args_json="" a
+  for a in "$@"; do
+    args_json+=", $(json_string "$a")"
+  done
+  # Append the args before the entrypoint run: array's closing ]. The privacy
+  # variants bake "--privacy <mode>" ahead of them; the entrypoint shifts that
+  # off before exec'ing claude, so appended user args land after it correctly.
+  local wrote_run=0 line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$wrote_run" -eq 0 && "$line" == *run:*'['*']' ]]; then
+      printf '%s%s]\n' "${line%]*}" "$args_json"
+      wrote_run=1
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$kit_dir/spec.yaml" >"$sess_dir/spec.yaml" # kcov-ignore-line  done <file >file closing; kcov credits the redirected while body to the loop's opening line, not done (test_sbx_launch_kcov.py drives the loop through both the run-line and passthrough branches)
+  [[ "$wrote_run" -eq 1 ]] || {
+    cg_error "could not find the entrypoint run: array in $kit_dir/spec.yaml — cannot forward claude arguments."
+    rm -rf -- "$sess_dir"
+    return 1
+  }
+  printf '%s\n' "$sess_dir"
+}
+
+# _sbx_session_kit_cleanup DIR — remove a kit dir synthesized by
+# _sbx_session_kit (identified by living under the sbx state dir). A no-op for
+# the in-tree template dir, so callers can pass whichever dir they used.
+_sbx_session_kit_cleanup() {
+  local dir="${1:-}"
+  [[ "$dir" == */session-kit.* ]] && rm -rf -- "$dir"
+  return 0
+}
+
 # sbx_session_base NAME_OUT — mint the per-session sandbox base name. sbx
 # derives the final sandbox name as <base>-<workspace-dirname>, so a unique
 # base keeps concurrent sessions in different checkouts of the same repo
@@ -251,6 +307,7 @@ _sbx_signal_cleanup() {
   if [[ -n "$name" ]]; then
     sbx_teardown "$name" || true # allow-exit-suppress: the signal is the exit reason; teardown prints its own fail-loud leak message
   fi
+  _sbx_session_kit_cleanup "${_SBX_SESSION_KIT_DIR:-}"
   trap - INT TERM
   kill -s "$sig" "$BASHPID"
 }
@@ -276,14 +333,6 @@ sbx_delegate() {
     _sbx_warn_privacy "$privacy"
   fi
 
-  if [[ "$#" -gt 0 ]]; then
-    # The kit's entrypoint is a fixed argv baked into sbx-kit/*/spec.yaml;
-    # sbx has no channel to append per-run claude args to it, so forwarding
-    # would silently drop them.
-    cg_error "the sbx backend does not forward claude arguments yet (got: $*) — run without arguments, or unset CLAUDE_GUARD_SANDBOX_BACKEND for this session."
-    return 1
-  fi
-
   # Opt out of sbx's CLI usage telemetry by default; an operator who has
   # explicitly set SBX_NO_TELEMETRY keeps their choice.
   : "${SBX_NO_TELEMETRY:=1}"
@@ -292,13 +341,21 @@ sbx_delegate() {
   sbx_preflight || return 1
   sbx_ensure_template || return 1
 
-  local base name kit_dir
+  local base name kit_dir session_kit
   base="$(sbx_session_base)"
   name="$(sbx_sandbox_name "$base")"
   # The privacy tiers are separate kit variants (same image): the entrypoint's
   # --privacy argv and the Venice credential-injection network block are baked
   # into their spec.yaml, since neither can be attached to a sandbox at runtime.
   kit_dir="$(sbx_kit_root)/kit${privacy:+-$privacy}"
+
+  # Forward claude args (--resume, --debug, passthrough, …) by materializing a
+  # per-session kit whose entrypoint argv carries them; with no args this is the
+  # shared template unchanged. Synthesized before any host service exists so its
+  # own failure reaps nothing; once created it is removed on every exit path
+  # below and by the signal trap (via _SBX_SESSION_KIT_DIR).
+  session_kit="$(_sbx_session_kit "$kit_dir" "$@")" || return 1
+  _SBX_SESSION_KIT_DIR="$session_kit"
 
   # The monitor and audit sink run on the HOST (sbx-services.bash): the in-VM
   # agent is root-capable before the entrypoint's privilege drop, so an in-VM
@@ -309,6 +366,7 @@ sbx_delegate() {
   trap '_sbx_signal_cleanup INT ""' INT
   trap '_sbx_signal_cleanup TERM ""' TERM
   sbx_services_start "$base" "$name" || {
+    _sbx_session_kit_cleanup "$session_kit"
     trap - INT TERM
     return 1
   }
@@ -322,6 +380,7 @@ sbx_delegate() {
   # HTTPS_PROXY has a live listener from its first request.
   if [[ -z "$privacy" ]]; then
     sbx_method_filter_start "$base" || {
+      _sbx_session_kit_cleanup "$session_kit"
       sbx_services_stop || true # allow-exit-suppress: the filter failure is the error being returned; stop prints its own fail-loud leak message
       trap - INT TERM
       return 1
@@ -333,8 +392,9 @@ sbx_delegate() {
   # egress allowlist, and only then attach the kit entrypoint's TUI (its exit
   # ends the session). The create→apply gap is safe: sbx is default-deny until
   # the rules land, so nothing can reach out early.
-  sbx create --kit "$kit_dir" "$base" >/dev/null || {
+  sbx create --kit "$session_kit" "$base" >/dev/null || {
     cg_error "could not create sandbox '$name' — see the 'sbx create' error above."
+    _sbx_session_kit_cleanup "$session_kit"
     sbx_method_filter_stop || true # allow-exit-suppress: the create failure is the error being returned; stop is a best-effort reap of our own child
     sbx_services_stop || true      # allow-exit-suppress: the create failure is the error being returned; stop prints its own fail-loud leak message
     trap - INT TERM
@@ -343,6 +403,7 @@ sbx_delegate() {
   trap '_sbx_signal_cleanup INT "$name"' INT
   trap '_sbx_signal_cleanup TERM "$name"' TERM
   sbx_egress_apply "$name" || {
+    _sbx_session_kit_cleanup "$session_kit"
     sbx_method_filter_stop || true # allow-exit-suppress: the apply failure is the error being returned; stop is a best-effort reap of our own child
     sbx_services_stop || true      # allow-exit-suppress: the apply failure is the error being returned; stop prints its own fail-loud leak message
     sbx_teardown "$name" || true   # allow-exit-suppress: the apply failure is the error being returned; teardown prints its own fail-loud leak message
@@ -351,12 +412,13 @@ sbx_delegate() {
   }
 
   local rc=0
-  sbx run --kit "$kit_dir" "$base" || rc=$?
+  sbx run --kit "$session_kit" "$base" || rc=$?
   cg_trace "${TRACE_SBX_SANDBOX_CREATED:-}" name="$name" image="$SBX_KIT_IMAGE" rc="$rc"
 
   # The session is over: reap the host-side method-filter (our own child; a
   # failure here is best-effort, ranked below a leaked sandbox or lost audit).
   sbx_method_filter_stop || true # allow-exit-suppress: best-effort reap; the return codes below rank the load-bearing failures
+  _sbx_session_kit_cleanup "$session_kit"
 
   # Services stop BEFORE teardown so the final transcript pull can still
   # reach the sandbox; a services-stop failure (a lost audit snapshot) is
