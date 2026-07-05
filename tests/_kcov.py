@@ -250,6 +250,7 @@ KCOV_GATED_VIA_VEHICLE = {
     "tests/drive-sbx-launch.bash": "bin/lib/sbx-launch.bash",
     "tests/drive-sbx-method-filter.bash": "bin/lib/sbx-method-filter.bash",
     "tests/drive-sbx-services.bash": "bin/lib/sbx-services.bash",
+    "tests/drive-sbx-watcher-bridge.bash": "bin/lib/sbx-watcher-bridge.bash",
     "tests/drive-transcript-publish.bash": "bin/lib/transcript-publish.bash",
 }
 
@@ -322,6 +323,7 @@ KCOV_TEST_FILES = [
     "tests/test_transcript_publish_kcov.py",
     "tests/test_sbx_launch_kcov.py",
     "tests/test_sbx_services_kcov.py",
+    "tests/test_sbx_watcher_bridge_kcov.py",
     "tests/test_sbx_egress_kcov.py",
     "tests/test_sbx_egress_quota_kcov.py",
     "tests/test_sbx_project_domains_kcov.py",
