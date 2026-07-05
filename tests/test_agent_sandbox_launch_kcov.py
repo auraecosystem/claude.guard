@@ -84,8 +84,8 @@ def _fake_agent_sandbox_checkout(tmp_path: Path) -> Path:
         # defers on the foreground wait. The trap is armed before the child so no
         # delivery window is uncovered; `wait` returns to run it on signal.
         'if [[ -n "${FAKE_AS_SLEEP:-}" ]]; then\n'
-        "  trap 'trap - INT TERM; kill \"${_sp:-}\" 2>/dev/null; kill -s INT \"$$\"' INT\n"
-        "  trap 'trap - INT TERM; kill \"${_sp:-}\" 2>/dev/null; kill -s TERM \"$$\"' TERM\n"
+        '  trap \'trap - INT TERM; kill "${_sp:-}" 2>/dev/null; kill -s INT "$$"\' INT\n'
+        '  trap \'trap - INT TERM; kill "${_sp:-}" 2>/dev/null; kill -s TERM "$$"\' TERM\n'
         '  sleep "$FAKE_AS_SLEEP" &\n'
         "  _sp=$!\n"
         '  wait "$_sp"\n'
