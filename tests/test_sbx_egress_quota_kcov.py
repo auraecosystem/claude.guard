@@ -174,6 +174,15 @@ def test_preflight_accepts_a_large_but_bounded_ceiling():
     assert _run("preflight", "", EGRESS_QUOTA_MB="1000000000").returncode == 0
 
 
+def test_preflight_refuses_an_int64_overflowing_ceiling():
+    # A value past INT64_MAX wraps negative: `((mb > 0))` could read it as "off"
+    # (silently uncapped) and an arithmetic bound check could itself wrap. The
+    # digit-length guard must refuse it regardless — 2^63, longer than the max.
+    r = _run("preflight", "", EGRESS_QUOTA_MB="9223372036854775808")
+    assert r.returncode == 1
+    assert "implausibly large" in r.stderr
+
+
 # ── sbx_egress_quota_poll_interval ─────────────────────────────────────────
 
 

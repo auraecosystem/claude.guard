@@ -83,14 +83,22 @@ sbx_egress_quota_enabled() {
 # posture that removes the meter is refused automatically without touching this
 # gate. Also refuses an implausibly large ceiling that would overflow the byte math.
 sbx_egress_quota_preflight() {
-  local privacy="${1:-}"
-  sbx_egress_quota_enabled || return 0
-  local mb reason
-  mb="$(sbx_egress_quota_mb)"
-  if ((mb > _SBX_EQ_MAX_MB)); then
-    cg_error "EGRESS_QUOTA_MB=${mb} is implausibly large (max ${_SBX_EQ_MAX_MB} MiB) — refusing rather than risk a 64-bit overflow in the byte-cap arithmetic that would silently lock the session out. Set a realistic ceiling."
+  local privacy="${1:-}" reason
+  # The magnitude check runs on the RAW value BEFORE the enabled short-circuit and
+  # gates on digit COUNT first: a value that overflows int64 wraps negative, so
+  # `sbx_egress_quota_mb`'s own `((mb > 0))` could read it as "off" (silently
+  # uncapped) and a bare `((mb > MAX))` here could itself wrap. A digit count over
+  # the max's is refused without any arithmetic; only at EQUAL length — where the
+  # value provably fits in int64 — is a numeric compare safe (10#$raw forces
+  # base-10 so a zero-padded value is not mis-read as octal).
+  local raw="${EGRESS_QUOTA_MB:-}"
+  if [[ "$raw" =~ ^[0-9]+$ ]] &&
+    { ((${#raw} > ${#_SBX_EQ_MAX_MB})) ||
+      { ((${#raw} == ${#_SBX_EQ_MAX_MB})) && ((10#$raw > _SBX_EQ_MAX_MB)); }; }; then
+    cg_error "EGRESS_QUOTA_MB=${raw} is implausibly large (max ${_SBX_EQ_MAX_MB} MiB) — refusing rather than risk a 64-bit overflow in the byte-cap arithmetic that would silently lock the session out or read as uncapped. Set a realistic ceiling."
     return 1
   fi
+  sbx_egress_quota_enabled || return 0
   if reason="$(sbx_egress_meterless_reason "$privacy")"; then
     cg_error "EGRESS_QUOTA_MB is set, but ${reason} — the byte cap cannot be enforced. Unset EGRESS_QUOTA_MB, or drop the posture that removes the meter to keep the cap."
     return 1
