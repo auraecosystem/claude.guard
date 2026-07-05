@@ -35,17 +35,15 @@ import pytest
 
 from tests._helpers import (
     REPO_ROOT,
-    audit_volume_name,
-    egress_volume_name,
-    run_capture,
-    write_exe,
-)
-from tests.test_claude_panic import (
     SBX_BASE,
     SBX_LS_LISTING,
     SBX_NAME,
+    audit_volume_name,
+    egress_volume_name,
+    run_capture,
     sbx_stub_body,
     seed_sbx_state,
+    write_exe,
 )
 
 # covers: bin/claude-guard-panic

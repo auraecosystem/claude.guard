@@ -11,19 +11,17 @@ import pytest
 
 from tests._helpers import (
     REPO_ROOT,
+    SBX_BASE,
+    SBX_LS_LISTING,
+    SBX_NAME,
     build_fake_docker,
     lib_volume_id,
     mirror_path_excluding,
     run_capture,
-    sibling_symlink_chain,
-    write_exe,
-)
-from tests.test_claude_panic import (
-    SBX_BASE,
-    SBX_LS_LISTING,
-    SBX_NAME,
     sbx_stub_body,
     seed_sbx_state,
+    sibling_symlink_chain,
+    write_exe,
 )
 
 # covers: bin/claude-guard-panic

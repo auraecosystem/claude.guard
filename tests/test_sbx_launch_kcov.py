@@ -20,6 +20,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import yaml
+
 from tests._helpers import (
     REPO_ROOT,
     SBX_SERVICES_PYTHON3_STUB,
@@ -60,6 +62,27 @@ def _stub_bin(
             d / "uname", '#!/bin/bash\n[ "$1" = -s ] && echo Darwin || echo Darwin\n'
         )
     return d
+
+
+def _docker_stub(image_id: str = "sha256:h") -> str:
+    """A docker stub for sbx_ensure_template's happy path: `build` succeeds,
+    `image inspect` prints `image_id`, `image save` succeeds, everything else
+    exits 0."""
+    return (
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  build) exit 0 ;;\n"
+        f'  image) [ "$2" = inspect ] && {{ echo {image_id}; exit 0; }}\n'
+        '         [ "$2" = save ] && exit 0 ;;\n'
+        "esac\nexit 0\n"
+    )
+
+
+def _logging_sbx_stub(log: Path, extra: str = "") -> str:
+    """An sbx stub appending each invocation's argv to `log` (one line each);
+    `extra` (verbatim bash, newline-terminated) runs between the logging line
+    and the final exit 0."""
+    return f'#!/bin/bash\necho "$@" >>"{log}"\n{extra}exit 0\n'
 
 
 def _run(
@@ -336,12 +359,26 @@ def test_state_dir_fails_loud_when_uncreatable(tmp_path):
 # ── sbx-launch: _sbx_render_kit_args / _sbx_remove_rendered_kit ───────────
 
 # The argv set every rendering test forwards: a space, a double quote, a
-# single quote, and a leading dash — the shapes a hand-rolled escaper breaks
-# on first.
-HOSTILE_ARGS = ["--resume", "a b", 'say "hi"', "it's", "-p"]
+# single quote, a leading dash, an embedded newline, a quote-bracket pair that
+# breaks naive JSON-list splicing, a backslash, and a literal "--" — the shapes
+# a hand-rolled escaper breaks on first.
+HOSTILE_ARGS = [
+    "--resume",
+    "a b",
+    'say "hi"',
+    "it's",
+    "-p",
+    "a\nb",
+    'x"]y',
+    "back\\slash",
+    "--",
+]
 
 # json_string-escaped rendering of HOSTILE_ARGS as spec argv elements.
-RENDERED_SUFFIX = '"--", "--resume", "a b", "say \\"hi\\"", "it\'s", "-p"'
+RENDERED_SUFFIX = (
+    '"--", "--resume", "a b", "say \\"hi\\"", "it\'s", "-p",'
+    ' "a\\nb", "x\\"]y", "back\\\\slash", "--"'
+)
 
 
 def test_render_kit_args_appends_json_escaped_argv(tmp_path):
@@ -397,6 +434,31 @@ def test_render_kit_args_preserves_privacy_variant_argv(tmp_path):
     )
     assert expected_line in rendered.splitlines()
     assert (kit / "spec.yaml").read_text() == original
+
+
+def test_render_kit_args_yaml_roundtrip_recovers_exact_argv(tmp_path):
+    """A real YAML parse of the rendered spec recovers every hostile arg
+    byte-identical: json_string's escaping is only correct if what sbx's own
+    YAML load hands the entrypoint is [entrypoint, "--", *args] exactly —
+    the line-level assertions above can't see an escape both sides mangle
+    the same way."""
+    kit = REPO_ROOT / "sbx-kit" / "kit"
+    r = _run(
+        LAUNCH,
+        "render_kit_args",
+        str(kit),
+        "cg-render-yaml",
+        *HOSTILE_ARGS,
+        XDG_STATE_HOME=str(tmp_path / "state"),
+    )
+    assert r.returncode == 0, r.stderr
+    dest = Path(r.stdout.strip())
+    spec = yaml.safe_load((dest / "spec.yaml").read_text())
+    assert spec["sandbox"]["entrypoint"]["run"] == [
+        "/usr/local/bin/agent-entrypoint.sh",
+        "--",
+        *HOSTILE_ARGS,
+    ]
 
 
 def test_render_kit_args_fails_loud_without_run_line(tmp_path):
@@ -532,10 +594,7 @@ def test_teardown_persist_keeps_sandbox(tmp_path):
 
 def test_teardown_removes_sandbox(tmp_path):
     log = tmp_path / "sbx.log"
-    stub = _stub_bin(
-        tmp_path,
-        sbx=f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n',
-    )
+    stub = _stub_bin(tmp_path, sbx=_logging_sbx_stub(log))
     r = _run(LAUNCH, "teardown", "cg-x-repo", path_prefix=stub)
     assert r.returncode == 0, r.stderr
     assert "rm cg-x-repo" in log.read_text()
@@ -552,18 +611,9 @@ def test_teardown_fails_loud_on_leak(tmp_path):
 
 
 def _template_stub(tmp_path: Path, image_id: str = "sha256:abc") -> Path:
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        f'  image) [ "$2" = inspect ] && {{ echo "{image_id}"; exit 0; }} ;;\n'
-        "esac\n"
-        # image save
-        'if [ "$1" = image ] && [ "$2" = save ]; then exit 0; fi\n'
-        "exit 0\n"
+    return _stub_bin(
+        tmp_path, sbx="#!/bin/bash\nexit 0\n", docker=_docker_stub(image_id)
     )
-    sbx = "#!/bin/bash\nexit 0\n"
-    return _stub_bin(tmp_path, sbx=sbx, docker=docker)
 
 
 def test_ensure_template_builds_loads_and_marks(tmp_path):
@@ -577,15 +627,8 @@ def test_ensure_template_builds_loads_and_marks(tmp_path):
 
 def test_ensure_template_skips_load_when_marker_matches(tmp_path):
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo "sha256:same"; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub("sha256:same")
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(tmp_path, sbx=sbx, docker=docker)
     state = tmp_path / "state"
     marker = state / "claude-guard" / "sbx" / "template-image-id"
@@ -617,14 +660,9 @@ def test_ensure_template_fails_when_mktemp_fails(tmp_path):
     # A non-directory TMPDIR makes the template-export mktemp fail.
     blocker = tmp_path / "notdir"
     blocker.write_text("x")
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:q; exit 0; } ;;\n'
-        "esac\nexit 0\n"
+    stub = _stub_bin(
+        tmp_path, sbx="#!/bin/bash\nexit 0\n", docker=_docker_stub("sha256:q")
     )
-    stub = _stub_bin(tmp_path, sbx="#!/bin/bash\nexit 0\n", docker=docker)
     r = _run(
         LAUNCH,
         "ensure_template",
@@ -662,16 +700,8 @@ def test_ensure_template_fails_when_build_fails(tmp_path):
 
 
 def test_ensure_template_fails_when_load_fails(tmp_path):
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:z; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
     sbx = '#!/bin/bash\n[ "$1" = template ] && exit 1\nexit 0\n'
-    stub = _stub_bin(tmp_path, sbx=sbx, docker=docker)
+    stub = _stub_bin(tmp_path, sbx=sbx, docker=_docker_stub("sha256:z"))
     r = _run(
         LAUNCH, "ensure_template", path_prefix=stub, XDG_STATE_HOME=str(tmp_path / "s")
     )
@@ -705,20 +735,8 @@ def _forwarding_stub(tmp_path: Path) -> tuple[Path, Path, Path]:
     only way to assert what the session actually launched with)."""
     log = tmp_path / "sbx.log"
     captured = tmp_path / "captured-spec.yaml"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = (
-        "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
-        f'[ "$1" = run ] && cp "$3/spec.yaml" "{captured}"\n'
-        "exit 0\n"
-    )
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log, f'[ "$1" = run ] && cp "$3/spec.yaml" "{captured}"\n')
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -811,20 +829,8 @@ def test_delegate_removes_rendered_kit_when_apply_fails(tmp_path):
     # The error paths clean the rendered kit up too — a failed launch must not
     # accrete per-session kit copies under the state dir.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = (
-        "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
-        '[ "$1" = policy ] && [ "$2" = allow ] && exit 1\n'
-        "exit 0\n"
-    )
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log, '[ "$1" = policy ] && [ "$2" = allow ] && exit 1\n')
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -901,15 +907,8 @@ def test_delegate_happy_path_runs_and_tears_down(tmp_path):
     # body (build/load, services up, run --kit, services down, teardown) is
     # exercised deterministically.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -938,15 +937,8 @@ def test_delegate_fails_closed_when_method_filter_cannot_start(tmp_path):
     # aborts and NO sandbox is ever created (it never silently launches the
     # flattened, all-writable posture the user rejected).
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"  # `network inspect` falls through -> empty bind
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()  # `network inspect` falls through -> empty bind
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -974,15 +966,8 @@ def test_delegate_aborts_when_services_fail(tmp_path):
     # The host-side services must be up before the session: when the audit
     # sink dies at start, the delegate aborts BEFORE any sandbox is created.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     py = '#!/bin/bash\ncase "$1" in\n-c) exit 1 ;;\n-m) exit 3 ;;\nesac\nexit 1\n'
     stub = _stub_bin(tmp_path, sbx=sbx, docker=docker, python3=py, darwin=True)
     r = _run(
@@ -1004,14 +989,7 @@ def test_delegate_surfaces_services_stop_failure_on_clean_session(tmp_path):
     # Session and sandbox teardown succeed, but the services stop loses the
     # audit snapshot (unwritable archive dir): the loss must surface as the
     # exit status, not be masked by the clean session.
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
+    docker = _docker_stub()
     # The sink writes an audit record so the stop has something to archive.
     py = (
         "#!/bin/bash\n"
@@ -1047,15 +1025,8 @@ def test_delegate_privacy_flag_selects_variant_kit_and_venice_only_egress(tmp_pa
     # grant ONLY the Venice rule — no allowlist domain, no Anthropic control
     # plane — and (c) print the capability warning.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(tmp_path, sbx=sbx, docker=docker, darwin=True)
     r = _run(
         LAUNCH,
@@ -1085,15 +1056,8 @@ def test_delegate_privacy_flag_selects_variant_kit_and_venice_only_egress(tmp_pa
 def test_delegate_privacy_env_selects_private_kit(tmp_path):
     # CLAUDE_PRIVACY_MODE=private with no argv routes through kit-private.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(tmp_path, sbx=sbx, docker=docker, darwin=True)
     r = _run(
         LAUNCH,
@@ -1115,15 +1079,8 @@ def test_delegate_privacy_refuses_skip_firewall_and_tears_down(tmp_path):
     # An allow-all grant would void the tier's Venice-only promise; the created
     # sandbox must not be left behind after the refusal.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(tmp_path, sbx=sbx, docker=docker, darwin=True)
     r = _run(
         LAUNCH,
@@ -1148,14 +1105,7 @@ def test_delegate_privacy_refuses_skip_firewall_and_tears_down(tmp_path):
 def test_delegate_surfaces_teardown_leak_on_clean_session(tmp_path):
     # Agent session exits 0 but `sbx rm` fails: the leaked VM must not be masked
     # by the clean session — delegate returns the teardown failure.
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
+    docker = _docker_stub()
     sbx = '#!/bin/bash\n[ "$1" = rm ] && exit 1\nexit 0\n'
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
@@ -1179,15 +1129,8 @@ def test_delegate_propagates_nonzero_session_exit(tmp_path):
     # `sbx run` exits nonzero (agent session failed): delegate still tears down,
     # then returns the session's code — the run-failure branch.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\n[ "$1" = run ] && exit 7\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log, '[ "$1" = run ] && exit 7\n')
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -1213,19 +1156,9 @@ def test_delegate_signal_reaps_services_and_sandbox(tmp_path):
     (a straight TERM death here left both running with session state)."""
     log = tmp_path / "sbx.log"
     ready = tmp_path / "run.started"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = (
-        "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
-        f'[ "$1" = run ] && {{ : >"{ready}"; exec sleep 60; }}\n'
-        "exit 0\n"
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(
+        log, f'[ "$1" = run ] && {{ : >"{ready}"; exec sleep 60; }}\n'
     )
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
@@ -1319,20 +1252,8 @@ def test_delegate_emits_sandbox_created_right_after_create(tmp_path):
     failing the policy apply: the event is already on the trace even though
     `sbx run` never happened."""
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = (
-        "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
-        '[ "$1" = policy ] && [ "$2" = allow ] && exit 1\n'
-        "exit 0\n"
-    )
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log, '[ "$1" = policy ] && [ "$2" = allow ] && exit 1\n')
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -1369,15 +1290,8 @@ def test_delegate_exit_at_handover_stops_before_run(tmp_path):
     sandbox, egress policy — then warns and reaps WITHOUT attaching `sbx run`,
     exiting 0 with nothing leaked."""
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -1420,14 +1334,7 @@ def test_delegate_exit_at_handover_stops_before_run(tmp_path):
 def test_delegate_exit_at_handover_still_surfaces_teardown_leak(tmp_path):
     # A handover-probe exit must not mask a leaked VM: `sbx rm` failing still
     # returns nonzero with the fail-loud message.
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
+    docker = _docker_stub()
     sbx = '#!/bin/bash\n[ "$1" = rm ] && exit 1\nexit 0\n'
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
@@ -1457,15 +1364,8 @@ def test_delegate_warns_shared_auth_has_no_effect(tmp_path):
     # at all, so silently ignoring it would let a user believe their sessions
     # share sign-in state. The launch proceeds — warned, never failed.
     log = tmp_path / "sbx.log"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
-    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    docker = _docker_stub()
+    sbx = _logging_sbx_stub(log)
     stub = _stub_bin(
         tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
     )
@@ -1499,27 +1399,18 @@ def test_delegate_skip_monitor_runs_without_monitor(tmp_path):
     log = tmp_path / "sbx.log"
     pyargv = tmp_path / "python3-argv.log"
     trace = tmp_path / "trace.jsonl"
-    docker = (
-        "#!/bin/bash\n"
-        'case "$1" in\n'
-        "  build) exit 0 ;;\n"
-        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
-        '         [ "$2" = save ] && exit 0 ;;\n'
-        "esac\nexit 0\n"
-    )
+    docker = _docker_stub()
     # `run` holds the "session" open until the backgrounded redactor watch has
     # provably announced (its event landing on the trace is the barrier), so
     # the reap at stop can never race the watcher out of existence.
-    sbx = (
-        "#!/bin/bash\n"
-        f'echo "$@" >>"{log}"\n'
+    sbx = _logging_sbx_stub(
+        log,
         'if [ "$1" = run ]; then\n'
         "  for _ in $(seq 1 100); do\n"
         f'    grep -q redactor_daemon_ready "{trace}" 2>/dev/null && break\n'
         "    sleep 0.1\n"
         "  done\n"
-        "fi\n"
-        "exit 0\n"
+        "fi\n",
     )
     py = (
         "#!/bin/bash\n" + f'echo "$@" >>"{pyargv}"\n'
@@ -1642,7 +1533,7 @@ def test_wrapper_sbx_skip_sandbox_falls_through_to_host_path(tmp_path):
     stub = tmp_path / "stub"
     stub.mkdir()
     sbx_log = tmp_path / "sbx.log"
-    write_exe(stub / "sbx", f'#!/bin/bash\necho "$@" >>"{sbx_log}"\nexit 0\n')
+    write_exe(stub / "sbx", _logging_sbx_stub(sbx_log))
     # A fake host claude whose --version outpaces any pin, so the host path
     # never tries to install/update a real one.
     write_exe(
@@ -1703,8 +1594,16 @@ def _entrypoint_stub(tmp_path: Path) -> tuple[Path, Path]:
     write_exe(d / "tee", "#!/bin/bash\ncat >/dev/null\nexit 0\n")
     for noop in ("mkdir", "chown", "chmod", "touch", "install", "useradd", "stat"):
         write_exe(d / noop, "#!/bin/bash\nexit 0\n")
-    write_exe(d / "claude", f'#!/bin/bash\nprintf \'%s\\n\' "$@" >>"{argv_log}"\n')
+    # NUL-separated so an embedded newline in an arg can never read as an arg
+    # boundary when the log is split back into argv.
+    write_exe(d / "claude", f'#!/bin/bash\nprintf \'%s\\0\' "$@" >>"{argv_log}"\n')
     return d, argv_log
+
+
+def _logged_argv(argv_log: Path) -> list[str]:
+    """The argv the claude stub received, recovered from its NUL-separated log
+    (each element is NUL-terminated, so the trailing empty split is dropped)."""
+    return argv_log.read_text().split("\0")[:-1]
 
 
 def _run_entrypoint(tmp_path: Path, *args: str):
@@ -1720,7 +1619,7 @@ def _run_entrypoint(tmp_path: Path, *args: str):
 def test_entrypoint_no_args_launches_bare_claude(tmp_path):
     r, argv_log = _run_entrypoint(tmp_path)
     assert r.returncode == 0, r.stderr
-    assert argv_log.read_text().splitlines() == ["--permission-mode", "auto"]
+    assert _logged_argv(argv_log) == ["--permission-mode", "auto"]
 
 
 def test_entrypoint_forwards_args_after_separator_verbatim(tmp_path):
@@ -1728,7 +1627,7 @@ def test_entrypoint_forwards_args_after_separator_verbatim(tmp_path):
     # side byte-identical, appended after the baked claude args.
     r, argv_log = _run_entrypoint(tmp_path, "--", *HOSTILE_ARGS)
     assert r.returncode == 0, r.stderr
-    assert argv_log.read_text().splitlines() == [
+    assert _logged_argv(argv_log) == [
         "--permission-mode",
         "auto",
         *HOSTILE_ARGS,
