@@ -582,8 +582,9 @@ async function cmdInstall(ask) {
     `Opening the App's install page:\n` +
       `  ${installUrl}\n` +
       `When prompted, choose which repositories to grant access to — either\n` +
-      `  "All repositories", or "Only select repositories" to pick specific ones —\n` +
-      `  then click Install.\n` +
+      `  "All repositories", or "Only select repositories" to pick specific ones\n` +
+      `  (if so, be sure to include the repos you'll run against) — then click\n` +
+      `  Install.\n` +
       `Waiting for the installation to register...\n`,
   );
   openBrowser(installUrl);

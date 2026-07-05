@@ -793,15 +793,16 @@ test("keychain: macos store passes the full PEM as the -w argv value", async (t)
   // password prompt: `security`'s prompt hard-caps at 128 chars and would
   // truncate a ~1700-char App PEM to garbage, so argv is the only mode that
   // stores it intact. A shim records argv, proving the FULL multi-line PEM (well
-  // over 128 chars) is passed as the -w value. The brief same-user `ps` exposure
-  // is the accepted tradeoff — still less than the file backend's plaintext-on-disk.
+  // over 128 chars) is the token immediately following -w. The same-user `ps`
+  // exposure is accepted: an attacker who can read argv already owns the login
+  // keychain and can read the key directly (rationale in keychain.mjs).
   const out = await fs.mkdtemp(path.join(os.tmpdir(), "argvkc-"));
   t.after(() => fs.rm(out, { recursive: true, force: true }));
   const argvFile = path.join(out, "argv");
   await fakeBinDir(
     t,
     "security",
-    `if [[ "$1" == "add-generic-password" ]]; then printf '%s' "$*" >"${argvFile}"; exit 0; fi\nexit 1`,
+    `if [[ "$1" == "add-generic-password" ]]; then printf '%s\\0' "$@" >"${argvFile}"; exit 0; fi\nexit 1`,
   );
   const pem =
     "-----BEGIN FAKE KEY-----\n" +
@@ -809,9 +810,14 @@ test("keychain: macos store passes the full PEM as the -w argv value", async (t)
     "\n-----END FAKE KEY-----\n";
   assert.ok(pem.length > 128, "fixture must exceed the prompt's 128-char cap");
   assert.equal(await kc.storePem(pem, { backend: "macos" }), "macos");
-  const argv = await fs.readFile(argvFile, "utf8");
-  assert.ok(argv.includes("-w"), "uses -w");
-  assert.ok(argv.includes(pem), "the full PEM is passed as the -w argv value");
+  const argv = (await fs.readFile(argvFile, "utf8")).split("\0").slice(0, -1);
+  const wIndex = argv.indexOf("-w");
+  assert.notEqual(wIndex, -1, "uses -w");
+  assert.equal(
+    argv[wIndex + 1],
+    pem,
+    "the full PEM is the argv token immediately following -w",
+  );
 });
 
 test("keychain: macos load decodes `security -w` hex output (trailing-newline PEM)", async (t) => {
@@ -1104,8 +1110,10 @@ const FAST_POLL = { CLAUDE_GH_APP_POLL_MS: "0", CLAUDE_GH_APP_POLL_TRIES: "3" };
 
 // Baseline env for every test that launches the real `claude-github-app`
 // subprocess. Pins the file keychain backend so the store never reaches the
-// host's OS keychain — on macOS `security` is on PATH, so an unpinned probe
-// prompts the login keychain and hangs / pops a GUI dialog — and polls fast.
+// host's OS keychain on either platform — on macOS `security` is on PATH, so
+// an unpinned probe prompts the login keychain and hangs / pops a GUI dialog;
+// on Linux an installed `secret-tool` would drive a real keyring just as
+// non-hermetically — and polls fast.
 const CLI_ENV_DEFAULTS = { CLAUDE_GH_APP_KEYCHAIN: "file", ...FAST_POLL };
 
 // Combined fetch stub for a `setup` run taking the MANUAL create phase: GET /app
