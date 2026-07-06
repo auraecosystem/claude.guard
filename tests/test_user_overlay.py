@@ -202,6 +202,33 @@ def test_world_writable_dir_warns_but_still_seeds(tmp_path):
     assert "world-writable" in r.stderr
 
 
+def test_world_writable_subdir_warns_but_still_seeds(tmp_path):
+    """A world-writable allowlisted SUBDIR is the same planting surface as a
+    world-writable root — any local user can drop a skill the agent will load."""
+    d = _overlay_with_skills(tmp_path)
+    (d / "skills").chmod(0o777)
+    r = _drive(str(d), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert f"EXPORT=[{_staged(tmp_path)}]" in r.stdout
+    assert "world-writable" in r.stderr
+
+
+def test_world_writable_symlink_target_warns(tmp_path):
+    """Staging dereferences symlinked entries, so the TARGET tree is the effective
+    content — a world-writable target is the same attack surface and must warn."""
+    real = tmp_path / "dot-claude" / "skills"
+    real.mkdir(parents=True)
+    (real / "thing.md").write_text("# via symlink\n")
+    real.chmod(0o777)
+    d = tmp_path / "overlay"
+    d.mkdir()
+    (d / "skills").symlink_to(real)
+    r = _drive(str(d), tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert f"EXPORT=[{_staged(tmp_path)}]" in r.stdout
+    assert "world-writable" in r.stderr
+
+
 def _drive_present(explicit: str | None, tmp_path: Path):
     """Drive user_claude_overlay_present alone — the pure check run_orientation uses
     (before staging exists) to decide whether to declare the overlay notice."""

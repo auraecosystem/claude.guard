@@ -66,10 +66,17 @@ configure_user_claude_overlay() {
     export CLAUDE_GUARD_USER_CLAUDE_DIR=""
     return 0
   fi
-  # World-writable overlay = any local user can plant a skill/agent the agent loads.
-  # Warn, don't brick — the seeded copy is root-locked read-only inside regardless.
-  if [[ -n "$(find "$dir" -maxdepth 0 -perm -0002 2>/dev/null)" ]]; then
-    cg_warn "user config dir '$dir' is world-writable — run 'chmod go-w \"$dir\"' so only you can add skills/agents the agent will load."
+  # World-writable ANYWHERE in the overlay = any local user can plant a skill/agent
+  # the agent loads. -L follows symlinked entries: staging dereferences them, so a
+  # world-writable target tree is the same planting surface. Warn, don't brick — the
+  # seeded copy is root-locked read-only inside regardless.
+  # find's exit status can reflect traversal diagnostics (a dangling symlink or
+  # unreadable entry mid-walk); the warning is best-effort, so it must never abort
+  # the caller's strict-mode launch.
+  local ww
+  ww="$(find -L "$dir" -perm -0002 -print -quit 2>/dev/null || true)"
+  if [[ -n "$ww" ]]; then
+    cg_warn "user config dir '$dir' contains world-writable path '$ww' — run 'chmod -R go-w \"$dir\"' so only you can add skills/agents the agent will load."
   fi
   local staged="$scratch/user-claude-overlay"
   if [[ "$staged" == *:* ]]; then
