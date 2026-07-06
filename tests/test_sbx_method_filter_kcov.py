@@ -810,8 +810,9 @@ def test_start_fails_when_bind_undeterminable(tmp_path):
 def test_start_fails_loud_when_discovered_bind_is_unbindable(tmp_path):
     # No bind override and a docker whose bridge gateway is an unbindable address
     # (the macOS case) → the bindability probe fires before squid launch and fails
-    # loud with the macOS-targeted fix, not a generic "squid exited before serving".
-    # Real python3 is kept on PATH so _sbx_mf_addr_bindable does an honest bind.
+    # loud with a copy-paste fix (loopback bind + host.docker.internal endpoint),
+    # not a generic "squid exited before serving". Real python3 is kept on PATH so
+    # _sbx_mf_addr_bindable does an honest bind.
     stub = _stub(
         tmp_path,
         "ub",
@@ -827,7 +828,11 @@ def test_start_fails_loud_when_discovered_bind_is_unbindable(tmp_path):
         CLAUDE_GUARD_DOMAIN_ALLOWLIST=str(_allowlist(tmp_path)),
     )
     assert r.returncode == 1
-    assert "cannot bind it" in r.stderr
+    # The remedy is the literal working command, not prose — bind loopback AND point
+    # the sandbox-facing endpoint at host.docker.internal (the bridge gateway alone
+    # would leave the container dialing the VM, not the Mac host).
+    assert "CLAUDE_GUARD_SBX_FILTER_BIND=127.0.0.1" in r.stderr
+    assert "CLAUDE_GUARD_SBX_FILTER_ENDPOINT=host.docker.internal:3129" in r.stderr
     assert _kv(r.stdout)["ENDPOINT"] == "UNSET"
 
 

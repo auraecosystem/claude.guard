@@ -371,12 +371,16 @@ sbx_method_filter_start() {
   # Our squid must actually LISTEN on $bind. On macOS the discovered Docker bridge
   # gateway is an address inside the Docker VM, not a host interface, so the bind
   # fails (the monitor hit the same EADDRNOTAVAIL). Probe bindability and fail loud
-  # with the targeted fix instead of letting squid die later with a generic "exited
-  # before serving". An explicit CLAUDE_GUARD_SBX_FILTER_BIND is trusted verbatim
-  # (the operator owns it) — a self-verifying probe, so Linux, where the gateway is
-  # a real host interface, is unaffected.
+  # with a copy-paste fix instead of letting squid die later with a generic "exited
+  # before serving". The fix binds host loopback and points the sandbox-facing
+  # endpoint at host.docker.internal, which OrbStack/Docker Desktop route to the Mac
+  # host's loopback (the bridge gateway does not). An explicit
+  # CLAUDE_GUARD_SBX_FILTER_BIND is trusted verbatim (the operator owns it) — a
+  # self-verifying probe, so Linux, where the gateway is a host interface, is unaffected.
   if [[ -z "${CLAUDE_GUARD_SBX_FILTER_BIND:-}" ]] && ! _sbx_mf_addr_bindable "$bind"; then
-    cg_error "the sandbox reaches the host on $bind (the Docker bridge gateway), but this host cannot bind it — on macOS the Docker bridge lives inside the Docker VM, so its gateway is not a host address. Set CLAUDE_GUARD_SBX_FILTER_BIND to a host interface the sandbox can reach the host on, and CLAUDE_GUARD_SBX_PARENT_PROXY to sbx's proxy as reachable from the host (e.g. 127.0.0.1:3128), then relaunch."
+    cg_error "read-only web proxy can't bind $bind (on macOS the Docker bridge lives inside the Docker VM, so its gateway is not a host address). To launch with read-only web filtering, run:
+
+    CLAUDE_GUARD_SBX_FILTER_BIND=127.0.0.1 CLAUDE_GUARD_SBX_FILTER_ENDPOINT=host.docker.internal:$port claude-guard"
     return 1
   fi
   parent="$(_sbx_mf_resolve_parent "$bind")"
