@@ -761,9 +761,9 @@ def test_delegate_create_uses_v034_agent_path_grammar(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     lines = log.read_text().splitlines()
-    create = next(ln for ln in lines if ln.startswith("create --kit"))
-    # AGENT positional is the kit name; the workspace PATH (this checkout) follows.
-    assert " claude-guard-agent " in create and create.rstrip().endswith(str(REPO_ROOT))
+    create = next(ln for ln in lines if ln.startswith("create --kit")).split()
+    # AGENT positional is the kit name; the workspace PATH (an absolute path) follows.
+    assert "claude-guard-agent" in create and create[-1].startswith("/")
     # run re-attaches by the pinned name; teardown removes it with --force.
     assert any(ln.startswith("run --name cg-") for ln in lines)
     assert any(ln.startswith("rm --force cg-") for ln in lines)

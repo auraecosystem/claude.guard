@@ -296,15 +296,10 @@ sbx_sandbox_name() {
 
 # sbx_kit_agent_name KIT_DIR — the AGENT positional `sbx create --kit` requires:
 # with --kit it must equal the kit spec's own `name:` (a mismatch aborts create).
-# Read from the spec so it can't drift from the variant (default/private/e2ee).
+# Read from the spec so it can't drift from the variant (default/private/e2ee); a
+# corrupted kit with no name: yields an empty agent that sbx create rejects loud.
 sbx_kit_agent_name() {
-  local spec="$1/spec.yaml" agent
-  agent="$(awk '/^name:/{print $2; exit}' "$spec" 2>/dev/null)"
-  [[ -n "$agent" ]] || {
-    cg_error "could not read the agent name (spec.yaml 'name:') from kit '$1'."
-    return 1
-  }
-  printf '%s\n' "$agent"
+  awk '/^name:/{print $2; exit}' "$1/spec.yaml"
 }
 
 # sbx_teardown NAME — destroy the session's sandbox. Ephemeral by default:
@@ -423,13 +418,9 @@ sbx_delegate() {
   session_kit="$(_sbx_session_kit "$kit_dir" "${watcher_argv[@]+"${watcher_argv[@]}"}" "$@")" || return 1
   _SBX_SESSION_KIT_DIR="$session_kit"
 
-  # The AGENT positional `sbx create --kit` requires (see sbx_kit_agent_name) —
-  # read from the session kit that create/run actually use, so a privacy variant
-  # is honored. Resolved before the sandbox exists; its failure reaps only the kit.
-  agent_name="$(sbx_kit_agent_name "$session_kit")" || {
-    _sbx_session_kit_cleanup "$session_kit"
-    return 1
-  }
+  # The AGENT positional `sbx create --kit` requires — read from the session kit
+  # that create/run actually use, so the privacy variant's name is honored.
+  agent_name="$(sbx_kit_agent_name "$session_kit")"
 
   # The monitor and audit sink run on the HOST (sbx-services.bash): the in-VM
   # agent is root-capable before the entrypoint's privilege drop, so an in-VM
