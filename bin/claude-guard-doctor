@@ -1340,29 +1340,15 @@ def _report_sbx_method_filter(facts: dict) -> None:
         reasons=unprotected,
     )
 
-    if not facts["parent_checked"]:
-        kv(
-            "sbx proxy",
-            Text(
-                "not checked (no Docker bridge gateway to derive the address; set "
-                "CLAUDE_GUARD_SBX_PARENT_PROXY)",
-                style="dim",
-            ),
-        )
-        return
-    parent = facts["parent"]
-    if facts["parent_reachable"]:
-        kv("sbx proxy", mark(OK_SYMBOL, f"reachable at {parent}", "green"))
-    else:
-        kv(
-            "sbx proxy",
-            Text(
-                f"not reachable at {parent} now — sbx's proxy runs only during a "
-                "session, so this is expected at rest (the launcher verifies it "
-                "fail-closed before each launch)",
-                style="dim",
-            ),
-        )
+    # sbx's proxy runs only DURING a session, so at rest — when doctor runs — it is
+    # never listening. A "not reachable" row would print every single time and mean
+    # nothing (the launcher verifies reachability fail-closed before each launch, so
+    # this row is never a verdict either way), and the "no bridge gateway" note is
+    # the same non-actionable noise. Report the row ONLY when a listener actually
+    # answers — a genuine mid-session positive — and stay silent otherwise
+    # (Status-messages doctrine: a status line must carry a failure or a fact to act on).
+    if facts["parent_checked"] and facts["parent_reachable"]:
+        kv("sbx proxy", mark(OK_SYMBOL, f"reachable at {facts['parent']}", "green"))
 
 
 def _report_sbx_services(facts: dict) -> None:

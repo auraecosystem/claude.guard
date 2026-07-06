@@ -57,6 +57,14 @@ PY_STATEFUL = (
 )
 DOCKER_GW = "#!/bin/bash\necho 172.17.0.1\n"
 DOCKER_EMPTY = "#!/bin/bash\nexit 0\n"  # present, prints no bridge gateway
+# A bridge gateway in TEST-NET-3 (203.0.113.0/24, RFC 5737) — a routable-looking
+# address this host cannot bind, standing in for the macOS case where the Docker
+# bridge gateway lives inside the Docker VM rather than on a host interface.
+DOCKER_TESTNET = "#!/bin/bash\necho 203.0.113.1\n"
+# python3 port-probe stub that answers ONLY for loopback. _sbx_mf_port_ready invokes
+# `python3 -c <script> HOST PORT`, so the stub sees HOST as $3 — models the macOS
+# topology where sbx's proxy is reachable on 127.0.0.1 but not via the bridge gateway.
+PY_LOOPBACK_ONLY = '#!/bin/bash\n[ "$3" = "127.0.0.1" ] && exit 0 || exit 1\n'
 OPENSSL_FAIL = "#!/bin/bash\nexit 1\n"
 OPENSSL_NOOP = "#!/bin/bash\nexit 0\n"  # "succeeds" but writes no cert
 
@@ -185,6 +193,46 @@ def test_default_bind_reads_docker_bridge_gateway(tmp_path):
     r = _run("default_bind", path=f"{stub}:{os.environ['PATH']}")
     assert r.returncode == 0, r.stderr
     assert r.stdout == "172.17.0.1\n"
+
+
+# ── _sbx_mf_addr_bindable ─────────────────────────────────────────────────
+
+
+def test_addr_bindable_true_for_loopback():
+    # A real bind on 127.0.0.1:0 succeeds on every host — the honest "can listen".
+    assert _run("addr_bindable", "127.0.0.1").returncode == 0
+
+
+def test_addr_bindable_false_for_unbindable_address():
+    # TEST-NET-3 is not a local interface, so the bind fails — the macOS-bridge case.
+    assert _run("addr_bindable", "203.0.113.1").returncode == 1
+
+
+# ── _sbx_mf_resolve_parent ────────────────────────────────────────────────
+
+
+def test_resolve_parent_returns_explicit_override_verbatim():
+    r = _run("resolve_parent", "172.17.0.1", CLAUDE_GUARD_SBX_PARENT_PROXY="10.0.0.9:9")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "10.0.0.9:9\n"
+
+
+def test_resolve_parent_uses_gateway_when_it_answers(tmp_path):
+    # Gateway proxy answers (Linux: the bridge gateway is a host interface) → no
+    # loopback fallback, so the parent is the gateway itself.
+    stub = _stub(tmp_path, "gw", python3=PY_READY)
+    r = _run("resolve_parent", "172.17.0.1", path=f"{stub}:{os.environ['PATH']}")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "172.17.0.1:3128\n"
+
+
+def test_resolve_parent_falls_back_to_loopback_when_only_loopback_answers(tmp_path):
+    # Gateway silent but loopback answers (macOS: sbx's proxy is reached on 127.0.0.1,
+    # not via the in-VM bridge gateway) → self-verifying switch to loopback.
+    stub = _stub(tmp_path, "lo", python3=PY_LOOPBACK_ONLY)
+    r = _run("resolve_parent", "172.17.0.1", path=f"{stub}:{os.environ['PATH']}")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "127.0.0.1:3128\n"
 
 
 # ── _sbx_mf_port_ready / _sbx_mf_pid_alive ────────────────────────────────
@@ -757,6 +805,30 @@ def test_start_fails_when_bind_undeterminable(tmp_path):
     )
     assert r.returncode == 1
     assert "could not determine the host interface" in r.stderr
+
+
+def test_start_fails_loud_when_discovered_bind_is_unbindable(tmp_path):
+    # No bind override and a docker whose bridge gateway is an unbindable address
+    # (the macOS case) → the bindability probe fires before squid launch and fails
+    # loud with the macOS-targeted fix, not a generic "squid exited before serving".
+    # Real python3 is kept on PATH so _sbx_mf_addr_bindable does an honest bind.
+    stub = _stub(
+        tmp_path,
+        "ub",
+        squid=SQUID_OK,
+        security_file_certgen=CERTGEN_OK,
+        docker=DOCKER_TESTNET,
+    )
+    r = _run(
+        "start_then_report",
+        "cg-base",
+        path=f"{stub}:{os.environ['PATH']}",
+        XDG_STATE_HOME=str(tmp_path / "state"),
+        CLAUDE_GUARD_DOMAIN_ALLOWLIST=str(_allowlist(tmp_path)),
+    )
+    assert r.returncode == 1
+    assert "cannot bind it" in r.stderr
+    assert _kv(r.stdout)["ENDPOINT"] == "UNSET"
 
 
 def test_start_fails_when_parent_unreachable(tmp_path):

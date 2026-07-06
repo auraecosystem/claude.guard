@@ -678,20 +678,29 @@ def test_sbx_flattened_optout_degrades_and_skips_filter_deps(monkeypatch) -> Non
     assert any("SBX_ALLOW_FLATTENED=1" in d for d in doctor.degraded)
 
 
-def test_sbx_proxy_unreachable_is_a_note(monkeypatch) -> None:
-    """The sbx proxy runs only during a session, so unreachable-at-rest is a note,
-    never a verdict failure (the flip of the reachable case adds no reason)."""
+def test_sbx_proxy_unreachable_is_silent(monkeypatch) -> None:
+    """The sbx proxy runs only during a session, so at rest (when doctor runs) it is
+    never listening — the row is suppressed entirely rather than printing a
+    non-actionable 'not reachable, but expected' note every time, and it is never a
+    verdict failure."""
     doctor, rows = _drive_sbx_backend(monkeypatch, parent_reachable=False)
-    assert "not reachable" in rows["sbx proxy"]
+    assert "sbx proxy" not in rows
     assert doctor.unprotected == [], doctor.unprotected
 
 
-def test_sbx_proxy_not_checked_when_no_bridge(monkeypatch) -> None:
-    """No Docker bridge gateway to derive the parent address: the row says so and
-    the reachability verdict is neither green nor a failure."""
+def test_sbx_proxy_not_checked_is_silent(monkeypatch) -> None:
+    """No Docker bridge gateway to derive the parent address is likewise
+    non-actionable noise at rest — the row is suppressed, not a failure."""
     doctor, rows = _drive_sbx_backend(monkeypatch, parent_checked=False)
-    assert "not checked" in rows["sbx proxy"]
+    assert "sbx proxy" not in rows
     assert doctor.unprotected == [], doctor.unprotected
+
+
+def test_sbx_proxy_reachable_is_the_only_row_shown(monkeypatch) -> None:
+    """The one case worth reporting: a listener actually answers (a mid-session
+    run) — shown green with the address."""
+    _doctor, rows = _drive_sbx_backend(monkeypatch, parent_reachable=True)
+    assert "reachable at" in rows["sbx proxy"]
 
 
 def test_sbx_cred_mode_host_env_is_noted(monkeypatch) -> None:

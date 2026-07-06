@@ -75,6 +75,37 @@ _sbx_mf_default_bind() {
   docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null | head -n1
 }
 
+# _sbx_mf_addr_bindable IP — true when IP is an address THIS host can listen on
+# (a real bind on port 0, released at once). Mirrors sbx-services.bash's monitor
+# probe: the Docker bridge gateway is bindable on Linux (a host interface) but not
+# on macOS (the bridge lives inside the Docker VM), so a bind attempt is the only
+# honest test of whether our squid can actually listen there.
+_sbx_mf_addr_bindable() {
+  python3 -c 'import socket, sys; socket.socket().bind((sys.argv[1], 0))' "$1" 2>/dev/null
+}
+
+# _sbx_mf_resolve_parent GATEWAY — sbx's own credential-injecting proxy (:3128) as
+# reachable FROM THIS host, the cache_peer parent for the read-write tier. An
+# explicit CLAUDE_GUARD_SBX_PARENT_PROXY is returned verbatim (the operator owns
+# it). Otherwise the bridge gateway, which is where sbx's proxy answers on Linux
+# (the gateway is a host interface). When the gateway does NOT answer but host
+# loopback DOES — the macOS case, where the bridge lives inside the Docker VM so
+# the gateway is unreachable from the host and sbx's proxy is reached on loopback
+# instead — loopback is used. Self-verifying: loopback is chosen only when a
+# listener actually answers there, so a Linux host (gateway reachable) never switches.
+_sbx_mf_resolve_parent() {
+  local gw="$1" port=3128
+  if [[ -n "${CLAUDE_GUARD_SBX_PARENT_PROXY:-}" ]]; then
+    printf '%s\n' "$CLAUDE_GUARD_SBX_PARENT_PROXY"
+    return 0
+  fi
+  if ! _sbx_mf_port_ready "$gw" "$port" && _sbx_mf_port_ready 127.0.0.1 "$port"; then
+    printf '127.0.0.1:%s\n' "$port"
+    return 0
+  fi
+  printf '%s:%s\n' "$gw" "$port"
+}
+
 # _sbx_mf_active — true when a filter was actually started for this session (as
 # opposed to the explicit-flattened opt-out, where nothing runs).
 _sbx_mf_active() {
@@ -332,11 +363,23 @@ sbx_method_filter_start() {
   local bind port endpoint parent
   bind="${CLAUDE_GUARD_SBX_FILTER_BIND:-$(_sbx_mf_default_bind)}"
   port="${CLAUDE_GUARD_SBX_FILTER_PORT:-3129}"
-  parent="${CLAUDE_GUARD_SBX_PARENT_PROXY:-${bind:-gateway.docker.internal}:3128}"
   [[ -n "$bind" ]] || {
     cg_error "could not determine the host interface the sandbox reaches the method-filter on (no Docker bridge gateway found). Set CLAUDE_GUARD_SBX_FILTER_BIND to that address, or CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1 to skip the read-only tier."
     return 1
   }
+
+  # Our squid must actually LISTEN on $bind. On macOS the discovered Docker bridge
+  # gateway is an address inside the Docker VM, not a host interface, so the bind
+  # fails (the monitor hit the same EADDRNOTAVAIL). Probe bindability and fail loud
+  # with the targeted fix instead of letting squid die later with a generic "exited
+  # before serving". An explicit CLAUDE_GUARD_SBX_FILTER_BIND is trusted verbatim
+  # (the operator owns it) — a self-verifying probe, so Linux, where the gateway is
+  # a real host interface, is unaffected.
+  if [[ -z "${CLAUDE_GUARD_SBX_FILTER_BIND:-}" ]] && ! _sbx_mf_addr_bindable "$bind"; then
+    cg_error "the sandbox reaches the host on $bind (the Docker bridge gateway), but this host cannot bind it — on macOS the Docker bridge lives inside the Docker VM, so its gateway is not a host address. Set CLAUDE_GUARD_SBX_FILTER_BIND to a host interface the sandbox can reach the host on, and CLAUDE_GUARD_SBX_PARENT_PROXY to sbx's proxy as reachable from the host (e.g. 127.0.0.1:3128), then relaunch."
+    return 1
+  fi
+  parent="$(_sbx_mf_resolve_parent "$bind")"
 
   # Host→sbx-proxy reachability is the load-bearing precondition: read-write
   # (inference + auth) is tunneled through the parent, so an unreachable parent

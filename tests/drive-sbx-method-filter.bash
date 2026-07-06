@@ -25,6 +25,8 @@ pid_alive) _sbx_mf_pid_alive "$@" || exit $? ;;
 state_dir) _sbx_mf_state_dir "$@" || exit $? ;;
 run_dir) _sbx_mf_run_dir "$@" || exit $? ;;
 locate) _sbx_mf_locate "$@" || exit $? ;;
+addr_bindable) _sbx_mf_addr_bindable "$@" || exit $? ;;
+resolve_parent) _sbx_mf_resolve_parent "$@" || exit $? ;;
 require_binaries) _sbx_mf_require_binaries "$@" || exit $? ;;
 # install_hint: print the squid install hint. FAKE_NO_PKG_MANAGER=1 stubs
 # detect_pkg_manager empty so the no-manager fallback arm is drivable on a CI
