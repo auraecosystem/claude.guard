@@ -450,7 +450,7 @@ def test_teardown_removes_sandbox(tmp_path):
     )
     r = _run(LAUNCH, "teardown", "cg-x-repo", path_prefix=stub)
     assert r.returncode == 0, r.stderr
-    assert "rm cg-x-repo" in log.read_text()
+    assert "rm --force cg-x-repo" in log.read_text()
 
 
 def test_teardown_fails_loud_on_leak(tmp_path):
@@ -689,9 +689,84 @@ def test_delegate_forwards_args_into_session_kit(tmp_path):
     body = log.read_text()
     # create/run point at a synthesized session kit under the state dir…
     assert "create --kit " in body and "/session-kit." in body
-    assert "run --kit " in body
+    assert "run --name " in body
     # …whose spec preserves the baked entrypoint and appends the forwarded arg.
     assert '"/usr/local/bin/agent-entrypoint.sh", "--resume"]' in body
+
+
+def _grammar_enforcing_sbx(log: Path) -> str:
+    """A fake sbx that enforces the v0.34.0 `create [flags] AGENT PATH` grammar:
+    it logs argv, then on `create` requires a leading AGENT positional followed by
+    a workspace PATH, and — when --kit is given — that AGENT equals the kit spec's
+    `name:` field (exactly what real sbx does). It exits nonzero (like real sbx)
+    otherwise. The pre-0.34 launcher passed the sandbox base as the sole positional
+    (parsed as an unknown agent, no PATH), so this stub fails that shape's create."""
+    return (
+        "#!/bin/bash\n"
+        f'echo "$@" >>"{log}"\n'
+        'if [ "$1" = create ]; then\n'
+        "  shift; kit=''; pos=()\n"
+        '  while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        '      --kit) kit="$2"; shift 2 ;;\n'
+        "      --name) shift 2 ;;\n"
+        "      --*) shift ;;\n"
+        '      *) pos+=("$1"); shift ;;\n'
+        "    esac\n"
+        "  done\n"
+        '  [ "${#pos[@]}" -ge 1 ] || { echo "agent is required" >&2; exit 2; }\n'
+        '  [ "${#pos[@]}" -ge 2 ] || { echo "workspace path is required" >&2; exit 2; }\n'
+        '  if [ -n "$kit" ]; then\n'
+        "    want=$(awk '/^name:/{print $2; exit}' \"$kit/spec.yaml\")\n"
+        '    [ "${pos[0]}" = "$want" ] || { echo "agent name \\"${pos[0]}\\" does not match agent kit name \\"$want\\"" >&2; exit 2; }\n'
+        "  fi\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def test_delegate_create_uses_v034_agent_path_grammar(tmp_path):
+    # Regression (sbx v0.34.0): create must be `--kit DIR --name N AGENT PATH`,
+    # where AGENT is the kit spec's name: and PATH is the workspace. The pre-fix
+    # shape passed the sandbox base as the sole positional — sbx parses that as an
+    # unknown agent with no workspace and aborts. The grammar-enforcing stub makes
+    # that shape fail the create (so delegate returns nonzero); the fixed shape
+    # passes. Teardown must also use `rm --force` (non-interactive removal).
+    log = tmp_path / "sbx.log"
+    docker = (
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  build) exit 0 ;;\n"
+        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
+        '         [ "$2" = save ] && exit 0 ;;\n'
+        "esac\nexit 0\n"
+    )
+    stub = _stub_bin(
+        tmp_path,
+        sbx=_grammar_enforcing_sbx(log),
+        docker=docker,
+        python3=SBX_SERVICES_PYTHON3_STUB,
+        darwin=True,
+    )
+    r = _run(
+        LAUNCH,
+        "delegate",
+        path_prefix=stub,
+        CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
+        SBX_MONITOR_PORT=str(free_port()),
+        SBX_AUDIT_SINK_PORT=str(free_port()),
+        CLAUDE_GUARD_SBX_ALLOW_FLATTENED="1",
+        XDG_STATE_HOME=str(tmp_path / "s"),
+        SBX_MONITOR_POLL_INTERVAL="0.05",
+    )
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    create = next(ln for ln in lines if ln.startswith("create --kit")).split()
+    # AGENT positional is the kit name; the workspace PATH (an absolute path) follows.
+    assert "claude-guard-agent" in create and create[-1].startswith("/")
+    # run re-attaches by the pinned name; teardown removes it with --force.
+    assert any(ln.startswith("run --name cg-") for ln in lines)
+    assert any(ln.startswith("rm --force cg-") for ln in lines)
 
 
 def test_delegate_forwards_args_after_privacy_flag(tmp_path):
@@ -904,7 +979,7 @@ def test_delegate_aborts_when_template_build_fails(tmp_path):
 
 def test_delegate_happy_path_runs_and_tears_down(tmp_path):
     # Darwin uname stub makes preflight pass on any host, so the full delegate
-    # body (build/load, services up, run --kit, services down, teardown) is
+    # body (build/load, services up, run --name, services down, teardown) is
     # exercised deterministically.
     log = tmp_path / "sbx.log"
     docker = (
@@ -932,8 +1007,8 @@ def test_delegate_happy_path_runs_and_tears_down(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     body = log.read_text()
-    assert "run --kit" in body
-    assert "rm cg-" in body
+    assert "run --name" in body
+    assert "rm --force cg-" in body
 
 
 def test_delegate_exit_at_handover_backgrounds_run_and_stops(tmp_path):
@@ -977,7 +1052,7 @@ def test_delegate_exit_at_handover_backgrounds_run_and_stops(tmp_path):
     # whether the stub logged its own line is a race we don't assert on; the
     # handover message above proves that branch ran.)
     body = log.read_text()
-    assert "rm cg-" in body
+    assert "rm --force cg-" in body
     # await_watchers gates the handover exit on the in-VM hardening watch, so both
     # previously-missing events have landed by the time the launch returns.
     events = trace.read_text()
@@ -1022,7 +1097,7 @@ def test_delegate_fails_closed_when_method_filter_cannot_start(tmp_path):
     assert r.returncode == 1
     body = log.read_text()
     assert "create --kit" not in body
-    assert "run --kit" not in body
+    assert "run --name" not in body
 
 
 def test_delegate_aborts_when_services_fail(tmp_path):
@@ -1052,7 +1127,7 @@ def test_delegate_aborts_when_services_fail(tmp_path):
     )
     assert r.returncode == 1
     assert "the audit sink exited before serving" in r.stderr
-    assert "run --kit" not in log.read_text()
+    assert "run --name" not in log.read_text()
 
 
 def test_delegate_surfaces_services_stop_failure_on_clean_session(tmp_path):
@@ -1128,9 +1203,9 @@ def test_delegate_privacy_flag_selects_variant_kit_and_venice_only_egress(tmp_pa
     assert any(
         ln.startswith("create --kit") and "/sbx-kit/kit-e2ee " in ln for ln in lines
     )
-    assert any(
-        ln.startswith("run --kit") and "/sbx-kit/kit-e2ee " in ln for ln in lines
-    )
+    # run re-attaches to the sandbox create made (agent + baked entrypoint read
+    # from its spec), so it carries only --name, not the kit path.
+    assert any(ln.startswith("run --name cg-") for ln in lines)
     grants = [ln for ln in lines if ln.startswith("policy allow network")]
     assert len(grants) == 1, grants
     assert grants[0].startswith("policy allow network api.venice.ai:443 --sandbox cg-")
@@ -1196,8 +1271,8 @@ def test_delegate_privacy_refuses_skip_firewall_and_tears_down(tmp_path):
     assert "refusing the combination" in r.stderr
     body = log.read_text()
     assert "policy allow network all" not in body
-    assert "run --kit" not in body
-    assert "rm cg-" in body
+    assert "run --name" not in body
+    assert "rm --force cg-" in body
 
 
 def test_delegate_aborts_when_create_fails(tmp_path):
@@ -1229,7 +1304,7 @@ def test_delegate_aborts_when_create_fails(tmp_path):
     )
     assert r.returncode == 1
     assert "could not create sandbox" in r.stderr
-    assert "run --kit" not in log.read_text()
+    assert "run --name" not in log.read_text()
 
 
 def test_delegate_surfaces_teardown_leak_on_clean_session(tmp_path):
@@ -1290,7 +1365,7 @@ def test_delegate_propagates_nonzero_session_exit(tmp_path):
         SBX_MONITOR_POLL_INTERVAL="0.05",
     )
     assert r.returncode == 7
-    assert "rm cg-" in log.read_text()
+    assert "rm --force cg-" in log.read_text()
 
 
 def test_delegate_signal_reaps_services_and_sandbox(tmp_path):
@@ -1373,9 +1448,11 @@ def test_signal_cleanup_reaps_and_reraises_deterministically(tmp_path):
     # signal (returncode -15); under the kcov wrapper the tracer intercepts the
     # child's signal death and exits 128+15 in its place.
     assert r.returncode in (-signal.SIGTERM, 128 + signal.SIGTERM), r.stderr
-    assert "rm cg-x-repo" in log.read_text()  # sbx_teardown ran (the name branch)
+    assert (
+        "rm --force cg-x-repo" in log.read_text()
+    )  # sbx_teardown ran (the name branch)
     assert not kit.exists()  # _sbx_session_kit_cleanup removed the kit dir
-    assert "rm cg-" in log.read_text()
+    assert "rm --force cg-" in log.read_text()
 
 
 # ── the wrapper dispatch (bin/claude-guard backend case) ──────────────────

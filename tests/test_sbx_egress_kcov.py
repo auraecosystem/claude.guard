@@ -705,7 +705,7 @@ def test_delegate_applies_policy_between_create_and_run(tmp_path):
     lines = log.read_text().splitlines()
     create_at = next(i for i, ln in enumerate(lines) if ln.startswith("create --kit"))
     grants = [i for i, ln in enumerate(lines) if ln.startswith("policy allow network")]
-    run_at = next(i for i, ln in enumerate(lines) if ln.startswith("run --kit"))
+    run_at = next(i for i, ln in enumerate(lines) if ln.startswith("run --name"))
     assert len(grants) == len(EXPECTED_RULES)
     assert create_at < grants[0] and grants[-1] < run_at
 
@@ -728,7 +728,7 @@ def test_delegate_fails_loud_when_create_fails(tmp_path):
     r = _run_delegate(tmp_path, stub)
     assert r.returncode == 1
     assert "could not create sandbox" in r.stderr
-    assert "run --kit" not in log.read_text()
+    assert "run --name" not in log.read_text()
 
 
 def test_delegate_tears_down_when_policy_apply_fails(tmp_path):
@@ -743,8 +743,8 @@ def test_delegate_tears_down_when_policy_apply_fails(tmp_path):
     assert r.returncode == 1
     assert "could not grant" in r.stderr
     body = log.read_text()
-    assert "rm cg-" in body
-    assert "run --kit" not in body
+    assert "rm --force cg-" in body
+    assert "run --name" not in body
 
 
 def test_teardown_archives_the_policy_log_before_removal(tmp_path):
@@ -770,7 +770,9 @@ def test_teardown_archives_the_policy_log_before_removal(tmp_path):
     snap = _only_snapshot(root / "cg-x-repo")
     assert snap.read_text() == '[{"host":"x","decision":"deny"}]\n'
     lines = log.read_text().splitlines()
-    assert lines.index("policy log cg-x-repo --json") < lines.index("rm cg-x-repo")
+    assert lines.index("policy log cg-x-repo --json") < lines.index(
+        "rm --force cg-x-repo"
+    )
 
 
 def test_teardown_warns_but_still_removes_when_archive_fails(tmp_path):
@@ -790,4 +792,4 @@ def test_teardown_warns_but_still_removes_when_archive_fails(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert "was not archived" in r.stderr
-    assert "rm cg-x-repo" in log.read_text()
+    assert "rm --force cg-x-repo" in log.read_text()
