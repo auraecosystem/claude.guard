@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Seed a user's personal Claude config overlay into the sandbox's user-tier ~/.claude.
 #
-# ALLOWLIST, never a mirror. Only additive capability config is copied — skills,
-# subagents, and slash commands. Credentials (.credentials.json), transcripts
-# (projects/), and Claude Code's own runtime state (.claude.json, sessions/,
-# history.jsonl, ...) are NEVER seeded from the overlay: a mirror would let the
-# overlay inject auth, forge a transcript the monitor reads, or clobber runtime
-# state. Anything in the overlay outside the allowlist is silently ignored.
+# ALLOWLIST, never a mirror. Only a user's own capability config is copied — skills,
+# subagents, slash commands, hooks, plugins, user-tier settings, and personal MCP
+# connectors (mcp.json, merged rather than copied). Credentials
+# (.credentials.json), transcripts (projects/), and Claude Code's own runtime state
+# (.claude.json, sessions/, history.jsonl, ...) are NEVER mirrored from the overlay —
+# the sole write into runtime state is the key-scoped mcpServers merge below: a
+# mirror would let the overlay inject auth, forge a transcript the monitor reads, or
+# clobber runtime state. Anything in the overlay outside the allowlist is silently
+# ignored. hooks/plugins/settings.json can weaken the user's own ask-tier prompts
+# (that is the opt-in), but they land in the user settings tier, BELOW the managed
+# guardrails — a managed deny rule, a managed security hook, and the firewall all
+# still apply.
 #
 # Copied content is made root-owned (when run as root — the hardener is) and
 # read-only, so it augments the agent's capabilities but the agent (uid node)
@@ -19,10 +25,13 @@ set -euo pipefail
 OVERLAY="${1:?usage: seed-user-overlay.sh <overlay-dir> <dest-dir>}"
 DEST="${2:?usage: seed-user-overlay.sh <overlay-dir> <dest-dir>}"
 
-# The COMPLETE set of subpaths an overlay may contribute. Adding a member here is the
-# only way to widen what a personal overlay can seed — keep it to additive, non-secret,
-# non-executable-state config so the allowlist stays the trust boundary it claims to be.
-ALLOWED=(skills agents commands)
+# The COMPLETE set of entries an overlay may contribute. Adding a member here is the
+# only way to widen what a personal overlay can seed — keep it to the user's own
+# non-secret config so credentials and transcripts stay unforgeable. Mirrored by
+# OVERLAY_ALLOWED_SUBPATHS in bin/lib/user-overlay.bash (host-side staging); this copy
+# is baked into the image, so tests pin the two lists identical instead of sharing a
+# file at runtime.
+ALLOWED=(skills agents commands hooks plugins settings.json mcp.json)
 
 # Absent overlay (compose binds /dev/null when unconfigured, so the path is a char
 # device, not a directory) — nothing to do, exactly like an unconfigured launch.
@@ -37,6 +46,9 @@ is_root=0
 
 seeded=()
 for sub in "${ALLOWED[@]}"; do
+  # mcp.json is merged into ~/.claude.json below, never copied through — Claude Code
+  # reads user-scope connectors only from .claude.json, so a copied file would be dead.
+  [[ "$sub" == mcp.json ]] && continue
   src="$OVERLAY/$sub"
   [[ -e "$src" ]] || continue
   dst="$DEST/$sub"
@@ -45,14 +57,46 @@ for sub in "${ALLOWED[@]}"; do
   [[ -e "$dst" ]] && chmod -R u+w "$dst"
   rm -rf "$dst"
   cp -a "$src" "$dst"
+  if [[ "$sub" == plugins ]]; then
+    # Plugin registrations record ABSOLUTE paths under the host's ~/.claude/plugins
+    # (marketplace installLocation, cache dirs). Inside the session those dangle, so
+    # Claude Code treats the marketplaces as missing and re-clones into the
+    # root-locked plugins dir — dying on Permission denied. Point them at the seeded
+    # copies instead. Scoped to the two registration files; plugin content is never
+    # modified. Idempotent: an already-rewritten prefix maps onto itself, so
+    # re-seeding a persisted volume is a no-op.
+    for reg in known_marketplaces.json installed_plugins.json; do
+      [[ -f "$dst/$reg" ]] || continue
+      sed -E 's|"[^"]*/\.claude/plugins/|"'"$DEST"'/plugins/|g' "$dst/$reg" >"$dst/$reg.rewrite"
+      mv "$dst/$reg.rewrite" "$dst/$reg"
+    done
+  fi
   # Root-own so the agent can't rewrite seeded config mid-session (skipped off-root so
   # the behavioral test can still exercise the copy allowlist without privilege).
   ((is_root)) && chown -R root:root "$dst"
-  # Directories traversable/readable, files readable — never writable by the agent.
-  find "$dst" -type d -exec chmod 555 {} +
-  find "$dst" -type f -exec chmod 444 {} +
+  # Everything readable, nothing writable by the agent; exec bits survive (X) because
+  # seeded hooks and plugin scripts must stay runnable — a blanket 444 would seed them
+  # unrunnable. Dirs land 555, executables 555, plain files 444.
+  chmod -R a+rX,a-w "$dst"
   seeded+=("$sub")
 done
+
+# Personal MCP connectors: an overlay mcp.json ({"mcpServers": {...}} — the same
+# shape as a project .mcp.json) is merged into the session's user-scope ~/.claude.json.
+# ONLY the .mcpServers key is read, so the overlay cannot set any other runtime state,
+# and an entry already in the session config wins on a name collision. The file stays
+# node-owned and writable — .claude.json is runtime state Claude Code keeps writing,
+# not locked guardrail config.
+if [[ -f "$OVERLAY/mcp.json" ]]; then
+  cfg="$DEST/.claude.json"
+  existing='{}'
+  [[ -f "$cfg" ]] && existing="$(cat "$cfg")"
+  jq --argjson add "$(jq '.mcpServers // {}' "$OVERLAY/mcp.json")" \
+    '.mcpServers = ($add + (.mcpServers // {}))' <<<"$existing" >"$cfg.seed-tmp"
+  mv "$cfg.seed-tmp" "$cfg"
+  ((is_root)) && chown node:node "$cfg"
+  seeded+=(mcp.json)
+fi
 
 if ((${#seeded[@]})); then
   printf 'seed-user-overlay: seeded %s\n' "${seeded[*]}" >&2

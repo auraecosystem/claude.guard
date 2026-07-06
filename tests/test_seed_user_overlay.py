@@ -1,14 +1,17 @@
 """Behavioral tests for .devcontainer/seed-user-overlay.sh.
 
-The overlay is an ALLOWLIST, never a mirror: only additive capability config
-(skills/agents/commands) may be seeded from a user's personal config dir into the
-sandbox's user-tier ~/.claude. Credentials, transcripts (projects/), and Claude
-Code's own runtime state must NEVER be copied — a mirror would let the overlay
-inject auth, forge a transcript the monitor reads, or clobber runtime state. These
-tests pin that boundary; they fail red against a naive `cp -a overlay/. dest/`.
+The overlay is an ALLOWLIST, never a mirror: only a user's own capability config
+(skills/agents/commands/hooks/plugins/settings.json/mcp.json) may be seeded from a
+personal config dir into the sandbox's user-tier ~/.claude. Credentials, transcripts
+(projects/), and Claude Code's own runtime state must NEVER be copied — a mirror
+would let the overlay inject auth, forge a transcript the monitor reads, or clobber
+runtime state. These tests pin that boundary; they fail red against a naive
+`cp -a overlay/. dest/`.
 """
 
+import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -16,11 +19,14 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / ".devcontainer" / "seed-user-overlay.sh"
+REPO = Path(__file__).resolve().parent.parent
+SCRIPT = REPO / ".devcontainer" / "seed-user-overlay.sh"
+RESOLVER = REPO / "bin" / "lib" / "user-overlay.bash"
 
 # The complete allowlist (SSOT mirror of ALLOWED in the script). Driven per-member so a
 # dropped case fails rather than silently going unverified.
-ALLOWED = ["skills", "agents", "commands"]
+ALLOWED_DIRS = ["skills", "agents", "commands", "hooks", "plugins"]
+ALLOWED = [*ALLOWED_DIRS, "settings.json", "mcp.json"]
 
 # Representative content that must NEVER be seeded, whatever else the overlay holds.
 EXCLUDED = [
@@ -29,8 +35,6 @@ EXCLUDED = [
     ".claude.json",  # Claude's own state blob
     "sessions",
     "history.jsonl",
-    "hooks",  # deferred: executable state, not in the v0 allowlist
-    "settings.json",  # deferred: settings-merge surface, not in the v0 allowlist
 ]
 
 
@@ -50,20 +54,18 @@ def _run(overlay: Path, dest: Path):
 
 def _populated_overlay(tmp_path: Path) -> Path:
     overlay = tmp_path / "overlay"
-    for sub in ALLOWED:
+    for sub in ALLOWED_DIRS:
         d = overlay / sub
         d.mkdir(parents=True)
         (d / f"{sub}-thing.md").write_text(f"# {sub}\n")
+    (overlay / "settings.json").write_text('{"env":{"FOO":"bar"}}\n')
     # Content that must be excluded.
     (overlay / "projects").mkdir(parents=True)
     (overlay / "projects" / "x.jsonl").write_text("{}\n")
     (overlay / "sessions").mkdir()
-    (overlay / "hooks").mkdir()
-    (overlay / "hooks" / "evil.sh").write_text("#!/bin/sh\necho pwned\n")
     (overlay / ".credentials.json").write_text('{"token":"secret"}\n')
     (overlay / ".claude.json").write_text('{"userID":"x"}\n')
     (overlay / "history.jsonl").write_text("{}\n")
-    (overlay / "settings.json").write_text('{"permissions":{"deny":[]}}\n')
     return overlay
 
 
@@ -73,7 +75,20 @@ def _dest(tmp_path: Path) -> Path:
     return dest
 
 
-@pytest.mark.parametrize("sub", ALLOWED)
+def _bash_array(script: Path, name: str) -> list[str]:
+    m = re.search(rf"^{name}=\(([^)]*)\)", script.read_text(), re.M)
+    assert m, f"{name}=(...) not found in {script}"
+    return m.group(1).split()
+
+
+def test_allowlists_stay_in_sync():
+    """The seeder is baked into the image while the resolver runs on the host, so the
+    two allowlists cannot share a file at runtime — pin them identical here instead."""
+    assert _bash_array(SCRIPT, "ALLOWED") == ALLOWED
+    assert _bash_array(RESOLVER, "OVERLAY_ALLOWED_SUBPATHS") == ALLOWED
+
+
+@pytest.mark.parametrize("sub", ALLOWED_DIRS)
 def test_allowlisted_subpath_is_seeded(tmp_path, sub):
     overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
     r = _run(overlay, dest)
@@ -83,23 +98,185 @@ def test_allowlisted_subpath_is_seeded(tmp_path, sub):
     assert copied.read_text() == f"# {sub}\n"
 
 
+def test_settings_json_is_seeded_read_only(tmp_path):
+    overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    copied = dest / "settings.json"
+    assert copied.read_text() == '{"env":{"FOO":"bar"}}\n'
+    assert stat.S_IMODE(copied.stat().st_mode) == 0o444
+
+
 @pytest.mark.parametrize("excluded", EXCLUDED)
 def test_excluded_entry_is_never_seeded(tmp_path, excluded):
     overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
     r = _run(overlay, dest)
     assert r.returncode == 0, r.stderr
-    assert not (dest / excluded).exists(), f"{excluded} must NOT be seeded from the overlay"
+    assert not (dest / excluded).exists(), (
+        f"{excluded} must NOT be seeded from the overlay"
+    )
 
 
 def test_seeded_content_is_read_only(tmp_path):
     overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
     assert _run(overlay, dest).returncode == 0
-    for sub in ALLOWED:
+    for sub in ALLOWED_DIRS:
         d = dest / sub
         assert stat.S_IMODE(d.stat().st_mode) == 0o555, f"{sub} dir should be 555"
         for f in d.iterdir():
             assert stat.S_IMODE(f.stat().st_mode) == 0o444, f"{f} should be 444"
-            assert not os.access(f, os.W_OK) or os.geteuid() == 0, f"{f} should not be writable"
+            assert not os.access(f, os.W_OK) or os.geteuid() == 0, (
+                f"{f} should not be writable"
+            )
+
+
+def test_plugin_registration_paths_are_rewritten_to_dest(tmp_path):
+    """known_marketplaces.json / installed_plugins.json record ABSOLUTE paths under the
+    host's ~/.claude/plugins (installLocation, cache dirs). Inside the session those
+    dangle, so Claude Code would re-clone marketplaces into the root-locked plugins dir
+    and die on Permission denied. The seeder points them at the seeded copies."""
+    overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
+    (overlay / "plugins" / "known_marketplaces.json").write_text(
+        '{"m":{"installLocation":"/Users/someone/.claude/plugins/marketplaces/m"}}\n'
+    )
+    (overlay / "plugins" / "installed_plugins.json").write_text(
+        '{"p":["/Users/someone/.claude/plugins/cache/m/p/1.0.0"]}\n'
+    )
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    assert (dest / "plugins" / "known_marketplaces.json").read_text() == (
+        f'{{"m":{{"installLocation":"{dest}/plugins/marketplaces/m"}}}}\n'
+    )
+    assert (dest / "plugins" / "installed_plugins.json").read_text() == (
+        f'{{"p":["{dest}/plugins/cache/m/p/1.0.0"]}}\n'
+    )
+
+
+def test_plugin_content_is_never_rewritten(tmp_path):
+    """The path rewrite is scoped to the two registration files — a plugin's own file
+    that happens to mention a host path arrives byte-identical."""
+    overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
+    body = '{"note":"/Users/someone/.claude/plugins/cache/x"}\n'
+    (overlay / "plugins" / "repos").mkdir()
+    (overlay / "plugins" / "repos" / "config.json").write_text(body)
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    assert (dest / "plugins" / "repos" / "config.json").read_text() == body
+
+
+def test_reseed_rewrites_registration_again(tmp_path):
+    """Re-seeding (CLAUDE_PERSIST volumes) replaces the seeded tree from the overlay,
+    so the rewrite must apply on every run, and be a no-op on already-rewritten
+    content."""
+    overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
+    reg = overlay / "plugins" / "known_marketplaces.json"
+    reg.write_text(
+        '{"m":{"installLocation":"/Users/someone/.claude/plugins/marketplaces/m"}}\n'
+    )
+    assert _run(overlay, dest).returncode == 0
+    assert _run(overlay, dest).returncode == 0
+    assert (dest / "plugins" / "known_marketplaces.json").read_text() == (
+        f'{{"m":{{"installLocation":"{dest}/plugins/marketplaces/m"}}}}\n'
+    )
+
+
+def test_executable_bit_survives_seeding(tmp_path):
+    """Hooks and plugins carry scripts the session must be able to EXECUTE; a blanket
+    444 would seed them unrunnable. Executables land 555 — read-only but still exec."""
+    overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
+    script = overlay / "hooks" / "on-stop.sh"
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    assert _run(overlay, dest).returncode == 0
+    seeded = dest / "hooks" / "on-stop.sh"
+    assert stat.S_IMODE(seeded.stat().st_mode) == 0o555, (
+        "exec bit must survive, write must not"
+    )
+
+
+def _overlay_with_mcp(tmp_path: Path, body: dict) -> tuple[Path, Path]:
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    (overlay / "mcp.json").write_text(json.dumps(body))
+    return overlay, _dest(tmp_path)
+
+
+def test_mcp_json_merges_connectors_into_user_scope_config(tmp_path):
+    """Claude Code reads user-scope connectors only from ~/.claude.json, so an overlay
+    mcp.json (same {"mcpServers": ...} shape as a project .mcp.json) is MERGED there,
+    not copied through as a dead ~/.claude/mcp.json file."""
+    overlay, dest = _overlay_with_mcp(
+        tmp_path,
+        {"mcpServers": {"mymem": {"type": "http", "url": "https://m.example/mcp"}}},
+    )
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    assert not (dest / "mcp.json").exists(), "mcp.json must merge, never copy through"
+    cfg = json.loads((dest / ".claude.json").read_text())
+    assert cfg["mcpServers"]["mymem"] == {
+        "type": "http",
+        "url": "https://m.example/mcp",
+    }
+    assert "mcp.json" in r.stderr  # declared in the seeded summary
+
+
+def test_mcp_merge_preserves_existing_config_and_existing_entries_win(tmp_path):
+    overlay, dest = _overlay_with_mcp(
+        tmp_path,
+        {"mcpServers": {"dupe": {"type": "http", "url": "https://overlay.example"}}},
+    )
+    (dest / ".claude.json").write_text(
+        json.dumps(
+            {
+                "hasCompletedOnboarding": True,
+                "mcpServers": {
+                    "dupe": {"type": "http", "url": "https://session.example"}
+                },
+            }
+        )
+    )
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    cfg = json.loads((dest / ".claude.json").read_text())
+    assert cfg["hasCompletedOnboarding"] is True, "existing runtime state must survive"
+    assert cfg["mcpServers"]["dupe"]["url"] == "https://session.example", (
+        "a session entry beats an overlay entry on name collision"
+    )
+
+
+def test_mcp_merge_reads_only_the_mcpservers_key(tmp_path):
+    """The merge must not become a general ~/.claude.json write channel: any key
+    other than mcpServers in the overlay's mcp.json is discarded."""
+    overlay, dest = _overlay_with_mcp(
+        tmp_path,
+        {
+            "mcpServers": {"m": {"type": "http", "url": "https://m.example"}},
+            "hasCompletedOnboarding": False,
+            "oauthAccount": {"evil": True},
+        },
+    )
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    cfg = json.loads((dest / ".claude.json").read_text())
+    assert set(cfg.keys()) == {"mcpServers"}
+
+
+def test_no_mcp_json_leaves_claude_json_untouched(tmp_path):
+    overlay, dest = _populated_overlay(tmp_path), _dest(tmp_path)
+    r = _run(overlay, dest)
+    assert r.returncode == 0, r.stderr
+    assert not (dest / ".claude.json").exists()
+
+
+def test_merged_claude_json_stays_writable(tmp_path):
+    """.claude.json is runtime state Claude Code must keep writing — the merge must
+    not sweep it into the read-only lockdown applied to copied entries."""
+    overlay, dest = _overlay_with_mcp(
+        tmp_path, {"mcpServers": {"m": {"type": "http", "url": "https://m.example"}}}
+    )
+    assert _run(overlay, dest).returncode == 0
+    mode = stat.S_IMODE((dest / ".claude.json").stat().st_mode)
+    assert mode & stat.S_IWUSR, ".claude.json must stay owner-writable"
 
 
 def test_absent_overlay_is_noop(tmp_path):
