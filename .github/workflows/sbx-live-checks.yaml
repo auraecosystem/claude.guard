@@ -16,25 +16,29 @@ name: sbx live checks
 #   trace engagement     — `claude-guard trace --self-test --mode sbx`: a real
 #     sbx launch must hold the sbx mode's engagement boundary from
 #     config/trace-events.json (every expect_on event fired, every expect_off
-#     absent). trace-engagement.yaml intentionally omits the sbx mode because
-#     ubuntu-latest exposes no /dev/kvm; this is where it runs for real.
+#     absent). This is the sbx mode trace-engagement.yaml omits because it does
+#     not install/authenticate sbx; here it runs for real.
 #
 # ── Why this is a self-skipping scaffold, not yet a required check ──
-# The sbx backend needs BOTH hardware virtualization (/dev/kvm) AND a runner
-# with `sbx login` already done — a combination no hosted GitHub runner offers.
-# So the heavy job is gated on the repo variable `SBX_KVM_RUNNER`: it fires ONLY
-# when an admin sets that variable to a self-hosted runner label that exposes
-# KVM and has sbx authenticated. Until then the work job is skipped and the
-# reporter passes on skip (treat-skipped-as-success) — a clean self-skip, NOT a
-# hanging "Expected — Waiting" and NOT a false green claiming isolation was
-# verified. The reporter is therefore `required-check: false`; flip it to true
-# (and set the runner variable) once the org has such a runner, and
-# sync-required-checks.yaml registers it.
+# The sbx backend needs BOTH hardware virtualization (/dev/kvm) AND an
+# authenticated Docker session (`sbx login`). The hosted amd64 runner
+# (ubuntu-latest) already exposes /dev/kvm — the same device the Kata job boots
+# Firecracker on — so the only missing half is auth, which sbx-live-setup.sh
+# supplies non-interactively from a read-only Docker access token. The heavy job
+# is therefore gated on the repo variable `DOCKER_USER` being set (secrets can't
+# be read in a job `if:`, so the username variable is the on-switch; the
+# DOCKER_GH_CI_PAT secret is consumed inside the setup step). With DOCKER_USER
+# unset the work job is skipped and the reporter passes on skip
+# (treat-skipped-as-success) — a clean self-skip, NOT a hanging "Expected —
+# Waiting" and NOT a false green claiming isolation was verified. The reporter
+# stays `required-check: false` until a live run has been observed green with the
+# org's credentials; flip it to true then, and sync-required-checks.yaml
+# registers it.
 #
 # "sbx live checks" carries NO paths: filter on the pull_request trigger (so it
 # always reports and never hangs a would-be required check); the expensive job
-# is gated at the job level by decide + the runner variable, and the reporter
-# always reports. See decide-reusable.yaml / CLAUDE.md.
+# is gated at the job level by decide + the DOCKER_USER variable, and the
+# reporter always reports. See decide-reusable.yaml / CLAUDE.md.
 
 on:
   pull_request:
@@ -52,6 +56,7 @@ on:
       - bin/lib/sbx-*.bash
       - config/trace-events.json
       - .github/scripts/sbx-live-require-kvm.sh
+      - .github/scripts/sbx-live-setup.sh
       - .github/workflows/sbx-live-checks.yaml
 
 permissions:
@@ -74,35 +79,45 @@ jobs:
     name: Decide (sbx live checks)
     uses: ./.github/workflows/decide-reusable.yaml
     with:
-      paths-regex: '^(bin/check-sbx-egress\.bash|bin/check-sbx-lifecycle\.bash|bin/claude-guard$|bin/claude-guard-trace$|bin/lib/sbx-[a-z-]+\.bash|config/trace-events\.json|\.github/scripts/sbx-live-require-kvm\.sh|\.github/workflows/sbx-live-checks\.yaml)'
+      paths-regex: '^(bin/check-sbx-egress\.bash|bin/check-sbx-lifecycle\.bash|bin/claude-guard$|bin/claude-guard-trace$|bin/lib/sbx-[a-z-]+\.bash|config/trace-events\.json|\.github/scripts/sbx-live-(require-kvm|setup)\.sh|\.github/workflows/sbx-live-checks\.yaml)'
 
   live-run:
     name: sbx egress + lifecycle + trace engagement on KVM — run
     needs: decide
-    # Runs ONLY when an sbx-surface file changed AND an admin has pointed
-    # SBX_KVM_RUNNER at a KVM-capable, sbx-authenticated self-hosted runner.
-    # With the variable unset (the current org reality) the job is skipped and
-    # the reporter passes on skip — an honest self-skip, not a false green.
-    # The fork guard keeps the treat-skipped-as-success reporter honest: a fork
-    # PR (which can never reach a self-hosted runner) skips to green, while every
-    # same-repo/push event enters the job when the runner variable is set — the
-    # Option-A shape test_required_check_secret_gate_honesty enforces.
+    # Runs ONLY when an sbx-surface file changed AND the org has configured the
+    # Docker credentials the setup step needs — keyed on the DOCKER_USER variable
+    # because a job `if:` cannot read secrets (the DOCKER_GH_CI_PAT secret is
+    # consumed inside sbx-live-setup.sh). With DOCKER_USER unset the job is
+    # skipped and the reporter passes on skip — an honest self-skip, not a false
+    # green. The fork guard keeps that honest: a fork PR (which cannot read the
+    # secret) skips to green, while every same-repo/push event enters the job
+    # when the variable is set.
     if: >-
-      needs.decide.outputs.run == 'true' && vars.SBX_KVM_RUNNER != '' &&
+      needs.decide.outputs.run == 'true' && vars.DOCKER_USER != '' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ${{ vars.SBX_KVM_RUNNER }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      # Fail loud if the configured runner does not actually expose /dev/kvm:
-      # the sbx backend has no software fallback, so a KVM-less runner would
-      # otherwise report a green it cannot honestly claim.
+      # Fail loud if the runner does not actually expose /dev/kvm (and relax its
+      # perms so the runner user can open it): the sbx backend has no software
+      # fallback, so a KVM-less runner would otherwise report a green it cannot
+      # honestly claim. ubuntu-latest exposes KVM, so this is a guard, not a gate.
       - name: Require KVM (sbx isolation cannot be verified without it)
         run: bash .github/scripts/sbx-live-require-kvm.sh
+
+      # Install the sbx CLI and sign in non-interactively with the read-only
+      # Docker token. Credentials ride in via env (never argv); a missing one
+      # fails the step loud rather than skipping to a false green.
+      - name: Install sbx and sign in to Docker
+        env:
+          DOCKER_USER: ${{ vars.DOCKER_USER }}
+          DOCKER_PAT: ${{ secrets.DOCKER_GH_CI_PAT }}
+        run: bash .github/scripts/sbx-live-setup.sh
 
       # check-sbx-egress.bash covers BOTH the name-level egress policy (reach /
       # block / needle / method-filter) AND the containment backstop — its
@@ -115,21 +130,23 @@ jobs:
 
       # A real sbx launch must hold the sbx mode's engagement boundary from
       # config/trace-events.json (every expect_on fired, every expect_off
-      # absent). This is the mode trace-engagement.yaml omits for lack of KVM.
+      # absent). This is the mode trace-engagement.yaml omits for lack of sbx.
       - name: Trace engagement self-test (sbx mode)
         run: bin/claude-guard trace --self-test --mode sbx
 
-  # Reporter: always runs so the check always reports, whether or not the runner
-  # variable let the work job run. Register THIS job's name as the required
-  # check once SBX_KVM_RUNNER exists — not the -run variant above (a skipped
-  # conclusion is not always counted as passing by branch protection).
+  # Reporter: always runs so the check always reports, whether or not the
+  # DOCKER_USER variable let the work job run. Register THIS job's name as the
+  # required check once a live run has been observed green — not the -run variant
+  # above (a skipped conclusion is not always counted as passing by branch
+  # protection).
   live:
-    # Name is deliberately conditional: a green here means "verified live IF a KVM
-    # runner is configured, else self-skipped" — never an unconditional claim that
-    # sbx containment was verified. With SBX_KVM_RUNNER unset (or on a fork PR) the
-    # work job skips and this reports green as a clean self-skip, so the name must
-    # not let a reviewer read that green as "containment live-verified".
-    name: sbx live checks (verified only when a KVM runner is configured) # required-check: false  # no hosted KVM+sbx-login runner; fires only when vars.SBX_KVM_RUNNER is set on a self-hosted KVM host. Flip to true once such a runner exists.
+    # Name is deliberately conditional: a green here means "verified live IF the
+    # Docker credentials are configured, else self-skipped" — never an
+    # unconditional claim that sbx containment was verified. With DOCKER_USER
+    # unset (or on a fork PR) the work job skips and this reports green as a clean
+    # self-skip, so the name must not let a reviewer read that green as
+    # "containment live-verified".
+    name: sbx live checks (verified only when Docker Sandboxes login is configured) # required-check: false  # runs on ubuntu-latest once vars.DOCKER_USER + the DOCKER_GH_CI_PAT secret are set; flip to true after a live run is observed green with the org's credentials.
     needs: [decide, live-run]
     if: always()
     runs-on: ubuntu-latest
@@ -141,6 +158,6 @@ jobs:
         with:
           run: ${{ needs.decide.outputs.run }}
           result: ${{ needs.live-run.result }}
-          # A skipped work job means SBX_KVM_RUNNER is unset (no KVM+sbx runner
-          # in the org yet); that is a clean self-skip, not a check failure.
+          # A skipped work job means DOCKER_USER is unset (the org has not wired
+          # the Docker credentials yet); that is a clean self-skip, not a failure.
           treat-skipped-as-success: "true"
