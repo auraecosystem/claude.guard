@@ -22,8 +22,8 @@ from pathlib import Path
 from tests._helpers import run_capture, write_exe
 
 # Reuse the compose suite's panic scaffolding rather than re-pasting it: the
-# env-builder/snapshot-locator are backend-agnostic; only the CLI stub below
-# differs (sbx, not docker). The shared panic_sandbox fixture lives in conftest.py.
+# fixture/env-builder/snapshot-locator are backend-agnostic; only the CLI stub
+# below differs (sbx, not docker).
 from tests.test_claude_panic import (
     PANIC,
     _clean_env,
