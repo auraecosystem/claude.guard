@@ -296,6 +296,24 @@ def test_require_binaries_fails_loud_without_certgen(tmp_path):
     r = _run("require_binaries", path=_no_squid_path(stub))
     assert r.returncode == 1
     assert "security_file_certgen" in r.stderr
+    assert "cannot inspect read-only traffic" in r.stderr
+    # The remedy is the install command, never the flattened opt-out escape hatch.
+    assert "ALLOW_FLATTENED" not in r.stderr
+
+
+def test_install_hint_names_the_managers_install_command():
+    """With a package manager on PATH the hint is its exact install command."""
+    r = _run("install_hint")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("run '"), r.stdout
+    assert "(or re-run setup.bash)" in r.stdout
+
+
+def test_install_hint_without_a_manager_points_at_setup():
+    """No detected package manager: fall back to setup.bash / generic guidance."""
+    r = _run("install_hint", FAKE_NO_PKG_MANAGER="1")
+    assert r.returncode == 0, r.stderr
+    assert "re-run setup.bash, or install squid" in r.stdout
 
 
 def test_require_binaries_binds_both_when_present(tmp_path):

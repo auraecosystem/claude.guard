@@ -52,6 +52,21 @@ source "$_SBX_MF_REPO_ROOT/.devcontainer/squid-config.bash"
 source "$_SBX_MF_LIB_DIR/sbx-project-domains.bash"
 # shellcheck source=sbx-egress-quota.bash disable=SC1091
 source "$_SBX_MF_LIB_DIR/sbx-egress-quota.bash"
+# shellcheck source=pkg-install.bash disable=SC1091
+source "$_SBX_MF_LIB_DIR/pkg-install.bash"
+
+# _sbx_mf_install_hint — the ONE squid install action for this host (its
+# detected package manager), so a preflight failure names the fix instead of a
+# cross-platform menu the user has to pick from.
+_sbx_mf_install_hint() {
+  local pm
+  pm="$(detect_pkg_manager)"
+  if [[ -n "$pm" ]]; then
+    printf "run '%s' (or re-run setup.bash)" "$(pkg_install_cmd "$pm" "$(squid_pkg_name)")"
+  else
+    printf 're-run setup.bash, or install squid (with TLS inspection support) via your package manager'
+  fi
+}
 
 # _sbx_mf_default_bind — the Docker bridge gateway IP, the host address a sandbox
 # reaches the host on. Empty when it can't be discovered (no docker, no bridge),
@@ -170,7 +185,7 @@ _sbx_mf_locate() {
 # with an install hint. Sets _SBX_MF_SQUID and _SBX_MF_CERTGEN.
 _sbx_mf_require_binaries() {
   _SBX_MF_SQUID="$(_sbx_mf_locate squid /usr/sbin/squid /usr/local/sbin/squid)" || {
-    cg_error "the sbx read-only method-filter needs 'squid' (with ssl-bump) on the host, but it was not found. Install it (Debian/Ubuntu: 'apt-get install squid-openssl'; macOS: 'brew install squid') and relaunch, or set CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1 to run WITHOUT the read-only tier (all allowed domains become writable)."
+    cg_error "the sbx read-only method-filter needs 'squid' on the host, but it was not found — $(_sbx_mf_install_hint) and relaunch."
     return 1
   }
   # kcov-ignore-start  multi-line command substitution: kcov credits the whole $(...) to its closing line, leaving the opener uncovered though _sbx_mf_require_binaries is driven through both the certgen-found and certgen-missing paths in test_sbx_method_filter_kcov.py
@@ -180,7 +195,7 @@ _sbx_mf_require_binaries() {
     /usr/local/libexec/squid/security_file_certgen \
     /opt/homebrew/opt/squid/libexec/security_file_certgen)" || {
     # kcov-ignore-end
-    cg_error "found squid but not its 'security_file_certgen' ssl-bump helper — this squid build lacks ssl-bump support. Install an ssl-bump-enabled squid (Debian/Ubuntu: 'apt-get install squid-openssl') and relaunch, or set CLAUDE_GUARD_SBX_ALLOW_FLATTENED=1."
+    cg_error "found squid but not its 'security_file_certgen' helper, so this squid build cannot inspect read-only traffic — $(_sbx_mf_install_hint) and relaunch."
     return 1
   }
 }

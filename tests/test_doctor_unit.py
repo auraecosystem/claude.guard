@@ -614,14 +614,47 @@ def test_sbx_squid_missing_is_unprotected(monkeypatch) -> None:
     doctor, rows = _drive_sbx_backend(monkeypatch, squid="", certgen="")
     assert "MISSING" in rows["squid (method-filter)"]
     assert "security_file_certgen" not in rows
-    assert any("squid (with ssl-bump) not found" in u for u in doctor.unprotected)
+    assert any("squid not found" in u for u in doctor.unprotected)
+    # The remedy is the install, never the flattened opt-out escape hatch.
+    assert not any("ALLOW_FLATTENED" in u for u in doctor.unprotected)
 
 
 def test_sbx_certgen_missing_is_unprotected(monkeypatch) -> None:
     """squid present but its ssl-bump certgen helper missing: UNPROTECTED."""
     doctor, rows = _drive_sbx_backend(monkeypatch, certgen="")
     assert "MISSING" in rows["security_file_certgen"]
-    assert any("security_file_certgen ssl-bump helper" in u for u in doctor.unprotected)
+    assert any("cannot inspect read-only traffic" in u for u in doctor.unprotected)
+    assert not any("ALLOW_FLATTENED" in u for u in doctor.unprotected)
+
+
+def test_squid_install_hint_names_this_hosts_manager(monkeypatch) -> None:
+    """The hint carries the exact install command for the first detected manager
+    (probe order mirrors pkg-install.bash; apt's TLS-capable build is squid-openssl)."""
+    doctor = load_doctor()
+    for pm, expected_cmd in (
+        ("brew", "brew install squid"),
+        ("apt-get", "sudo apt-get install -y squid-openssl"),
+        ("dnf", "sudo dnf install -y squid"),
+        ("pacman", "sudo pacman -S --noconfirm squid"),
+        ("apk", "sudo apk add squid"),
+        ("zypper", "sudo zypper install -y squid"),
+    ):
+        monkeypatch.setattr(
+            doctor.shutil,
+            "which",
+            lambda cmd, pm=pm: f"/usr/bin/{cmd}" if cmd == pm else None,
+        )
+        assert (
+            doctor._squid_install_hint()
+            == f"run '{expected_cmd}' (or re-run setup.bash)"
+        )
+
+
+def test_squid_install_hint_without_a_manager_points_at_setup(monkeypatch) -> None:
+    """No known package manager on PATH: fall back to setup.bash guidance."""
+    doctor = load_doctor()
+    monkeypatch.setattr(doctor.shutil, "which", lambda _cmd: None)
+    assert "re-run setup.bash" in doctor._squid_install_hint()
 
 
 def test_sbx_openssl_missing_is_unprotected(monkeypatch) -> None:

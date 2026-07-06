@@ -422,6 +422,86 @@ def test_install_prewarm_interrupt_is_caught_setup_survives(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
+# prewarm_sbx_base_image — pulls the sbx kit's digest-pinned base image at setup
+# so the first launch skips the download. Best-effort under `set -euo pipefail`:
+# an unreadable pin or a failed pull must warn and let setup continue (DONE).
+# Uses the REAL _sbx_base_ref parser over a scratch Dockerfile so the slice
+# exercises the same FROM-pin contract launches rely on.
+# ---------------------------------------------------------------------------
+def _run_sbx_base_prewarm(
+    tmp_path: Path, *, dockerfile: str, inspect_rc: int, pull_rc: int = 0
+) -> subprocess.CompletedProcess[str]:
+    repo = tmp_path / "repo"
+    (repo / "bin" / "lib").mkdir(parents=True)
+    (repo / "sbx-kit" / "image").mkdir(parents=True)
+    for lib in ("sbx-image-verify.bash", "msg.bash"):
+        shutil.copy(REPO_ROOT / "bin" / "lib" / lib, repo / "bin" / "lib" / lib)
+    (repo / "sbx-kit" / "image" / "Dockerfile").write_text(dockerfile)
+    harness = (
+        "set -euo pipefail\n"
+        f'SCRIPT_DIR="{repo}"\n'
+        'warn(){ printf "WARN:%s\\n" "$1" >&2; }\n'
+        'run_quiet(){ shift; "$@"; }\n'
+        "docker(){\n"
+        f'  case "$1" in\n'
+        f"  image) return {inspect_rc} ;;\n"
+        f'  pull) printf "PULL:%s\\n" "$2"; return {pull_rc} ;;\n'
+        "  esac\n"
+        "}\n"
+        + slice_bash_function(SETUP, "prewarm_sbx_base_image")
+        + '\nprewarm_sbx_base_image\nprintf "DONE\\n"\n'
+    )
+    return run_capture([BASH, "-c", harness], env=dict(os.environ))
+
+
+def test_sbx_base_prewarm_pulls_the_pinned_from_ref(tmp_path: Path) -> None:
+    """Image absent locally → docker pull of exactly the Dockerfile's FROM ref."""
+    r = _run_sbx_base_prewarm(
+        tmp_path, dockerfile="FROM example/base@sha256:abc123\n", inspect_rc=1
+    )
+    assert r.returncode == 0, r.stderr
+    assert "PULL:example/base@sha256:abc123" in r.stdout, r.stdout
+    assert "DONE" in r.stdout, r.stdout
+    assert "WARN:" not in r.stderr, r.stderr
+
+
+def test_sbx_base_prewarm_skips_when_image_already_present(tmp_path: Path) -> None:
+    """Image already in the local store → no pull, no warning."""
+    r = _run_sbx_base_prewarm(
+        tmp_path, dockerfile="FROM example/base@sha256:abc123\n", inspect_rc=0
+    )
+    assert r.returncode == 0, r.stderr
+    assert "PULL:" not in r.stdout, r.stdout
+    assert "DONE" in r.stdout, r.stdout
+    assert "WARN:" not in r.stderr, r.stderr
+
+
+def test_sbx_base_prewarm_failed_pull_warns_but_does_not_abort(
+    tmp_path: Path,
+) -> None:
+    """A failed pull degrades to a warning under strict mode; setup continues."""
+    r = _run_sbx_base_prewarm(
+        tmp_path,
+        dockerfile="FROM example/base@sha256:abc123\n",
+        inspect_rc=1,
+        pull_rc=1,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "DONE" in r.stdout, r.stdout
+    assert "download failed" in r.stderr, r.stderr
+
+
+def test_sbx_base_prewarm_unreadable_pin_warns_and_skips(tmp_path: Path) -> None:
+    """A Dockerfile with no FROM line (corrupt checkout) warns and skips the pull
+    instead of aborting setup."""
+    r = _run_sbx_base_prewarm(tmp_path, dockerfile="# no FROM here\n", inspect_rc=1)
+    assert r.returncode == 0, r.stderr
+    assert "PULL:" not in r.stdout, r.stdout
+    assert "DONE" in r.stdout, r.stdout
+    assert "could not read the pinned sandbox base image" in r.stderr, r.stderr
+
+
+# ---------------------------------------------------------------------------
 # maybe_link_claude_alias — six scenarios
 # ---------------------------------------------------------------------------
 
@@ -1434,6 +1514,8 @@ def _make_minimal_repo(tmp_path: Path) -> Path:
         wait_for_docker_runtime(){ :; }
         repair_docker_cli_plugin(){ echo ok; }
         dig_pkg_name(){ echo dnsutils; }
+        squid_pkg_name(){ echo squid; }
+        squid_installed(){ return 0; }
         node_pkg_name(){ echo nodejs; }
         docker_pkg_name(){ echo docker.io; }
         cache_venice_trait(){ :; }
