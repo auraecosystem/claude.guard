@@ -240,10 +240,10 @@ _sbx_watcher_start_bridge() {
   # On (via both args) only when the project dir was created; sbx has no `docker cp`
   # sidecar mirror, so --transcript-sbx-sandbox is the sbx-native source.
   local transcript_args=()
-  [[ -n "${_SBX_WATCHER_TRANSCRIPT_PROJECT_DIR:-}" ]] && transcript_args=(
-    --transcript-project-dir "$_SBX_WATCHER_TRANSCRIPT_PROJECT_DIR"
-    --transcript-sbx-sandbox "$name"
-  )
+  if [[ -n "${_SBX_WATCHER_TRANSCRIPT_PROJECT_DIR:-}" ]]; then
+    transcript_args+=(--transcript-project-dir "$_SBX_WATCHER_TRANSCRIPT_PROJECT_DIR")
+    transcript_args+=(--transcript-sbx-sandbox "$name")
+  fi
   python3 "$_SBX_WATCHER_BRIDGE_REPO_ROOT/bin/claude-guard-watcher-bridge" \
     "${settings_args[@]}" --watch-dir "$_SBX_WATCHER_EVENT_DIR" \
     --response-dir "$_SBX_WATCHER_RESPONSE_DIR" \
