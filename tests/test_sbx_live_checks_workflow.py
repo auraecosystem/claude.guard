@@ -24,6 +24,7 @@ import fnmatch
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +54,17 @@ def _sbx_lib_files() -> list[str]:
     )
     assert libs, "expected bin/lib/sbx-*.bash files to exist"
     return libs
+
+
+def _check_sbx_files() -> list[str]:
+    """Every bin/check-sbx-*.bash live check on disk, repo-relative — the SSOT the
+    push glob and the decide regex must both cover."""
+    checks = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in (REPO_ROOT / "bin").glob("check-sbx-*.bash")
+    )
+    assert checks, "expected bin/check-sbx-*.bash live-check scripts to exist"
+    return checks
 
 
 def _doc() -> dict:
@@ -92,8 +104,7 @@ def test_push_trigger_is_path_scoped() -> None:
     hand-enumerated list that drifts) — see the consistency test below."""
     paths = _on()["push"]["paths"]
     for needed in (
-        "bin/check-sbx-egress.bash",
-        "bin/check-sbx-lifecycle.bash",
+        "bin/check-sbx-*.bash",
         "bin/lib/sbx-*.bash",
         "config/trace-events.json",
         ".github/scripts/sbx-live-require-kvm.sh",
@@ -119,6 +130,34 @@ def test_push_and_pr_triggers_cover_the_same_sbx_lib_surface() -> None:
         )
         assert regex.match(lib), (
             f"decide paths-regex does not match {lib!r} — the two triggers drifted"
+        )
+
+
+@pytest.mark.drift_guard(
+    "The two triggers are GitHub-native and in different syntaxes GitHub requires "
+    "in place — a `paths:` glob list on push and a single `paths-regex` string in "
+    "the decide job — so no generator emits both from one source. Both are already "
+    "collapsed to a glob/character-class over the check-sbx surface (not a "
+    "hand-enumerated list); this guard proves that shared glob actually covers "
+    "every on-disk bin/check-sbx-*.bash, the closest thing to an SSOT the two "
+    "GitHub trigger forms allow."
+)
+def test_push_and_pr_triggers_cover_the_same_check_sbx_surface() -> None:
+    """Same drift guard as the sbx-lib test, for the live checks: the push
+    `paths:` glob and the pull_request decide `paths-regex` must both match EVERY
+    bin/check-sbx-*.bash. A hand-enumerated push list would silently drop a
+    later-added check (e.g. a new containment probe) that the generic PR regex
+    still matched, so a main-branch push touching only that file would skip the
+    live run a PR would have triggered. Driving from the on-disk SSOT means a new
+    check-sbx-*.bash that falls out of either trigger fails here."""
+    push_paths = _on()["push"]["paths"]
+    regex = re.compile(_doc()["jobs"]["decide"]["with"]["paths-regex"])
+    for check in _check_sbx_files():
+        assert any(fnmatch.fnmatch(check, pat) for pat in push_paths), (
+            f"push paths filter does not cover {check!r} — the check-sbx glob drifted"
+        )
+        assert regex.match(check), (
+            f"decide paths-regex does not match {check!r} — the two triggers drifted"
         )
 
 
@@ -154,17 +193,25 @@ def test_work_job_forks_cannot_reach_the_secret() -> None:
     ), "work job must carry the same-repo fork guard so fork PRs self-skip"
 
 
-def test_work_job_requires_kvm_installs_sbx_and_runs_all_three_checks() -> None:
-    """The work job fails loud without /dev/kvm, installs+authenticates sbx, and
-    drives the three live checks: egress+containment, lifecycle, and the sbx-mode
-    trace self-test."""
+def test_work_job_requires_kvm_installs_sbx_and_runs_every_live_check() -> None:
+    """The work job fails loud without /dev/kvm, installs+authenticates sbx, then
+    drives EVERY deterministic live check by ITERATING the on-disk SSOT
+    (bin/check-sbx-*.bash) so a newly added check runs with no workflow edit, plus
+    the sbx-mode trace self-test. Asserting the glob-loop (not a per-file step)
+    guards that the workflow stays SSOT-driven: a regression back to a
+    hand-enumerated list that dropped a check would remove the loop and fail
+    here."""
     steps = _doc()["jobs"]["live-run"]["steps"]
-    runs = " \n".join(s.get("run", "") for s in steps)
-    assert ".github/scripts/sbx-live-require-kvm.sh" in runs, "missing KVM guard"
-    assert ".github/scripts/sbx-live-setup.sh" in runs, "missing sbx install+login"
-    assert "bin/check-sbx-egress.bash" in runs, "missing egress+containment check"
-    assert "bin/check-sbx-lifecycle.bash" in runs, "missing lifecycle check"
-    assert "trace --self-test --mode sbx" in runs, "missing sbx trace self-test"
+    runs = [s.get("run", "") for s in steps]
+    joined = " \n".join(runs)
+    assert ".github/scripts/sbx-live-require-kvm.sh" in joined, "missing KVM guard"
+    assert ".github/scripts/sbx-live-setup.sh" in joined, "missing sbx install+login"
+    loop = next(
+        (r for r in runs if "bin/check-sbx-*.bash" in r and "for check" in r), None
+    )
+    assert loop is not None, "live-run must iterate bin/check-sbx-*.bash in a loop"
+    assert 'bash "$check"' in loop, "the loop must execute each check with bash"
+    assert "trace --self-test --mode sbx" in joined, "missing sbx trace self-test"
 
 
 def test_setup_step_passes_credentials_via_env_not_argv() -> None:
