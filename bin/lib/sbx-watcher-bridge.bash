@@ -22,6 +22,16 @@
 # verdicts into another); this lib is purely the boundary relay plus the same
 # host-side supervision/teardown lifecycle the monitor and audit sink already use.
 #
+# One capability does NOT cross to sbx: live transcript bridging. On compose the
+# bridge pulls each session's transcript from the monitor sidecar with `docker cp`
+# (watcher_bridge_start's --transcript-* args), so host Watcher hooks resolve
+# transcript_path mid-session and the "Turn Review" panel fills in. sbx has no such
+# container — the monitor runs as a bare host process and the live transcript lives
+# in-VM, reachable only via `sbx exec`, which the bridge's docker-cp fetcher cannot
+# use — so this relay passes no transcript args and transcript-derived Watcher views
+# (Turn Review) stay empty on sbx. The approval gate and lifecycle-event forwarding
+# still cross the boundary and work fully.
+#
 # Trust position (SECURITY.md "Apollo Watcher bridge"): the in-VM agent is
 # root-capable before its entrypoint's privilege drop, so — like the monitor and
 # audit sink — the Watcher runs HOST-side, out of the VM's reach. Two properties
@@ -95,12 +105,18 @@ _sbx_watcher_pull() {
   while IFS= read -r fname; do
     _sbx_watcher_plain_name "$fname" || continue
     tmp="$host_dir/.$fname.$BASHPID.tmp"
-    if sbx exec "$name" head -c "$_SBX_WATCHER_MAX_BYTES" -- "$vm_dir/$fname" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-      mv -- "$tmp" "$host_dir/$fname"
-      sbx exec "$name" rm -f -- "$vm_dir/$fname" >/dev/null 2>&1 || true # allow-exit-suppress: the host copy is already published; a failed VM unlink just re-pulls an identical file next pass
-    else
-      rm -f -- "$tmp"
+    if ! sbx exec "$name" head -c "$_SBX_WATCHER_MAX_BYTES" -- "$vm_dir/$fname" >"$tmp" 2>/dev/null; then
+      rm -f -- "$tmp" # read failed (vanished, a directory, VM busy) — leave the VM file to retry next pass
+      continue
     fi
+    if [[ -s "$tmp" ]]; then
+      mv -- "$tmp" "$host_dir/$fname"
+    else
+      rm -f -- "$tmp" # a zero-byte VM file carries no request to relay
+    fi
+    # Consume the VM file whether it was published or empty, so an empty event does
+    # not re-list every pass. A failed unlink just re-pulls an identical file next pass.
+    sbx exec "$name" rm -f -- "$vm_dir/$fname" >/dev/null 2>&1 || true # allow-exit-suppress: the host copy is already published (or the file was empty); a failed VM unlink is retried next pass
   done < <(sbx exec "$name" ls -1 -- "$vm_dir" 2>/dev/null || true) # kcov-ignore-line  done < <(...) closing; kcov credits the while loop to its opening line, not done, and the ls probe runs in the <(...) subshell (test_pull_moves_valid_files_and_removes_them_from_the_vm drives the loop body)
   return 0                                                          # a `while read` ends non-zero at EOF; the pull itself always succeeds
 }
@@ -156,6 +172,21 @@ _sbx_watcher_relay_loop() {
   done
 }
 
+# _sbx_watcher_has_command_hook EVENT FILE... — true if any captured settings file
+# defines a command-type hook for EVENT (a `prompt` hook has no command to replay, so
+# it does not count). Surfaces the "no Stop hook → empty Turn Review" case loudly.
+_sbx_watcher_has_command_hook() {
+  local event="$1" f
+  shift
+  for f in "$@"; do
+    [[ -n "$f" && -f "$f" ]] || continue
+    jq -e --arg e "$event" \
+      '[(.hooks[$e] // [])[] | (.hooks // [])[] | select(.type=="command")] | length > 0' \
+      "$f" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 # _sbx_watcher_capture_hooks — copy the host's Watcher hooks (~/.claude/settings.json
 # and settings.local.json, the two Claude Code layers) into private temp files the
 # Python bridge replays, so a session torn down mid-flight cannot leave the bridge
@@ -176,6 +207,11 @@ _sbx_watcher_capture_hooks() {
     _SBX_WATCHER_HOOKS_LOCAL="$(mktemp)"
     cp "$local_settings" "$_SBX_WATCHER_HOOKS_LOCAL"
   fi
+  # The Stop hook is what populates Apollo's "Turn Review"; warn loudly when it is
+  # absent (the classic "Turn Review never fills in" symptom) instead of failing silent.
+  if ! _sbx_watcher_has_command_hook Stop "$_SBX_WATCHER_HOOKS" "$_SBX_WATCHER_HOOKS_LOCAL"; then
+    cg_warn "Apollo Watcher is enabled but your Claude settings define no Stop hook, so the Watcher \"Turn Review\" panel will stay empty. Update or reinstall your Watcher hooks to enable it."
+  fi
 }
 
 # _sbx_watcher_start_bridge — start the reused Python bridge polling the host event
@@ -188,6 +224,10 @@ _sbx_watcher_start_bridge() {
   local settings_args=(--settings "$_SBX_WATCHER_HOOKS")
   [[ -n "${_SBX_WATCHER_HOOKS_LOCAL:-}" ]] &&
     settings_args+=(--settings "$_SBX_WATCHER_HOOKS_LOCAL")
+  # No --transcript-* args: the bridge's transcript fetcher pulls the mirror with
+  # `docker cp` against a monitor CONTAINER, which sbx has none of (bare-process
+  # monitor, in-VM transcript) — passing the sandbox name would just `docker cp` a
+  # missing container. Transcript bridging stays off on sbx (see the file header).
   python3 "$_SBX_WATCHER_BRIDGE_REPO_ROOT/bin/claude-guard-watcher-bridge" \
     "${settings_args[@]}" --watch-dir "$_SBX_WATCHER_EVENT_DIR" \
     --response-dir "$_SBX_WATCHER_RESPONSE_DIR" \
