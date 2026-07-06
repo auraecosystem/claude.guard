@@ -4647,6 +4647,37 @@ def test_monitor_cost_line_shows_last_session_spend(tmp_path: Path) -> None:
     assert "monitor spend was $0.02 over 2 call(s)" in r.stderr
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("loc", ["pl_PL.UTF-8", "de_DE.UTF-8"])
+def test_monitor_cost_line_survives_comma_decimal_locale(
+    tmp_path: Path, loc: str
+) -> None:
+    """The cost line must be byte-identical under a comma-decimal locale: awk emits
+    period-decimal floats, and without the LC_ALL=C pin bash printf rejects "0.02"
+    as an invalid number under pl_PL/de_DE and garbles the line to $0,00. A runner
+    without the locale falls back to C (vacuously green here); the macOS
+    cross-platform leg ships both locales and goes red on the unpinned code."""
+    arch = tmp_path / "audit-arch"
+    _seed_audit_archive(arch, _COST_LOG)
+    script = (
+        f'source "{REPO_ROOT / "bin" / "lib" / "audit-archive.bash"}"\n'
+        f'source "{REPO_ROOT / "bin" / "lib" / "monitor-key.bash"}"\n'
+        "cg_info() { printf '%s\\n' \"$*\"; }\n"
+        "print_last_session_cost\n"
+    )
+    r = run_capture(
+        ["bash", "-c", script],
+        env={
+            "PATH": os.environ["PATH"],
+            "LC_ALL": loc,
+            "CLAUDE_AUDIT_ARCHIVE_DIR": str(arch),
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert "invalid number" not in r.stderr
+    assert r.stdout == "last session's monitor spend was $0.02 over 2 call(s).\n"
+
+
 def test_monitor_cost_line_silent_without_prior_archive(tmp_path: Path) -> None:
     """No archive root on disk → no cost line (covers the absent-dir guard); a
     first run must not print a noisy $0.00."""
