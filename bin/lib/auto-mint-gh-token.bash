@@ -276,14 +276,16 @@ auto_mint_gh_token() {
     local err_file expiry=""
     err_file="$(mktemp 2>/dev/null)" || err_file=""
     if ! minted=$("$bin" "${args[@]}" 2>"${err_file:-/dev/null}"); then
-      # Surface WHY the mint failed (GitHub's own message — e.g. a 422 when the
-      # current repo isn't one the App is installed on) instead of a bare "token
-      # failed": without it the user is left guessing, and `verify` reproduces
-      # the same repo scoping so its diagnosis matches this failure. The CLI's
-      # first stderr line carries the actionable reason.
+      # Surface WHY the mint failed (GitHub's own message — e.g. a 422 with the
+      # install link when the current repo's owner hasn't installed the App)
+      # instead of a bare "token failed": without it the user is left guessing,
+      # and `verify` reproduces the same repo/owner scoping so its diagnosis
+      # matches this failure. The CLI prints its whole multi-line message (the
+      # actionable hint spans several lines), so pass all of it through, not just
+      # the first line — clipping to line 1 drops the install-link guidance.
       local reason=""
       [[ -n "$err_file" ]] && {
-        IFS= read -r reason <"$err_file" 2>/dev/null || true
+        reason="$(cat "$err_file" 2>/dev/null || true)"
         rm -f "$err_file" 2>/dev/null || true
       }
       cg_warn "claude: warning — claude-github-app token failed${reason:+: $reason}; launching without GitHub access. Run 'claude-guard gh-app verify' to diagnose."

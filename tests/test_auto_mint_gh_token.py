@@ -909,6 +909,33 @@ def test_auto_mint_warning_surfaces_failure_reason(tmp_path: Path) -> None:
     assert "claude-github-app token failed" in r.stderr
 
 
+def test_auto_mint_warning_surfaces_multiline_hint(tmp_path: Path) -> None:
+    """The actionable guidance (install link, org-install hint) is on LATER lines
+    of the CLI's message, below the '422' status line. The warning must carry the
+    whole message, not just line 1 — clipping to the first line drops exactly the
+    fix-it link the user needs."""
+    bin_path = write_exe(
+        tmp_path / "claude-github-app",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "installation token request failed: 422 Unprocessable Entity" >&2\n'
+        'printf "%s\\n" "Install it on this owner: https://github.com/apps/x/installations/new" >&2\n'
+        "exit 1\n",
+    )
+    repo = _git_repo(tmp_path, "https://github.com/some-org/the-repo.git")
+    xdg = fake_github_app_dir(tmp_path)
+    r = _source(
+        f'auto_mint_gh_token "{bin_path}"',
+        cwd=repo,
+        env={
+            "PATH": current_path(),
+            "XDG_CONFIG_HOME": str(xdg),
+            "HOME": str(tmp_path),
+        },
+    )
+    assert r.returncode == 0, r.stderr  # non-fatal
+    assert "https://github.com/apps/x/installations/new" in r.stderr
+
+
 def test_gh_app_configured_true_with_installation_id(tmp_path: Path) -> None:
     xdg = fake_github_app_dir(tmp_path)
     r = _source(

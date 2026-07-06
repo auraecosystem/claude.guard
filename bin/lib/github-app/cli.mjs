@@ -924,9 +924,13 @@ async function main() {
 }
 
 main().catch((err) => {
-  // `err?.stack ?? err` branches (nullish/stackless throw) can't happen from
-  // our commands — every error they raise is an Error with a stack.
+  // Print the message, not the stack: every failure our commands raise is an
+  // operational one whose message IS the guidance (a 422 with the install link,
+  // a bad-flag explanation), and the launch path surfaces this text verbatim to
+  // the user. A stack trace would bury that guidance under frames — and clip it,
+  // since the caller reads only the pre-stack lines. The non-Error fallback
+  // can't happen from our code (we only ever throw Error).
   /* c8 ignore next */
-  stderr.write(String(err?.stack ?? err) + "\n");
+  stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
   exit(1);
 });
