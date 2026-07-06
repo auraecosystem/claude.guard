@@ -93,7 +93,13 @@ sbx_ensure_template || die "could not build/load the sbx kit image."
 cg_info "[2/10] creating a throwaway sandbox and applying the egress policy"
 base="$(sbx_session_base)"
 name="$(sbx_sandbox_name "$base")"
-sbx create --kit "$(sbx_kit_root)/kit" "$base" >/dev/null ||
+# The AGENT positional `sbx create --kit` requires must equal the kit's own
+# name: (a raw base name is rejected: "agent name … does not match agent kit
+# name"); --name pins the unique sandbox name so the trap's `sbx rm "$name"`
+# and every `sbx exec/policy "$name"` below match. Mirrors sbx_delegate and
+# bin/check-sbx-lifecycle.bash.
+agent_name="$(sbx_kit_agent_name "$(sbx_kit_root)/kit")"
+sbx create --kit "$(sbx_kit_root)/kit" --name "$name" "$agent_name" "$PWD" >/dev/null ||
   die "'sbx create' failed — is 'sbx login' done?"
 # Remove the throwaway sandbox on any exit. Inlined in the trap string rather
 # than a function so shellcheck's reachability pass doesn't false-flag a

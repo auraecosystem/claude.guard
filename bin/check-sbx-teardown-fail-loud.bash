@@ -72,9 +72,13 @@ fail_base="$(sbx_session_base)"
 FAIL_NAME="$(sbx_sandbox_name "$fail_base")"
 pass_base="$(sbx_session_base)"
 PASS_NAME="$(sbx_sandbox_name "$pass_base")"
-sbx create --kit "$(sbx_kit_root)/kit" "$fail_base" >/dev/null ||
+# AGENT positional must equal the kit's own name: (a base name is rejected);
+# --name pins each sandbox name so teardown / the trap's `sbx rm` match. Mirrors
+# sbx_delegate / bin/check-sbx-lifecycle.bash.
+agent_name="$(sbx_kit_agent_name "$(sbx_kit_root)/kit")"
+sbx create --kit "$(sbx_kit_root)/kit" --name "$FAIL_NAME" "$agent_name" "$PWD" >/dev/null ||
   die "'sbx create' failed for the fail-path sandbox — is 'sbx login' done?"
-sbx create --kit "$(sbx_kit_root)/kit" "$pass_base" >/dev/null ||
+sbx create --kit "$(sbx_kit_root)/kit" --name "$PASS_NAME" "$agent_name" "$PWD" >/dev/null ||
   die "'sbx create' failed for the pass-path sandbox — is 'sbx login' done?"
 # The FAIL-path sandbox is never removed by teardown (its rm is shadowed to fail),
 # so the EXIT trap force-removes both with the REAL CLI, leaving no residue even
