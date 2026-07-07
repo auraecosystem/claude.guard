@@ -460,6 +460,101 @@ def test_teardown_fails_loud_on_leak(tmp_path):
     assert "still on disk" in r.stderr
 
 
+# ── sbx-launch: sbx_clone_remote / sbx_clone_fetch ────────────────────────
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git in `repo` and return stripped stdout (raises on failure)."""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _seed_repo(repo: Path, content: str = "seed") -> str:
+    """A fresh repo with one commit; returns the commit sha."""
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text(content)
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", "c")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_clone_remote_derives_sandbox_prefixed_name():
+    r = _run(LAUNCH, "clone_remote", "cg-abcd-myrepo")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "sandbox-cg-abcd-myrepo\n"
+
+
+def test_clone_fetch_noop_without_remote(tmp_path):
+    # No sandbox-<name> remote (a bind-mode / non-clone session): fetch self-gates
+    # to a silent no-op rather than erroring.
+    host = tmp_path / "host"
+    _seed_repo(host)
+    r = run_capture(
+        [str(LAUNCH), "clone_fetch", "cg-x-host"], env={**os.environ}, cwd=str(host)
+    )
+    assert r.returncode == 0, r.stderr
+    assert "recovered" not in r.stderr
+    assert "could not fetch" not in r.stderr
+
+
+def test_clone_fetch_recovers_commits_and_prunes_remote(tmp_path):
+    # The in-VM repo (what sbx exposes as sandbox-<name>) carries a commit the
+    # host does not. clone_fetch must fetch it into refs/sandbox/<name>/*, making
+    # it reachable on the host, then drop the now-dead remote.
+    vm = tmp_path / "vm"
+    vm_head = _seed_repo(vm, content="in-vm")
+    host = tmp_path / "host"
+    _seed_repo(host)
+    name = "cg-x-host"
+    _git(host, "remote", "add", f"sandbox-{name}", str(vm))
+    # Before: the host cannot reach the in-VM commit.
+    assert (
+        subprocess.run(
+            ["git", "-C", str(host), "cat-file", "-e", f"{vm_head}^{{commit}}"]
+        ).returncode
+        != 0
+    )
+    r = run_capture(
+        [str(LAUNCH), "clone_fetch", name], env={**os.environ}, cwd=str(host)
+    )
+    assert r.returncode == 0, r.stderr
+    assert "recovered" in r.stderr
+    # After: reachable on the host, under the durable refs/sandbox/<name>/* ns…
+    assert (
+        subprocess.run(
+            ["git", "-C", str(host), "cat-file", "-e", f"{vm_head}^{{commit}}"]
+        ).returncode
+        == 0
+    )
+    refs = _git(host, "for-each-ref", "--format=%(refname)", f"refs/sandbox/{name}/")
+    assert refs, "no durable refs/sandbox/<name>/* ref was created"
+    # …and the dead remote is pruned.
+    assert f"sandbox-{name}" not in _git(host, "remote")
+
+
+def test_clone_fetch_warns_and_keeps_remote_on_fetch_failure(tmp_path):
+    # The remote exists but is unreachable (points at nothing): fetch fails, so
+    # clone_fetch warns loud, still returns 0 (never blocks teardown), and LEAVES
+    # the remote so a CLAUDE_PERSIST session can retry manually.
+    host = tmp_path / "host"
+    _seed_repo(host)
+    name = "cg-x-host"
+    _git(host, "remote", "add", f"sandbox-{name}", str(tmp_path / "does-not-exist"))
+    r = run_capture(
+        [str(LAUNCH), "clone_fetch", name], env={**os.environ}, cwd=str(host)
+    )
+    assert r.returncode == 0, r.stderr
+    assert "could not fetch" in r.stderr
+    assert f"sandbox-{name}" in _git(host, "remote")
+
+
 # ── sbx-launch: sbx_ensure_template ───────────────────────────────────────
 
 
@@ -1009,6 +1104,72 @@ def test_delegate_happy_path_runs_and_tears_down(tmp_path):
     body = log.read_text()
     assert "run --name" in body
     assert "rm --force cg-" in body
+
+
+def _clone_posture_stub(tmp_path):
+    """A logging sbx + docker + python3 stub for driving delegate's create/run
+    argv, returning (stub_dir, log_path)."""
+    log = tmp_path / "sbx.log"
+    docker = (
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  build) exit 0 ;;\n"
+        '  image) [ "$2" = inspect ] && { echo sha256:h; exit 0; }\n'
+        '         [ "$2" = save ] && exit 0 ;;\n'
+        "esac\nexit 0\n"
+    )
+    sbx = f'#!/bin/bash\necho "$@" >>"{log}"\nexit 0\n'
+    stub = _stub_bin(
+        tmp_path, sbx=sbx, docker=docker, python3=SBX_SERVICES_PYTHON3_STUB, darwin=True
+    )
+    return stub, log
+
+
+def test_delegate_clone_is_the_default_posture(tmp_path):
+    # A genuine session isolates the workspace by default: --clone is passed to
+    # BOTH `sbx create` and the `sbx run` that attaches the TUI, kept consistent.
+    stub, log = _clone_posture_stub(tmp_path)
+    r = _run(
+        LAUNCH,
+        "delegate",
+        path_prefix=stub,
+        CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
+        SBX_MONITOR_PORT=str(free_port()),
+        SBX_AUDIT_SINK_PORT=str(free_port()),
+        CLAUDE_GUARD_SBX_ALLOW_FLATTENED="1",
+        XDG_STATE_HOME=str(tmp_path / "s"),
+        SBX_MONITOR_POLL_INTERVAL="0.05",
+    )
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    create = next(ln for ln in lines if ln.startswith("create --kit"))
+    run = next(ln for ln in lines if ln.startswith("run --name"))
+    assert "--clone" in create, create
+    assert "--clone" in run, run
+
+
+def test_delegate_bind_env_opts_out_of_clone(tmp_path):
+    # CLAUDE_GUARD_SBX_BIND=1 restores the legacy write-through bind: NO --clone
+    # reaches create or run, so in-VM commits land on the host branch directly.
+    stub, log = _clone_posture_stub(tmp_path)
+    r = _run(
+        LAUNCH,
+        "delegate",
+        path_prefix=stub,
+        CLAUDE_GUARD_SANDBOX_BACKEND="sbx",
+        CLAUDE_GUARD_SBX_BIND="1",
+        SBX_MONITOR_PORT=str(free_port()),
+        SBX_AUDIT_SINK_PORT=str(free_port()),
+        CLAUDE_GUARD_SBX_ALLOW_FLATTENED="1",
+        XDG_STATE_HOME=str(tmp_path / "s"),
+        SBX_MONITOR_POLL_INTERVAL="0.05",
+    )
+    assert r.returncode == 0, r.stderr
+    lines = log.read_text().splitlines()
+    create = next(ln for ln in lines if ln.startswith("create --kit"))
+    run = next(ln for ln in lines if ln.startswith("run --name"))
+    assert "--clone" not in create, create
+    assert "--clone" not in run, run
 
 
 def test_delegate_exit_at_handover_backgrounds_run_and_stops(tmp_path):

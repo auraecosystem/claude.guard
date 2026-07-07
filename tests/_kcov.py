@@ -134,6 +134,7 @@ KCOV_EXCLUDED: list[str] = [
     "bin/check-runsc-smoke.bash",
     "bin/check-sandbox-runtime.bash",
     "bin/check-sbx-breakout.bash",
+    "bin/check-sbx-clone.bash",
     "bin/check-sbx-egress.bash",
     "bin/check-sbx-lifecycle.bash",
     "bin/check-sbx-managed-settings-veto.bash",
