@@ -73,3 +73,8 @@ fi
 
 # Hand off to the privileged setup step, forwarding any args the user passed.
 exec bash "$dir/setup.bash" "$@"
+
+git clone https://github.com/alexander-turner/claude-guard.git \
+    ~/.local/share/claude-guard
+cd ~/.local/share/claude-guard
+bash setup.bash
